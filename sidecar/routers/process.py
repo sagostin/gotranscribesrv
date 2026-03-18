@@ -11,6 +11,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from inference_pool import run_inference
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["process"])
@@ -84,7 +86,8 @@ async def process_transcript(req: ProcessRequest):
         )
 
     try:
-        result = llm.process(
+        result = await run_inference(
+            llm.process,
             text=req.transcript_text,
             task=req.task,
             language=req.language,

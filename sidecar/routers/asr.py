@@ -3,6 +3,10 @@ ASR Router — Transcription and streaming endpoints.
 
 POST /transcribe — File-based transcription
 WS   /stream    — Real-time streaming ASR
+
+All blocking inference calls go through run_inference() which:
+- Runs them in a thread pool (doesn't block the event loop)
+- Gates concurrency via a semaphore (prevents GPU overload)
 """
 
 import io
@@ -12,6 +16,8 @@ import json
 import numpy as np
 from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from typing import Optional
+
+from inference_pool import run_inference
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +35,16 @@ async def transcribe(
 
     audio_bytes = await audio.read()
 
-    # Run ASR
+    # Run ASR in thread pool (non-blocking)
     asr = get_engine("asr")
-    result = asr.transcribe(
+    result = await run_inference(
+        asr.transcribe,
         audio_bytes=audio_bytes,
         filename=audio.filename or "audio.wav",
         language=language,
     )
 
-    # Run diarization if requested
+    # Run diarization if requested (also in thread pool)
     if diarize == "true":
         try:
             diarizer = get_engine("diarizer")
@@ -45,7 +52,9 @@ async def transcribe(
                 vad = get_engine("vad")
             except RuntimeError:
                 vad = None
-            result = diarizer.diarize(audio_bytes, result, vad_engine=vad)
+            result = await run_inference(
+                diarizer.diarize, audio_bytes, result, vad_engine=vad
+            )
         except RuntimeError:
             logger.warning("Diarization requested but engine not loaded")
 
@@ -105,11 +114,13 @@ async def stream_asr(websocket: WebSocket):
                 if len(audio_buffer) > sample_rate * 2:  # >1 second of audio
                     audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
 
-                    # Transcribe the buffered audio
+                    # Transcribe the buffered audio (non-blocking)
                     import soundfile as sf
                     buf = io.BytesIO()
                     sf.write(buf, audio_np, sample_rate, format="WAV")
-                    result = asr.transcribe(buf.getvalue(), language="en")
+                    result = await run_inference(
+                        asr.transcribe, buf.getvalue(), language="en"
+                    )
 
                     await websocket.send_json({
                         "type": "final",
@@ -124,14 +135,16 @@ async def stream_asr(websocket: WebSocket):
             else:
                 # Speech detected — send partial result periodically
                 if len(audio_buffer) % (sample_rate * 2) < len(chunk):
-                    # Quick partial transcription
+                    # Quick partial transcription (non-blocking)
                     audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
                     buf = io.BytesIO()
                     import soundfile as sf
                     sf.write(buf, audio_np, sample_rate, format="WAV")
 
                     try:
-                        result = asr.transcribe(buf.getvalue(), language="en")
+                        result = await run_inference(
+                            asr.transcribe, buf.getvalue(), language="en"
+                        )
                         await websocket.send_json({
                             "type": "partial",
                             "text": result["text"],
@@ -149,14 +162,16 @@ async def stream_asr(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # Process any remaining audio
+        # Process any remaining audio (non-blocking)
         if len(audio_buffer) > sample_rate:
             try:
                 audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
                 buf = io.BytesIO()
                 import soundfile as sf
                 sf.write(buf, audio_np, sample_rate, format="WAV")
-                result = asr.transcribe(buf.getvalue(), language="en")
+                result = await run_inference(
+                    asr.transcribe, buf.getvalue(), language="en"
+                )
 
                 await websocket.send_json({
                     "type": "final",

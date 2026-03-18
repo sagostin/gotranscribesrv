@@ -12,6 +12,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 
+from inference_pool import run_inference
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -41,8 +43,9 @@ async def synthesize(req: SynthesizeRequest):
         except Exception:
             logger.warning("Invalid base64 voice reference, using preset")
 
-    # Synthesize
-    audio_bytes, content_type = tts.synthesize(
+    # Synthesize in thread pool (non-blocking)
+    audio_bytes, content_type = await run_inference(
+        tts.synthesize,
         text=req.text,
         voice=req.voice,
         voice_ref=voice_ref_bytes,

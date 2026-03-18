@@ -50,12 +50,30 @@ class Diarizer:
 
     def _load_model(self):
         """Load NeMo's neural diarizer (Sortformer), with MPS acceleration if available."""
+        import os
+        from pathlib import Path
         from nemo.collections.asr.models import SortformerEncLabelModel
 
         logger.info("Loading Sortformer diarization model...")
-        self.model = SortformerEncLabelModel.from_pretrained(
-            model_name="nvidia/diar_sortformer_4spk-v1"
+
+        # NeMo's from_pretrained() always hits the network for HF Hub models,
+        # which fails when HF_HUB_OFFLINE=1.  If we're in offline mode, use
+        # restore_from() with the locally cached .nemo file instead.
+        cached_nemo = self._find_cached_nemo(
+            "models--nvidia--diar_sortformer_4spk-v1",
+            "diar_sortformer_4spk-v1.nemo",
         )
+
+        if cached_nemo:
+            logger.info(f"Loading Sortformer from cache: {cached_nemo}")
+            self.model = SortformerEncLabelModel.restore_from(
+                restore_path=str(cached_nemo),
+            )
+        else:
+            logger.info("Cached .nemo not found — downloading via from_pretrained")
+            self.model = SortformerEncLabelModel.from_pretrained(
+                model_name="nvidia/diar_sortformer_4spk-v1"
+            )
         self.model.eval()
 
         # Try to move to MPS (Apple Silicon GPU)
@@ -74,6 +92,39 @@ class Diarizer:
         else:
             self.device = "cpu"
             logger.info("Sortformer diarizer loaded on CPU")
+
+    # ── Cache helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _find_cached_nemo(repo_dir_name: str, filename: str):
+        """
+        Find a cached .nemo file in the HuggingFace Hub cache.
+
+        Searches: $HF_HUB_CACHE → $HF_HOME/hub → ~/.cache/huggingface/hub
+        Returns the Path if found, else None.
+        """
+        import os
+        from pathlib import Path
+
+        cache_dirs = []
+        if os.environ.get("HF_HUB_CACHE"):
+            cache_dirs.append(Path(os.environ["HF_HUB_CACHE"]))
+        if os.environ.get("HF_HOME"):
+            cache_dirs.append(Path(os.environ["HF_HOME"]) / "hub")
+        cache_dirs.append(Path.home() / ".cache" / "huggingface" / "hub")
+
+        for cache_dir in cache_dirs:
+            repo_dir = cache_dir / repo_dir_name
+            if not repo_dir.exists():
+                continue
+            # Look in snapshots/<hash>/<filename>
+            snapshots = repo_dir / "snapshots"
+            if snapshots.exists():
+                for snapshot in snapshots.iterdir():
+                    candidate = snapshot / filename
+                    if candidate.is_file():
+                        return candidate
+        return None
 
     # ── Public API ──────────────────────────────────────────────
 

@@ -101,23 +101,36 @@ class TTSEngine:
 
         start = time.perf_counter()
 
-        # Get reference audio for voice cloning
-        ref_audio = None
+        # Get reference audio for voice cloning.
+        # encode_prompt → process_audio → librosa.load() expects a file path
+        # or file-like object, NOT a raw numpy array.  We must wrap the audio
+        # data in a BytesIO WAV buffer so librosa can read it.
+        ref_audio_buf = None
         if voice_ref:
-            # Custom voice reference provided
-            ref_audio, _ = sf.read(io.BytesIO(voice_ref))
-            if len(ref_audio.shape) > 1:
-                ref_audio = ref_audio.mean(axis=1)
+            # Custom voice reference provided — read it, then re-wrap as WAV
+            audio_data, sr = sf.read(io.BytesIO(voice_ref))
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=1)
+            buf = io.BytesIO()
+            sf.write(buf, audio_data.astype(np.float32), sr, format="WAV")
+            buf.seek(0)
+            ref_audio_buf = buf
         elif voice in self.voice_cache:
-            ref_audio = self.voice_cache[voice]
+            buf = io.BytesIO()
+            sf.write(buf, self.voice_cache[voice], 24000, format="WAV")
+            buf.seek(0)
+            ref_audio_buf = buf
         elif "default" in self.voice_cache:
-            ref_audio = self.voice_cache["default"]
+            buf = io.BytesIO()
+            sf.write(buf, self.voice_cache["default"], 24000, format="WAV")
+            buf.seek(0)
+            ref_audio_buf = buf
 
         # Run TTS (LuxTTS is a two-step API: encode_prompt → generate_speech)
         try:
             encode_dict = None
-            if ref_audio is not None:
-                encode_dict = self.model.encode_prompt(ref_audio)
+            if ref_audio_buf is not None:
+                encode_dict = self.model.encode_prompt(ref_audio_buf)
 
             if encode_dict is None:
                 raise RuntimeError(

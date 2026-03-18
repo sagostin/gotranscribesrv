@@ -7,6 +7,7 @@ backend over localhost HTTP/WebSocket.
 """
 
 import logging
+import os
 import sys
 
 import uvicorn
@@ -38,6 +39,13 @@ async def lifespan(app: FastAPI):
     logger.info("Loading ML models...")
 
     settings = Settings()
+
+    # Offline mode: skip HuggingFace network checks (models must already be cached)
+    if settings.offline_mode:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        logger.info("Offline mode ON — using cached models only (no network)")
 
     # Load ASR engine (required — exit if this fails)
     try:
@@ -108,10 +116,16 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    from inference_pool import queue_info
+
     model_status = {}
     for name, engine in engines.items():
         model_status[name] = "loaded" if engine is not None else "not loaded"
-    return {"status": "ok", "models": model_status}
+    return {
+        "status": "ok",
+        "models": model_status,
+        "inference_pool": queue_info(),
+    }
 
 
 # Mount routers
@@ -130,10 +144,25 @@ def get_engine(name: str):
 
 if __name__ == "__main__":
     settings = Settings()
+    workers = settings.effective_workers
+
+    # reload mode doesn't support multiple workers
+    if settings.reload:
+        workers = 1
+
+    logger.info(f"Starting sidecar with {workers} worker(s) on port {settings.sidecar_port}")
+    if workers > 1:
+        logger.info(
+            f"  Each worker loads its own model copies (~4 GB each)."
+            f" Total model memory: ~{workers * 4} GB"
+        )
+
     uvicorn.run(
         "main:app",
         host=settings.host,
         port=settings.sidecar_port,
         log_level="info",
         reload=settings.reload,
+        workers=workers,
     )
+

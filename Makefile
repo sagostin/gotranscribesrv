@@ -38,6 +38,7 @@ sidecar: setup-luxtts
 	@echo ""
 	@echo "  🚀 Starting native Python sidecar (MPS acceleration)"
 	@echo "  ℹ  Listening on http://localhost:8100"
+	@echo "  ℹ  Workers: auto-detect (override with SIDECAR_WORKERS=N)"
 	@echo ""
 	cd sidecar && PYTHONPATH="$$(pwd)/LuxTTS:$$PYTHONPATH" $(abspath $(VENV_PY)) main.py
 
