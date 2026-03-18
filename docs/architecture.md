@@ -70,6 +70,49 @@ This keeps each component in the language where it's strongest, with the simples
 - WebSocket streams are connection-sticky by nature — no session affinity config required
 - Rate limiting is per-node, which is fine when each node handles ≤8 concurrent streams
 
+### Split Deployment (Recommended for Production)
+
+The Go API gateway and the Python inference sidecar don't need to run on the same machine. Since the sidecar is already accessed via `SIDECAR_URL` / `SIDECAR_WS_URL` environment variables, you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
+
+```
+                    ┌──────────────────────────────┐
+                    │  Standard Server / VPS / K8s  │
+                    │                               │
+                    │  Go API (:3000)               │
+                    │  Auth, Usage, Rate Limiting   │
+                    │  PostgreSQL (or external)     │
+                    └──────────┬────────────────────┘
+                               │
+                    ┌──────────▼────────────────────┐
+                    │  Caddy Reverse Proxy           │
+                    │  Load-balance + health check   │
+                    │  across Mac Mini sidecar pool  │
+                    └──────────┬────────────────────┘
+                 ┌─────────────┼─────────────┐
+                 ▼             ▼             ▼
+           ┌──────────┐ ┌──────────┐ ┌──────────┐
+           │Mac Mini 1│ │Mac Mini 2│ │Mac Mini 3│
+           │Python    │ │Python    │ │Python    │
+           │:8100     │ │:8100     │ │:8100     │
+           └──────────┘ └──────────┘ └──────────┘
+```
+
+**Why split?**
+- Macs become pure inference appliances — only run `make sidecar`, no Go, no Postgres
+- API layer runs on standard commodity infra (Docker, K8s, $5/mo VPS, etc.)
+- Scale API and inference independently
+- Caddy provides automatic health checks and failover across Mac pool
+
+**Config (Go server `.env`):**
+```bash
+SIDECAR_URL=https://inference.internal:443      # Caddy proxy to Mac pool
+SIDECAR_WS_URL=wss://inference.internal:443     # WebSocket via Caddy
+```
+
+**Note:** The Python sidecar must stay on Apple Silicon because `parakeet-mlx` (ASR engine) requires the MLX framework. Diarization, TTS, and VAD use standard PyTorch and could run on CUDA GPUs in the future.
+
+See the [Setup Guide](setup.md#split-deployment) for detailed configuration steps.
+
 ---
 
 ## Data Flow
@@ -266,12 +309,12 @@ CREATE INDEX idx_usage_user_created ON usage_log(user_id, created_at DESC);
 
 ## Scaling Strategy
 
-| Stage | Nodes | Infra Cost | Handles |
+| Stage | Nodes | Infra Cost (CAD) | Handles |
 |-------|-------|-----------|---------|
-| **Dev** | 1× M4 16GB | $500 | 3–5 streams, 0.6B model |
-| **Launch** | 1× M4 24GB | $700 | 5–8 streams, 1.1B model |
-| **Growth** | 3× M4 24GB + LB | $2,300 | 15–24 streams |
-| **Scale** | 5–10× M4 24GB + LB + dedicated PG | $4,200–$8,000 | 25–80 streams |
+| **Dev** | 1× M4 16GB | $700 | 3–5 streams, 0.6B model |
+| **Launch** | 1× M4 24GB | $950 | 5–8 streams, 1.1B model |
+| **Growth** | 3× M4 24GB + LB | $3,100 | 15–24 streams |
+| **Scale** | 5–10× M4 24GB + LB + dedicated PG | $5,700–$11,000 | 25–80 streams |
 
 **When to add nodes:** Monitor `process_time / audio_duration` ratio. If it exceeds 0.5 (model taking >50% of real-time to process), the node is saturated.
 

@@ -211,35 +211,114 @@ ML models are cached in a Docker volume (`model_cache` → `~/.cache/huggingface
 
 ## Multi-Node Deployment
 
-### On Each Mac Mini
+There are two approaches for multi-node deployments:
+- **Co-located** — Go + Python on every Mac Mini (simpler, all-in-one)
+- **Split** — Go API on normal server infra, Macs as pure inference nodes (recommended)
+
+### Option A: Co-Located (Go + Python on Every Mac)
+
+**On each Mac Mini:**
 
 1. Clone the repo and follow steps 2–5 above
 2. Point `DATABASE_URL` to the shared PostgreSQL host
 3. Use the **same `JWT_SECRET`** across all nodes
 
-### Load Balancer (Caddy Example)
+**Load Balancer (Caddy):**
 
-Install Caddy on the load balancer host:
-
-```bash
-brew install caddy
-```
-
-Create `Caddyfile`:
 ```
 transcribe.yourcompany.com {
     reverse_proxy {
         to mini1.local:3000 mini2.local:3000 mini3.local:3000
         lb_policy least_conn
-
         health_uri /health
         health_interval 10s
     }
 }
 ```
 
+---
+
+### Option B: Split Deployment (Recommended) {#split-deployment}
+
+Run the Go API gateway on your normal server infrastructure and keep Macs as dedicated inference nodes. No code changes — just config.
+
+#### 1. Mac Minis (Inference Only)
+
+Each Mac only runs the Python sidecar:
+
+```bash
+git clone https://github.com/yourorg/gotranscribesrv.git
+cd gotranscribesrv
+make setup       # Download models + voices
+make sidecar     # Starts FastAPI on :8100
+```
+
+Verify each Mac is serving:
+```bash
+curl http://mini1.local:8100/health
+# {"status": "ok", "models": {"asr": "loaded", ...}}
+```
+
+#### 2. Caddy Reverse Proxy (Inference Load Balancer)
+
+Install Caddy on a machine reachable by both the Go server and the Macs:
+
+```bash
+brew install caddy   # or apt install caddy
+```
+
+Create `Caddyfile`:
+
+```
+inference.internal {
+    reverse_proxy mini1.local:8100 mini2.local:8100 mini3.local:8100 {
+        lb_policy round_robin
+        health_uri /health
+        health_interval 10s
+    }
+}
+```
+
+Start Caddy:
 ```bash
 caddy run
+```
+
+Caddy automatically handles:
+- Load balancing across Mac pool
+- Health checks — removes unhealthy Macs from the pool
+- WebSocket proxying (for streaming ASR)
+- TLS (optional, automatic with a domain)
+
+#### 3. Go API Server (Normal Server Infra)
+
+Run the Go server anywhere — Docker, K8s, VPS, bare metal:
+
+```bash
+# .env on the Go server
+SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
+SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
+# Or with TLS:
+# SIDECAR_URL=https://inference.internal:443
+# SIDECAR_WS_URL=wss://inference.internal:443
+
+DATABASE_URL=postgres://user:pass@db-host:5432/transcribesrv?sslmode=disable
+JWT_SECRET=your-shared-secret
+```
+
+Start the server:
+```bash
+make dev   # or: docker compose up server db
+```
+
+#### Architecture Diagram
+
+```
+  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (:8100)
+              on VPS/K8s         ↗   → Mac Mini 2 (:8100)
+                           LB  ↗    → Mac Mini 3 (:8100)
+                    ↓
+              PostgreSQL
 ```
 
 WebSocket connections are automatically proxied and remain sticky to the connected node.

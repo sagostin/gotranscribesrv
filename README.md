@@ -48,6 +48,8 @@ Each node runs:
 - **Python (FastAPI)** — ML inference (Parakeet TDT via MLX, Sortformer diarization, LuxTTS)
 - Communication: HTTP/WebSocket on localhost (no gRPC overhead needed)
 
+**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. The sidecar URL is fully configurable via `SIDECAR_URL` / `SIDECAR_WS_URL` env vars — no code changes needed.
+
 See [docs/architecture.md](docs/architecture.md) for detailed design.
 
 ---
@@ -140,32 +142,32 @@ Full reference: [docs/api.md](docs/api.md)
 
 ### Hardware Costs (One-Time)
 
-| Config | Chip | RAM | Price | Concurrent Streams | Use Case |
+| Config | Chip | RAM | Price (CAD) | Concurrent Streams | Use Case |
 |--------|------|-----|-------|--------------------|----------|
-| **Dev/Staging** | M4 | 16 GB | ~$500 | 3–5 | Development, 0.6B model |
-| **Production Node** | M4 | 24 GB | ~$700 | 5–8 | 1.1B model + diarization |
-| **Power Node** | M4 Pro | 48 GB | ~$1,400 | 8–12 | Heavy workloads, all features |
+| **Dev/Staging** | M4 | 16 GB | ~$700 | 3–5 | Development, 0.6B model |
+| **Production Node** | M4 | 24 GB | ~$950 | 5–8 | 1.1B model + diarization |
+| **Power Node** | M4 Pro | 48 GB | ~$1,900 | 8–12 | Heavy workloads, all features |
 
 ### Cluster Scaling
 
-| Nodes | Est. Hardware | Concurrent Streams | File Transcriptions/sec | Monthly Power* |
+| Nodes | Est. Hardware (CAD) | Concurrent Streams | File Transcriptions/sec | Monthly Power* |
 |-------|-------------|-------------------|------------------------|----------------|
-| 1× M4 24GB | $700 | 5–8 | ~5–6 | ~$5 |
-| 3× M4 24GB | $2,100 | 15–24 | ~15–18 | ~$15 |
-| 5× M4 24GB | $3,500 | 25–40 | ~25–30 | ~$25 |
-| 10× M4 24GB | $7,000 | 50–80 | ~50–60 | ~$50 |
+| 1× M4 24GB | $950 | 5–8 | ~5–6 | ~$7 |
+| 3× M4 24GB | $2,850 | 15–24 | ~15–18 | ~$20 |
+| 5× M4 24GB | $4,750 | 25–40 | ~25–30 | ~$35 |
+| 10× M4 24GB | $9,500 | 50–80 | ~50–60 | ~$70 |
 
 *Mac Mini power consumption: ~15–30W under ML load
 
 ### Cost Comparison vs Cloud ASR
 
-| Provider | Per Audio Hour | 1,000 hrs/month | 10,000 hrs/month |
+| Provider | Per Audio Hour (CAD) | 1,000 hrs/month | 10,000 hrs/month |
 |----------|---------------|-----------------|------------------|
-| Google Speech-to-Text | $1.44 | $1,440 | $14,400 |
-| AWS Transcribe | $1.44 | $1,440 | $14,400 |
-| Azure Speech | $1.00 | $1,000 | $10,000 |
-| Deepgram | $0.75 | $750 | $7,500 |
-| **GoTranscribeSrv (3-node)** | **$0** | **$2,100 one-time + ~$15/mo** | **same** |
+| Google Speech-to-Text | $2.00 | $2,000 | $20,000 |
+| AWS Transcribe | $2.00 | $2,000 | $20,000 |
+| Azure Speech | $1.40 | $1,400 | $14,000 |
+| Deepgram | $1.05 | $1,050 | $10,500 |
+| **GoTranscribeSrv (3-node)** | **$0** | **$2,850 one-time + ~$20/mo** | **same** |
 
 A 3-node cluster pays for itself in **under 2 months** vs cloud pricing at 1,000 hrs/month.
 
