@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	fiberlogger "github.com/gofiber/fiber/v2/middleware/logger"
@@ -147,6 +148,35 @@ func main() {
 	auth.Post("/login", authHandler.Login)
 	auth.Post("/refresh", authHandler.Refresh)
 
+	// === WebSocket Routes (must be registered BEFORE the authed group,
+	// which has an empty prefix and would intercept upgrade requests) ===
+
+	// WebSocket ASR (streaming — native protocol)
+	wsHandler := handlers.NewWSHandler(sc)
+	app.Use("/ws/asr", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			slog.Info("WebSocket upgrade request", "path", "/ws/asr", "remote", c.IP())
+			return c.Next()
+		}
+		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
+			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
+		})
+	}, middleware.NewAuthMiddleware(authCfg))
+	app.Get("/ws/asr", wsHandler.Upgrade())
+
+	// Deepgram-compatible streaming
+	dgHandler := handlers.NewDeepgramHandler(sc)
+	app.Use("/v1/listen", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			slog.Info("Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())
+			return c.Next()
+		}
+		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
+			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
+		})
+	}, middleware.NewAuthMiddleware(authCfg))
+	app.Get("/v1/listen", dgHandler.Upgrade())
+
 	// === Authenticated Routes ===
 	authed := app.Group("",
 		middleware.NewAuthMiddleware(authCfg),
@@ -159,11 +189,6 @@ func main() {
 
 	// ASR
 	authed.Post("/api/v1/asr", asrHandler.TranscribeFile)
-
-	// WebSocket ASR (streaming)
-	wsHandler := handlers.NewWSHandler(sc)
-	app.Use("/ws/asr", middleware.NewAuthMiddleware(authCfg))
-	app.Get("/ws/asr", wsHandler.Upgrade())
 
 	// Whisper-compatible
 	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)

@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -67,6 +70,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	}
 
 	language := c.FormValue("language", "en")
+	stream := c.FormValue("stream") == "true"
 
 	// model field is accepted but ignored (always uses Parakeet TDT)
 	// temperature is accepted but ignored
@@ -91,9 +95,89 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	// Store metadata for usage tracking
 	c.Locals("audio_duration_ms", int(result.Duration*1000))
 
+	// SSE streaming mode (OpenAI-compatible)
+	if stream {
+		return streamWhisperResponse(c, result)
+	}
+
 	// Format response based on response_format
 	responseFormat := c.FormValue("response_format", "json")
 	return formatWhisperResponse(c, result, responseFormat)
+}
+
+// sseEvent represents a single Server-Sent Event payload.
+type sseEvent struct {
+	Type     string         `json:"type"`
+	Delta    string         `json:"delta,omitempty"`
+	Text     string         `json:"text,omitempty"`
+	Duration float64        `json:"duration,omitempty"`
+	Words    []sidecar.Word `json:"words,omitempty"`
+	Logprobs interface{}    `json:"logprobs"`
+}
+
+// streamWhisperResponse writes the transcript as OpenAI-compatible SSE events.
+// Events emitted:
+//   - transcript.text.delta  — one per segment, with incremental text
+//   - transcript.text.done   — final event with full text
+//   - data: [DONE]           — terminal sentinel
+func streamWhisperResponse(c *fiber.Ctx, result *sidecar.TranscribeResponse) error {
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		// Emit delta events — one per segment for incremental delivery
+		if len(result.Segments) > 0 {
+			for _, seg := range result.Segments {
+				delta := sseEvent{
+					Type:     "transcript.text.delta",
+					Delta:    seg.Text,
+					Logprobs: nil,
+				}
+				writeSSE(w, "transcript.text.delta", delta)
+				w.Flush()
+
+				// Brief delay between segments to simulate incremental delivery
+				time.Sleep(5 * time.Millisecond)
+			}
+		} else if result.Text != "" {
+			// No segments — fall back to single delta with full text
+			delta := sseEvent{
+				Type:     "transcript.text.delta",
+				Delta:    result.Text,
+				Logprobs: nil,
+			}
+			writeSSE(w, "transcript.text.delta", delta)
+			w.Flush()
+		}
+
+		// Emit done event with full transcript
+		done := sseEvent{
+			Type:     "transcript.text.done",
+			Text:     result.Text,
+			Duration: result.Duration,
+			Words:    result.Words,
+			Logprobs: nil,
+		}
+		writeSSE(w, "transcript.text.done", done)
+		w.Flush()
+
+		// Terminal sentinel (OpenAI convention)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.Flush()
+	})
+
+	return nil
+}
+
+// writeSSE writes a single SSE event to the writer.
+func writeSSE(w *bufio.Writer, event string, data interface{}) {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonBytes))
 }
 
 // formatWhisperResponse formats the transcript in the requested Whisper format.

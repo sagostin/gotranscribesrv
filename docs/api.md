@@ -167,6 +167,7 @@ Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs t
 | `language` | string | no | ISO-639-1 language code (default: `"en"`) |
 | `prompt` | string | no | Hint text (accepted for compatibility, best-effort) |
 | `response_format` | string | no | `"json"`, `"text"`, `"srt"`, `"vtt"`, `"verbose_json"` (default: `"json"`) |
+| `stream` | string | no | `"true"` to enable SSE streaming (see below) |
 | `temperature` | number | no | Accepted for compatibility (ignored) |
 | `timestamp_granularities[]` | array | no | `"word"` and/or `"segment"` (requires `verbose_json`) |
 
@@ -228,6 +229,45 @@ WEBVTT
 Hello, how are you doing today?
 ```
 
+#### Streaming Mode (`stream=true`)
+
+When `stream=true` is set, the response uses **Server-Sent Events (SSE)** instead of returning a single JSON body. This is compatible with the OpenAI `gpt-4o-transcribe` streaming API.
+
+**Headers:**
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+```
+
+**Events emitted:**
+
+1. **`transcript.text.delta`** — one per transcript segment, sent incrementally:
+```
+event: transcript.text.delta
+data: {"type":"transcript.text.delta","delta":"Hello, how are you doing today?","logprobs":null}
+```
+
+2. **`transcript.text.done`** — final event with the complete transcript:
+```
+event: transcript.text.done
+data: {"type":"transcript.text.done","text":"Hello, how are you doing today?","duration":1.8,"words":[{"word":"Hello","start":0.0,"end":0.4}],"logprobs":null}
+```
+
+3. **Terminal sentinel:**
+```
+data: [DONE]
+```
+
+**Example (curl):**
+```bash
+curl --no-buffer -X POST http://localhost:3000/v1/audio/transcriptions \
+  -H "X-API-Key: YOUR_KEY" \
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1" \
+  -F "stream=true"
+```
+
 > **Compatibility note:** The `model` field is required by the OpenAI spec, so clients will send it (e.g., `"whisper-1"`). GoTranscribeSrv accepts any value but always uses Parakeet TDT. Fields like `temperature` are accepted without error but have no effect.
 
 **Errors:** `413` file too large (>25 MB), `415` unsupported format
@@ -238,9 +278,10 @@ Hello, how are you doing today?
 
 Real-time streaming transcription over WebSocket.
 
-**Connection:** Upgrade with auth token as query param:
+**Connection:** Upgrade with auth token or API key as query param:
 ```
 ws://localhost:3000/ws/asr?token=<access_token>&language=en&diarize=false
+ws://localhost:3000/ws/asr?token=gtx_live_abc123&language=en
 ```
 
 **Client → Server:** Binary frames containing raw audio
@@ -285,6 +326,106 @@ Control messages:
 ```json
 {"action": "stop"}
 ```
+
+---
+
+### WS `/v1/listen` (Deepgram-Compatible)
+
+Drop-in replacement for the Deepgram Live Transcription API. Allows existing Deepgram SDKs and tools to stream audio to GoTranscribeSrv without code changes.
+
+**Connection:**
+```
+ws://localhost:3000/v1/listen?token=gtx_live_abc123&language=en
+ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
+```
+
+**Authentication:**
+- `Authorization: Token <api_key>` (Deepgram format)
+- `Authorization: Bearer <api_key>` (OpenAI format)
+- `?token=<api_key>` query param (browser/WebSocket clients)
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `language` | string | BCP-47 language code (default: `"en"`) |
+| `diarize` | string | `"true"` to enable speaker diarization |
+| `interim_results` | string | `"true"` to receive partial transcripts (default: `"true"`) |
+| `encoding` | string | Accepted for compatibility (ignored, expects PCM 16-bit) |
+| `sample_rate` | string | Accepted for compatibility (ignored, expects 16kHz) |
+| `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT) |
+| `punctuate` | string | Accepted for compatibility (ignored) |
+| `smart_format` | string | Accepted for compatibility (ignored) |
+| `utterance_end_ms` | string | Accepted for compatibility (best-effort) |
+
+**Client → Server:** Binary audio frames (PCM 16-bit, 16kHz, mono)
+
+**Client control messages:**
+```json
+{"type": "KeepAlive"}    // Keep connection alive during silence
+{"type": "CloseStream"}  // Gracefully end the session
+```
+
+**Server → Client:** JSON events
+
+**`Metadata`** (sent once on connection open):
+```json
+{
+  "type": "Metadata",
+  "request_id": "52cc0efe-fa77-4aa7-b79c-0dda09de2f14",
+  "created": "2026-03-18T00:00:00Z",
+  "duration": 0,
+  "channels": 1,
+  "model_info": {
+    "name": "parakeet-tdt-v3-coreml",
+    "version": "2026-03-01",
+    "arch": "parakeet-tdt"
+  }
+}
+```
+
+**`Results`** (interim transcript, `is_final: false`):
+```json
+{
+  "type": "Results",
+  "channel_index": [0, 1],
+  "duration": 0.5,
+  "start": 0.0,
+  "is_final": false,
+  "speech_final": false,
+  "channel": {
+    "alternatives": [{
+      "transcript": "hello how",
+      "confidence": 0.99,
+      "words": []
+    }]
+  }
+}
+```
+
+**`Results`** (final transcript, `is_final: true`):
+```json
+{
+  "type": "Results",
+  "channel_index": [0, 1],
+  "duration": 1.8,
+  "start": 0.0,
+  "is_final": true,
+  "speech_final": true,
+  "channel": {
+    "alternatives": [{
+      "transcript": "Hello, how are you doing today?",
+      "confidence": 0.99,
+      "words": [
+        {"word": "Hello", "start": 0.0, "end": 0.4, "confidence": 0.99, "punctuated_word": "Hello"},
+        {"word": "how", "start": 0.5, "end": 0.7, "confidence": 0.99, "punctuated_word": "how"}
+      ]
+    }]
+  }
+}
+```
+
+> **Compatibility note:** Fields like `encoding`, `sample_rate`, `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT.
 
 ---
 

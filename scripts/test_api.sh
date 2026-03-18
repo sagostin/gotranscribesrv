@@ -218,7 +218,47 @@ else
 fi
 
 echo ""
+
+# ── Test 7: Whisper SSE Streaming ──────────────────────────
+echo "── Test 7: Whisper SSE Streaming ────────────────────"
+info "Uploading with stream=true..."
+
+STREAM_RESULT=$(curl -s --no-buffer --max-time 300 \
+    -X POST "$API_HOST/v1/audio/transcriptions" \
+    -H "X-API-Key: $API_KEY" \
+    -F "file=@$AUDIO_FILE" \
+    -F "model=whisper-1" \
+    -F "stream=true" \
+    2>/dev/null || echo "")
+
+if echo "$STREAM_RESULT" | grep -q "transcript.text.delta"; then
+    ok "Received transcript.text.delta event"
+else
+    warn "Missing transcript.text.delta event"
+fi
+
+if echo "$STREAM_RESULT" | grep -q "transcript.text.done"; then
+    ok "Received transcript.text.done event"
+else
+    warn "Missing transcript.text.done event"
+fi
+
+if echo "$STREAM_RESULT" | grep -q "\[DONE\]"; then
+    ok "Received [DONE] sentinel"
+else
+    warn "Missing [DONE] sentinel"
+fi
+
+if [[ -n "$STREAM_RESULT" ]]; then
+    echo ""
+    echo "     SSE Output (first 500 chars):"
+    echo "$STREAM_RESULT" | head -c 500 | sed 's/^/     /'
+    echo ""
+fi
+
+echo ""
 echo "══════════════════════════════════════════════════════════"
 echo "  Smoke test complete"
 echo "══════════════════════════════════════════════════════════"
 echo ""
+

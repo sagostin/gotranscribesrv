@@ -24,16 +24,75 @@ type AuthConfig struct {
 }
 
 // NewAuthMiddleware creates the JWT authentication middleware.
-// It supports both Bearer token and X-API-Key header authentication.
+// It supports Bearer token, X-API-Key header, and query param authentication.
+// Query param auth (via ?token=...) is required for WebSocket connections where
+// custom headers cannot be set.
 func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// Check for API key first
+		// 1. Check for API key header (X-API-Key)
 		apiKey := c.Get("X-API-Key")
 		if apiKey != "" {
 			return authenticateAPIKey(c, cfg.DB, apiKey)
 		}
 
-		// Fall through to JWT
+		// 2. Check Authorization header:
+		//    - "Token <key>"  → Deepgram-compatible (always API key lookup)
+		//    - "Bearer <key>" → Try API key first, fall through to JWT
+		authHeader := c.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Token ") {
+			// Deepgram format — always authenticate as API key
+			tokenValue := strings.TrimPrefix(authHeader, "Token ")
+			return authenticateAPIKey(c, cfg.DB, tokenValue)
+		}
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			bearerValue := strings.TrimPrefix(authHeader, "Bearer ")
+			// Try as API key first (any key format, not just gtx_*)
+			if tryAuthenticateAPIKey(c, cfg.DB, bearerValue) {
+				return c.Next()
+			}
+			// Fall through — will be tried as JWT below
+		}
+
+		// 3. Check query param ?token=... (required for WebSocket, where headers
+		//    cannot be set from browser clients)
+		if qToken := c.Query("token"); qToken != "" {
+			// Try as API key first (any format)
+			if tryAuthenticateAPIKey(c, cfg.DB, qToken) {
+				return c.Next()
+			}
+			// Otherwise treat as JWT
+			claims, err := ParseToken(qToken, cfg.Secret)
+			if err != nil {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error": fiber.Map{
+						"code":    "UNAUTHORIZED",
+						"message": "Invalid or expired token",
+						"status":  401,
+					},
+				})
+			}
+			c.Locals("user_id", claims["sub"])
+			c.Locals("email", claims["email"])
+			c.Locals("tier", claims["tier"])
+			return c.Next()
+		}
+
+		// 4. Check Sec-WebSocket-Protocol header (Deepgram browser auth pattern:
+		//    client sets Sec-WebSocket-Protocol: token, <api_key>)
+		if swp := c.Get("Sec-WebSocket-Protocol"); swp != "" {
+			// Format: "token, <api_key>" — extract the key part
+			parts := strings.SplitN(swp, ",", 2)
+			if len(parts) == 2 {
+				apiKeyVal := strings.TrimSpace(parts[1])
+				if apiKeyVal != "" {
+					return authenticateAPIKey(c, cfg.DB, apiKeyVal)
+				}
+			}
+			// Single value — try as API key directly
+			return authenticateAPIKey(c, cfg.DB, strings.TrimSpace(swp))
+		}
+
+		// 4. Fall through to JWT from Authorization header
 		return jwtware.New(jwtware.Config{
 			SigningKey: jwtware.SigningKey{Key: []byte(cfg.Secret)},
 			ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -82,6 +141,29 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 	c.Locals("email", apiKey.User.Email)
 	c.Locals("tier", apiKey.User.Tier)
 	return c.Next()
+}
+
+// tryAuthenticateAPIKey checks if the raw key is a valid API key and sets
+// the user context if found. Returns true on success, false if not found.
+// Unlike authenticateAPIKey, this does NOT write a 401 response on failure,
+// allowing callers to fall through to other auth methods.
+func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) bool {
+	hash := sha256.Sum256([]byte(rawKey))
+	keyHash := hex.EncodeToString(hash[:])
+
+	var apiKey models.APIKey
+	result := db.Where("key_hash = ? AND active = true", keyHash).
+		Preload("User").
+		First(&apiKey)
+
+	if result.Error != nil {
+		return false
+	}
+
+	c.Locals("user_id", apiKey.UserID.String())
+	c.Locals("email", apiKey.User.Email)
+	c.Locals("tier", apiKey.User.Tier)
+	return true
 }
 
 // GenerateTokens creates a new JWT access/refresh token pair.
