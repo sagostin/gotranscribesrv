@@ -15,6 +15,7 @@ A Go/Fiber backend with a Python inference sidecar providing ASR (speech-to-text
 | **Whisper-Compatible API** | Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (NeMo Sortformer) |
 | **Text-to-Speech** | LuxTTS with zero-shot voice cloning, 48 kHz output, pre-built voice presets |
+| **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
 | **Rate Limiting** | Per-user, in-memory sliding window |
@@ -131,6 +132,8 @@ curl -X POST http://localhost:3000/api/v1/tts \
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `POST` | `/api/v1/tts` | Synthesize speech from text |
+| `POST` | `/api/v1/process` | LLM transcript processing (summarize, action items, etc.) |
+| `GET`  | `/api/v1/process/tasks` | List available LLM processing tasks |
 | `GET`  | `/api/v1/usage/summary` | Usage stats for current user |
 | `GET`  | `/api/v1/usage/history` | Detailed usage history |
 
@@ -145,8 +148,9 @@ Full reference: [docs/api.md](docs/api.md)
 | Config | Chip | RAM | Price (CAD) | Concurrent Streams | Use Case |
 |--------|------|-----|-------|--------------------|----------|
 | **Dev/Staging** | M4 | 16 GB | ~$700 | 3–5 | Development, 0.6B model |
-| **Production Node** | M4 | 24 GB | ~$950 | 5–8 | 1.1B model + diarization |
-| **Power Node** | M4 Pro | 48 GB | ~$1,900 | 8–12 | Heavy workloads, all features |
+| **Standard** | M4 | 24 GB | ~$950 | 5–8 | ASR + TTS + diarization |
+| **Recommended** | M4 | 32 GB | ~$1,150 | 5–8 | Full stack incl. LLM processing |
+| **Power Node** | M4 Pro | 48 GB | ~$1,900 | 8–12 | Heavy concurrent LLM + ASR |
 
 ### Cluster Scaling
 
@@ -218,6 +222,7 @@ gotranscribesrv/
 | Diarization | NeMo Sortformer + TitaNet |
 | VAD | Silero VAD |
 | TTS | [LuxTTS](https://github.com/ysharma3501/LuxTTS) — 48 kHz, zero-shot voice cloning |
+| LLM Processing | Llama 3.1 8B (4-bit) via [mlx-lm](https://github.com/ml-explore/mlx-examples) — opt-in |
 | Load Balancer | Caddy / Nginx (multi-node) |
 
 ---

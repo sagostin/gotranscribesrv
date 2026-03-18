@@ -30,3 +30,6 @@ websockets>=13.0
 # Utilities
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
+
+# LLM — local inference via MLX (optional, set ENABLE_LLM=true)
+mlx-lm>=0.20.0

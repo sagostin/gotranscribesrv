@@ -355,35 +355,12 @@ List available TTS voice presets.
 
 ## Speaker Diarization
 
-### POST `/api/v1/diarize`
+Speaker diarization is available as part of the ASR endpoint by setting `diarize=true`.
+See [`POST /api/v1/asr`](#post-apiv1asr) above.
 
-Standalone speaker detection without transcription. Returns speaker segments.
-
-**Request:** `multipart/form-data`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `audio` | file | yes | Audio file (WAV, MP3, FLAC, OGG, M4A) |
-
-**Response (200):**
-```json
-{
-  "speakers": {
-    "SPEAKER_00": [
-      {"start": 0.0, "end": 2.1},
-      {"start": 4.5, "end": 8.3}
-    ],
-    "SPEAKER_01": [
-      {"start": 2.3, "end": 4.4}
-    ]
-  },
-  "num_speakers": 2,
-  "duration": 8.3,
-  "processing_time_ms": 1250
-}
-```
-
-**Errors:** `413` file too large, `502` sidecar unavailable
+> **Note:** Standalone speaker detection (without transcription) is not supported.
+> The Sortformer diarizer requires transcript word/segment timestamps to produce
+> meaningful per-speaker results.
 
 ---
 

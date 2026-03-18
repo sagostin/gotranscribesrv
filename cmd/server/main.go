@@ -114,9 +114,9 @@ func main() {
 	asrHandler := handlers.NewASRHandler(sc)
 	whisperHandler := handlers.NewWhisperHandler(sc)
 	ttsHandler := handlers.NewTTSHandler(sc)
-	diarizeHandler := handlers.NewDiarizeHandler(sc)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
+	processHandler := handlers.NewProcessHandler(sc)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -168,9 +168,9 @@ func main() {
 	authed.Post("/api/v1/tts", ttsHandler.Synthesize)
 	authed.Get("/api/v1/voices", ttsHandler.ListVoices)
 
-	// Diarization (standalone speaker detection)
-	authed.Post("/api/v1/diarize", diarizeHandler.DetectSpeakers)
-
+	// LLM Transcript Processing
+	authed.Post("/api/v1/process", processHandler.Process)
+	authed.Get("/api/v1/process/tasks", processHandler.ListTasks)
 	// Usage
 	authed.Get("/api/v1/usage/summary", usageHandler.Summary)
 	authed.Get("/api/v1/usage/history", usageHandler.History)

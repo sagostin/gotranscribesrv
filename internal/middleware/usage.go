@@ -115,8 +115,6 @@ func classifyEndpoint(path string) string {
 		return "asr_stream"
 	case path == "/api/v1/tts":
 		return "tts"
-	case path == "/api/v1/diarize":
-		return "diarize"
 	default:
 		return ""
 	}

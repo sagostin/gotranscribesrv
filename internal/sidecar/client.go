@@ -149,60 +149,6 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	return &result, nil
 }
 
-// DiarizeResponse is the JSON speaker-detection result from the sidecar.
-type DiarizeResponse struct {
-	Speakers      map[string][]SpeakerSegment `json:"speakers"`
-	NumSpeakers   int                         `json:"num_speakers"`
-	Duration      float64                     `json:"duration"`
-	ProcessTimeMs int                         `json:"processing_time_ms"`
-}
-
-// SpeakerSegment is a time range where a speaker is talking.
-type SpeakerSegment struct {
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
-}
-
-// Diarize sends audio to the sidecar for standalone speaker detection.
-func (c *Client) Diarize(audio []byte, filename string) (*DiarizeResponse, error) {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	part, err := writer.CreateFormFile("audio", filename)
-	if err != nil {
-		return nil, fmt.Errorf("create form file: %w", err)
-	}
-	if _, err := part.Write(audio); err != nil {
-		return nil, fmt.Errorf("write audio data: %w", err)
-	}
-	writer.Close()
-
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/diarize", &buf)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
-
-	slog.Debug("sending diarization request to sidecar", "filename", filename, "size", len(audio))
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("sidecar request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result DiarizeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode diarization: %w", err)
-	}
-	return &result, nil
-}
-
 // Synthesize sends text to the sidecar for TTS and returns raw audio bytes.
 func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	body, err := json.Marshal(req)
@@ -269,6 +215,84 @@ func (c *Client) ListVoices() (*VoicesResponse, error) {
 	var result VoicesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode voices response: %w", err)
+	}
+	return &result, nil
+}
+
+// ProcessRequest is sent to the Python sidecar for LLM transcript processing.
+type ProcessRequest struct {
+	TranscriptText string  `json:"transcript_text"`
+	Task           string  `json:"task"`
+	Language       string  `json:"language,omitempty"`
+	Prompt         string  `json:"prompt,omitempty"`
+	MaxTokens      int     `json:"max_tokens"`
+	Temperature    float64 `json:"temperature"`
+}
+
+// ProcessResponse is the JSON result from LLM processing.
+type ProcessResponse struct {
+	Result          string `json:"result"`
+	Task            string `json:"task"`
+	Model           string `json:"model"`
+	ProcessTimeMs   int    `json:"processing_time_ms"`
+	TokensGenerated int    `json:"tokens_generated"`
+}
+
+// TasksResponse lists available LLM processing tasks.
+type TasksResponse struct {
+	Tasks        []string          `json:"tasks"`
+	Descriptions map[string]string `json:"descriptions"`
+}
+
+// Process sends transcript text to the sidecar for LLM processing.
+func (c *Client) Process(req ProcessRequest) (*ProcessResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.baseURL+"/process", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	slog.Debug("sending LLM process request to sidecar", "task", req.Task, "text_len", len(req.TranscriptText))
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	var result ProcessResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode process response: %w", err)
+	}
+	return &result, nil
+}
+
+// ListTasks fetches available LLM processing tasks from the sidecar.
+func (c *Client) ListTasks() (*TasksResponse, error) {
+	resp, err := c.httpClient.Get(c.baseURL + "/process/tasks")
+	if err != nil {
+		return nil, fmt.Errorf("sidecar tasks request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result TasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode tasks response: %w", err)
 	}
 	return &result, nil
 }

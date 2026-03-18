@@ -16,9 +16,9 @@ Pipeline:
 
 import io
 import logging
-import tempfile
+
 import time
-from pathlib import Path
+
 
 import numpy as np
 import soundfile as sf
@@ -112,17 +112,22 @@ class Diarizer:
                 logger.warning(f"VAD pre-filter failed (continuing without): {e}")
 
         # ── Step 2: Sortformer inference ────────────────────────
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            sf.write(tmp.name, audio_array, sample_rate)
-            tmp_path = tmp.name
+        # SortformerEncLabelModel.diarize() is not implemented in NeMo;
+        # use forward() directly with audio tensors.
+        audio_tensor = torch.tensor(audio_array, dtype=torch.float32).unsqueeze(0)  # [1, T]
+        audio_length = torch.tensor([audio_tensor.shape[1]], dtype=torch.long)
 
-        try:
-            diarization_result = self.model.diarize(
-                audio=[tmp_path],
-                batch_size=1,
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
+        audio_tensor = audio_tensor.to(self.device)
+        audio_length = audio_length.to(self.device)
+
+        with torch.no_grad():
+            preds = self.model.forward(
+                audio_signal=audio_tensor,
+                audio_signal_length=audio_length,
+            )  # [1, frames, num_speakers]
+
+        # preds is already a tensor the parser can handle
+        diarization_result = preds
 
         # ── Step 3: Parse diarization output ────────────────────
         speaker_segments = self._parse_diarization(diarization_result)

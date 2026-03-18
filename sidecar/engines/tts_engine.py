@@ -119,6 +119,13 @@ class TTSEngine:
             if ref_audio is not None:
                 encode_dict = self.model.encode_prompt(ref_audio)
 
+            if encode_dict is None:
+                raise RuntimeError(
+                    f"No voice reference available. Provide a voice_ref or "
+                    f"add a .wav preset to '{self.voices_dir}' "
+                    f"(available presets: {list(self.voice_cache.keys())})"
+                )
+
             wav_tensor = self.model.generate_speech(
                 text=text,
                 encode_dict=encode_dict,

@@ -181,33 +181,8 @@ fi
 
 echo ""
 
-# ── Test 5: Standalone Speaker Detection ─────────────────────
-echo "── Test 5: Speaker Detection (diarize-only) ──────"
-info "Uploading for speaker detection..."
-
-SPKR_RESULT=$(curl -s --max-time 300 -w "\n%{http_code}" \
-    -X POST "$API_HOST/api/v1/diarize" \
-    -H "X-API-Key: $API_KEY" \
-    -F "audio=@$AUDIO_FILE" \
-    2>/dev/null || echo -e "\n000")
-HTTP_CODE=$(echo "$SPKR_RESULT" | tail -1)
-BODY=$(echo "$SPKR_RESULT" | sed '$d')
-
-if [[ "$HTTP_CODE" == "200" ]]; then
-    ok "Speaker detection succeeded ($HTTP_CODE)"
-    echo ""
-    echo "     Response:"
-    echo "$BODY" | json_pp
-elif [[ "$HTTP_CODE" == "404" ]]; then
-    warn "Speaker detection endpoint not found (404) — not yet implemented"
-else
-    warn "Speaker detection failed (HTTP $HTTP_CODE)"
-fi
-
-echo ""
-
-# ── Test 6: TTS ─────────────────────────────────────────────
-echo "── Test 6: Text-to-Speech (TTS) ───────────────────"
+# ── Test 5: TTS ─────────────────────────────────────────────
+echo "── Test 5: Text-to-Speech (TTS) ───────────────────"
 TTS_RESULT=$(curl -s --max-time 300 -w "\n%{http_code}" \
     -X POST "$API_HOST/api/v1/tts" \
     -H "X-API-Key: $API_KEY" \
@@ -227,8 +202,8 @@ fi
 
 echo ""
 
-# ── Test 7: Usage Summary ──────────────────────────────────
-echo "── Test 7: Usage Summary ──────────────────────────"
+# ── Test 6: Usage Summary ──────────────────────────────────
+echo "── Test 6: Usage Summary ──────────────────────────"
 USAGE_RESULT=$(curl -s -w "\n%{http_code}" \
     -H "X-API-Key: $API_KEY" \
     "$API_HOST/api/v1/usage/summary" 2>/dev/null || echo -e "\n000")

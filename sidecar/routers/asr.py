@@ -52,62 +52,6 @@ async def transcribe(
     return result
 
 
-@router.post("/diarize")
-async def diarize_only(
-    audio: UploadFile = File(...),
-):
-    """Standalone speaker detection — returns speaker segments without transcription."""
-    from main import get_engine
-    import time
-    import io
-    import soundfile as sf
-
-    audio_bytes = await audio.read()
-    start = time.perf_counter()
-
-    diarizer = get_engine("diarizer")
-
-    # Decode audio for duration
-    audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes))
-    if len(audio_array.shape) > 1:
-        audio_array = audio_array.mean(axis=1)
-    duration = len(audio_array) / sample_rate
-
-    # Build a minimal transcript to pass through the diarizer
-    stub_transcript = {
-        "text": "",
-        "segments": [{"start": 0.0, "end": duration, "text": ""}],
-        "words": [],
-        "duration": round(duration, 3),
-        "processing_time_ms": 0,
-        "model": "sortformer",
-        "diarized": False,
-    }
-
-    try:
-        vad = get_engine("vad")
-    except RuntimeError:
-        vad = None
-    result = diarizer.diarize(audio_bytes, stub_transcript, vad_engine=vad)
-
-    processing_time_ms = int((time.perf_counter() - start) * 1000)
-
-    # Return clean speaker-only output
-    speakers = {}
-    for seg in result.get("segments", []):
-        spk = seg.get("speaker", "unknown")
-        speakers.setdefault(spk, []).append({
-            "start": seg["start"],
-            "end": seg["end"],
-        })
-
-    return {
-        "speakers": speakers,
-        "num_speakers": len(speakers),
-        "duration": round(duration, 3),
-        "processing_time_ms": processing_time_ms,
-    }
-
 
 @router.websocket("/stream")
 async def stream_asr(websocket: WebSocket):

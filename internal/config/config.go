@@ -28,6 +28,7 @@ type Config struct {
 	ASRRuntime        string
 	EnableDiarization bool
 	EnableTTS         bool
+	EnableLLM         bool
 
 	// Rate Limits
 	RateLimitFree       int
@@ -57,6 +58,7 @@ func Load() *Config {
 		ASRRuntime:        envOrDefault("ASR_RUNTIME", "mlx"),
 		EnableDiarization: envOrDefault("ENABLE_DIARIZATION", "true") == "true",
 		EnableTTS:         envOrDefault("ENABLE_TTS", "true") == "true",
+		EnableLLM:         envOrDefault("ENABLE_LLM", "false") == "true",
 
 		RateLimitFree:       envOrDefaultInt("RATE_LIMIT_FREE", 20),
 		RateLimitPro:        envOrDefaultInt("RATE_LIMIT_PRO", 120),

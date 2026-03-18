@@ -223,14 +223,17 @@ JSON Response
 │  ├────────────┤  LuxTTS            ~1.0 GB    │
 │  ├────────────┤  Sortformer        ~0.2 GB    │
 │  ├────────────┤  TitaNet + VAD     ~0.05 GB   │
+│  ├────────────┤  LLM (Llama 8B Q4) ~4.5 GB *  │
 │  ├────────────┤  Python runtime    ~0.8 GB    │
 │  ├────────────┤  Go runtime        ~0.1 GB    │
 │  ├────────────┤  Audio buffers     ~0.3 GB    │
 │  ├────────────┤  Voice presets     ~0.05 GB   │
-│  ├────────────┤  PostgreSQL*       ~1.0 GB    │
-│  ├────────────┤  ─── Free ───      ~14.8 GB   │
+│  ├────────────┤  PostgreSQL**      ~1.0 GB    │
+│  ├────────────┤  ── Free (24GB) ── ~10.3 GB   │
+│  ├────────────┤  ── Free (32GB) ── ~18.3 GB   │
 │  └────────────┘                               │
-│  * Only if DB is colocated on this node       │
+│  *  Only if ENABLE_LLM=true                   │
+│  ** Only if DB is colocated on this node       │
 └───────────────────────────────────────────────┘
 ```
 
@@ -312,9 +315,10 @@ CREATE INDEX idx_usage_user_created ON usage_log(user_id, created_at DESC);
 | Stage | Nodes | Infra Cost (CAD) | Handles |
 |-------|-------|-----------|---------|
 | **Dev** | 1× M4 16GB | $700 | 3–5 streams, 0.6B model |
-| **Launch** | 1× M4 24GB | $950 | 5–8 streams, 1.1B model |
-| **Growth** | 3× M4 24GB + LB | $3,100 | 15–24 streams |
-| **Scale** | 5–10× M4 24GB + LB + dedicated PG | $5,700–$11,000 | 25–80 streams |
+| **Launch** | 1× M4 24GB | $950 | 5–8 streams, ASR + TTS + diarization |
+| **Recommended** | 1× M4 32GB | $1,150 | Full stack incl. LLM processing |
+| **Growth** | 3× M4 32GB + LB | $3,700 | 15–24 streams, all features |
+| **Scale** | 5–10× M4 32GB + LB + dedicated PG | $6,700–$13,000 | 25–80 streams |
 
 **When to add nodes:** Monitor `process_time / audio_duration` ratio. If it exceeds 0.5 (model taking >50% of real-time to process), the node is saturated.
 

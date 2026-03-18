@@ -18,7 +18,7 @@ from engines.asr_engine import ASREngine
 from engines.diarizer import Diarizer
 from engines.tts_engine import TTSEngine
 from engines.vad import VADEngine
-from routers import asr, tts
+from routers import asr, tts, process
 
 # Configure logging
 logging.basicConfig(
@@ -77,6 +77,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"VAD failed to load (continuing without): {e}")
 
+    # Load LLM engine (optional — degrade gracefully)
+    if settings.enable_llm:
+        try:
+            logger.info(f"Loading LLM model: {settings.llm_model}")
+            from engines.llm_engine import LLMEngine
+
+            engines["llm"] = LLMEngine(model_name=settings.llm_model)
+            logger.info("LLM engine loaded")
+        except Exception as e:
+            logger.error(f"LLM engine failed to load (continuing without): {e}")
+
     loaded = list(engines.keys())
     logger.info(f"Startup complete — loaded engines: {loaded}")
     yield
@@ -106,6 +117,7 @@ async def health():
 # Mount routers
 app.include_router(asr.router)
 app.include_router(tts.router)
+app.include_router(process.router)
 
 
 def get_engine(name: str):

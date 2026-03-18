@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # Features
     enable_diarization: bool = True
     enable_tts: bool = True
+    enable_llm: bool = False  # Opt-in: requires ~4.5 GB extra RAM
+
+    # LLM
+    llm_model: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
 
     # Paths
     voices_dir: str = "voices"

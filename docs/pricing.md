@@ -15,18 +15,19 @@ GoTranscribeSrv runs entirely on-premise on Mac Mini hardware. There are no per-
 | Config | Chip | RAM | Storage | Est. Price (CAD) | Max Concurrent Streams | Best For |
 |--------|------|-----|---------|------------|----------------------|----------|
 | **Starter** | M4 | 16 GB | 256 GB | ~$700 | 3–5 | Dev/staging, 0.6B model |
-| **Standard** | M4 | 24 GB | 512 GB | ~$950 | 5–8 | Production, 1.1B model |
-| **Pro** | M4 Pro | 48 GB | 512 GB | ~$1,900 | 8–12 | High-throughput, all features |
+| **Standard** | M4 | 24 GB | 256 GB | ~$950 | 5–8 | ASR + TTS + diarization |
+| **Recommended** | M4 | 32 GB | 256 GB | ~$1,150 | 5–8 | Full stack incl. LLM processing |
+| **Pro** | M4 Pro | 48 GB | 512 GB | ~$1,900 | 8–12 | Heavy concurrent LLM + ASR |
 
 ### Cluster Configurations
 
 | Deployment | Nodes | Hardware Cost (CAD) | Monthly Power | Concurrent Streams | Throughput (file) |
 |-----------|-------|-------------|---------------|-------------------|-------------------|
 | **Solo Dev** | 1× Standard | $950 | ~$7 | 5–8 | ~5–6 req/sec |
-| **Small Team** | 2× Standard | $1,900 | ~$14 | 10–16 | ~10–12 req/sec |
-| **Production** | 3× Standard + LB | $3,100 | ~$20 | 15–24 | ~15–18 req/sec |
-| **Growth** | 5× Standard + LB + PG host | $5,700 | ~$35 | 25–40 | ~25–30 req/sec |
-| **Scale** | 10× Standard + LB + PG host | $11,000 | ~$70 | 50–80 | ~50–60 req/sec |
+| **Small Team** | 2× Recommended | $2,300 | ~$14 | 10–16 | ~10–12 req/sec |
+| **Production** | 3× Recommended + LB | $3,700 | ~$20 | 15–24 | ~15–18 req/sec |
+| **Growth** | 5× Recommended + LB + PG host | $6,700 | ~$35 | 25–40 | ~25–30 req/sec |
+| **Scale** | 10× Recommended + LB + PG host | $13,000 | ~$70 | 50–80 | ~50–60 req/sec |
 
 > **Power costs** based on Mac Mini M4 ~20W average under ML load × 24/7 × $0.13/kWh (Canadian avg).
 
@@ -116,7 +117,7 @@ Audio hours per month:          ___
 
 Take the higher number. Add 1 for headroom.
 
-Hardware cost = nodes × $950 CAD
+Hardware cost = nodes × $1,150 CAD (Recommended w/ LLM)
 Monthly power = nodes × $7 CAD
 ```
 
@@ -126,5 +127,5 @@ Monthly power = nodes × $7 CAD
 >
 > Concurrent: 20 ÷ 6 = 4 nodes
 > Throughput: 8,000 ÷ 4,320 = 2 nodes
-> → **4 nodes + 1 headroom = 5× Standard ($4,750 CAD)**
+> → **4 nodes + 1 headroom = 5× Recommended ($5,750 CAD)**
 > Monthly power: ~$35
