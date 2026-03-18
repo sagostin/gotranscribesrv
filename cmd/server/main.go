@@ -1,0 +1,230 @@
+package main
+
+import (
+	"flag"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	fiberlogger "github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/joho/godotenv"
+	"github.com/shaunagostinho/gotranscribesrv/internal/config"
+	"github.com/shaunagostinho/gotranscribesrv/internal/database"
+	"github.com/shaunagostinho/gotranscribesrv/internal/handlers"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
+)
+
+func main() {
+	migrateOnly := flag.Bool("migrate", false, "Run database migrations and exit")
+	flag.Parse()
+
+	// Load .env file if present
+	_ = godotenv.Load()
+
+	// Load configuration
+	cfg := config.Load()
+
+	// Setup structured logging
+	logLevel := slog.LevelInfo
+	if cfg.Environment == "development" {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+
+	slog.Info("starting GoTranscribeSrv",
+		"environment", cfg.Environment,
+		"port", cfg.Port,
+	)
+
+	// Connect to database
+	db, err := database.Connect(cfg.DatabaseURL, cfg.IsProd())
+	if err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// Run migrations
+	if err := db.Migrate(); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("database migrations complete")
+
+	// Seed default admin user + API key on first run
+	database.SeedAdmin(db.DB)
+
+	if *migrateOnly {
+		slog.Info("migrations complete, exiting")
+		return
+	}
+
+	// Create sidecar client
+	sc := sidecar.NewClient(cfg.SidecarURL, cfg.SidecarWSURL)
+
+	// Create Fiber app
+	app := fiber.New(fiber.Config{
+		AppName:   "GoTranscribeSrv",
+		BodyLimit: 100 * 1024 * 1024, // 100MB
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			code := fiber.StatusInternalServerError
+			if e, ok := err.(*fiber.Error); ok {
+				code = e.Code
+			}
+			return c.Status(code).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "INTERNAL_ERROR",
+					"message": err.Error(),
+					"status":  code,
+				},
+			})
+		},
+	})
+
+	// Global middleware
+	app.Use(recover.New())
+	app.Use(fiberlogger.New(fiberlogger.Config{
+		Format: "${time} | ${status} | ${latency} | ${method} ${path}\n",
+	}))
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders: "Authorization,Content-Type,X-API-Key",
+	}))
+
+	// Auth config
+	authCfg := middleware.AuthConfig{
+		Secret:     cfg.JWTSecret,
+		AccessTTL:  cfg.JWTAccessTTL,
+		RefreshTTL: cfg.JWTRefreshTTL,
+		DB:         db.DB,
+	}
+
+	// Create middleware
+	rateLimiter := middleware.NewRateLimiter(cfg.RateLimitFree, cfg.RateLimitPro, cfg.RateLimitEnterprise)
+	usageTracker := middleware.NewUsageTracker(db.DB, 1000)
+
+	// Create handlers
+	authHandler := handlers.NewAuthHandler(db.DB, authCfg)
+	asrHandler := handlers.NewASRHandler(sc)
+	whisperHandler := handlers.NewWhisperHandler(sc)
+	ttsHandler := handlers.NewTTSHandler(sc)
+	diarizeHandler := handlers.NewDiarizeHandler(sc)
+	usageHandler := handlers.NewUsageHandler(db.DB)
+	keysHandler := handlers.NewKeysHandler(db.DB)
+
+	// === Health ===
+	app.Get("/health", func(c *fiber.Ctx) error {
+		health, err := sc.Health()
+		sidecarStatus := "connected"
+		models := fiber.Map{}
+		if err != nil {
+			sidecarStatus = "disconnected"
+		} else if health != nil {
+			for k, v := range health.Models {
+				models[k] = v
+			}
+		}
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"sidecar": sidecarStatus,
+			"models":  models,
+		})
+	})
+
+	// === Public Auth Routes ===
+	auth := app.Group("/api/v1/auth")
+	auth.Post("/register", authHandler.Register)
+	auth.Post("/login", authHandler.Login)
+	auth.Post("/refresh", authHandler.Refresh)
+
+	// === Authenticated Routes ===
+	authed := app.Group("",
+		middleware.NewAuthMiddleware(authCfg),
+		rateLimiter.Middleware(),
+		usageTracker.Middleware(),
+	)
+
+	// Auth (authenticated)
+	authed.Post("/api/v1/auth/logout", authHandler.Logout)
+
+	// ASR
+	authed.Post("/api/v1/asr", asrHandler.TranscribeFile)
+
+	// WebSocket ASR (streaming)
+	wsHandler := handlers.NewWSHandler(sc)
+	app.Use("/ws/asr", middleware.NewAuthMiddleware(authCfg))
+	app.Get("/ws/asr", wsHandler.Upgrade())
+
+	// Whisper-compatible
+	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)
+
+	// TTS
+	authed.Post("/api/v1/tts", ttsHandler.Synthesize)
+	authed.Get("/api/v1/voices", ttsHandler.ListVoices)
+
+	// Diarization (standalone speaker detection)
+	authed.Post("/api/v1/diarize", diarizeHandler.DetectSpeakers)
+
+	// Usage
+	authed.Get("/api/v1/usage/summary", usageHandler.Summary)
+	authed.Get("/api/v1/usage/history", usageHandler.History)
+
+	// API Keys
+	authed.Post("/api/v1/keys", keysHandler.Create)
+	authed.Get("/api/v1/keys", keysHandler.List)
+	authed.Delete("/api/v1/keys/:id", keysHandler.Revoke)
+
+	// === Admin Routes (enterprise tier only) ===
+	adminHandler := handlers.NewAdminHandler(db.DB)
+	admin := app.Group("/api/v1/admin",
+		middleware.NewAuthMiddleware(authCfg),
+		func(c *fiber.Ctx) error {
+			tier, _ := c.Locals("tier").(string)
+			if tier != "enterprise" {
+				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+					"error": fiber.Map{
+						"code":    "FORBIDDEN",
+						"message": "Admin access requires enterprise tier",
+						"status":  403,
+					},
+				})
+			}
+			return c.Next()
+		},
+	)
+
+	// Users
+	admin.Get("/users", adminHandler.ListUsers)
+	admin.Post("/users", adminHandler.CreateUser)
+	admin.Get("/users/:id", adminHandler.GetUser)
+	admin.Put("/users/:id", adminHandler.UpdateUser)
+	admin.Delete("/users/:id", adminHandler.DeleteUser)
+
+	// User API keys (managed by admin)
+	admin.Post("/users/:id/keys", adminHandler.CreateUserKey)
+	admin.Get("/users/:id/keys", adminHandler.ListUserKeys)
+	admin.Delete("/users/:id/keys/:keyId", adminHandler.RevokeUserKey)
+
+	// Global usage
+	admin.Get("/usage", adminHandler.GlobalUsageSummary)
+
+	// === Graceful Shutdown ===
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := app.Listen(":" + cfg.Port); err != nil {
+			slog.Error("server error", "error", err)
+		}
+	}()
+
+	<-quit
+	slog.Info("shutting down server")
+	_ = app.Shutdown()
+}

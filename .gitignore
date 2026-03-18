@@ -1,0 +1,34 @@
+# ── Binaries ────────────────────────────────────
+bin/
+*.exe
+
+# ── Environment ─────────────────────────────────
+.env
+
+# ── Go ──────────────────────────────────────────
+*.test
+coverage.out
+
+# ── Python ──────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+sidecar/LuxTTS/
+
+# ── ML Models (cached via HuggingFace) ─────────
+*.pt
+*.onnx
+*.nemo
+sidecar/voices/*.wav
+sidecar/voices/*.mp3
+sample_test.mp3
+
+# ── IDE / OS ────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

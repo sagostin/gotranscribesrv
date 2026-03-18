@@ -1,0 +1,8 @@
+.git
+.idea
+bin/
+*.md
+docs/
+sidecar/
+.env
+.env.example

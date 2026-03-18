@@ -1,0 +1,59 @@
+# ============================================================
+# GoTranscribeSrv — Docker Compose
+# ============================================================
+# Runs Go API server + Postgres in Docker.
+# Python sidecar runs natively on the host for MPS/Metal GPU.
+#
+# Usage:
+#   make setup        # Download models, create venv
+#   make up           # Start Postgres + Go server
+#   make sidecar      # Start native Python sidecar (separate terminal)
+# ============================================================
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-transcribesrv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_db_password}
+      POSTGRES_DB: ${POSTGRES_DB:-transcribesrv}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-transcribesrv}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Go API Server ────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: ${PORT:-3000}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgres://transcribesrv:changeme_db_password@db:5432/transcribesrv?sslmode=disable}
+      JWT_SECRET: ${JWT_SECRET:-CHANGE_THIS_TO_A_RANDOM_64_CHAR_STRING}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+      # Sidecar runs natively on the host for MPS GPU acceleration
+      SIDECAR_URL: ${SIDECAR_URL:-http://host.docker.internal:8100}
+      SIDECAR_WS_URL: ${SIDECAR_WS_URL:-ws://host.docker.internal:8100}
+      RATE_LIMIT_FREE: ${RATE_LIMIT_FREE:-20}
+      RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
+      RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
+    ports:
+      - "${PORT:-3000}:3000"
+
+volumes:
+  pgdata:
+    driver: local
