@@ -113,13 +113,18 @@ class TTSEngine:
         elif "default" in self.voice_cache:
             ref_audio = self.voice_cache["default"]
 
-        # Run TTS
+        # Run TTS (LuxTTS is a two-step API: encode_prompt → generate_speech)
         try:
-            audio = self.model.synthesize(
+            encode_dict = None
+            if ref_audio is not None:
+                encode_dict = self.model.encode_prompt(ref_audio)
+
+            wav_tensor = self.model.generate_speech(
                 text=text,
-                speaker_wav=ref_audio,
+                encode_dict=encode_dict,
                 speed=speed,
             )
+            audio = wav_tensor.numpy().squeeze()
         except Exception as e:
             logger.error(f"TTS synthesis failed: {e}")
             raise RuntimeError(f"TTS synthesis failed: {e}")
