@@ -15,9 +15,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Clone LuxTTS (provides zipvoice.luxvoice)
+# Clone LuxTTS and install (zipvoice.luxvoice)
+# linacodec and piper-phonemize need special sources that pip can't resolve from PyPI
 RUN git clone --depth 1 https://github.com/ysharma3501/LuxTTS.git /app/LuxTTS \
-    && pip install --no-cache-dir -r /app/LuxTTS/requirements.txt
+    && pip install --no-cache-dir "linacodec @ git+https://github.com/ysharma3501/LinaCodec.git" \
+    && pip install --no-cache-dir piper-phonemize --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html \
+    && pip install --no-cache-dir /app/LuxTTS
 
 # Add LuxTTS to Python path so 'from zipvoice.luxvoice import LuxTTS' works
 ENV PYTHONPATH="/app/LuxTTS:${PYTHONPATH}"

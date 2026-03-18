@@ -34,7 +34,7 @@ $(VENV_PY): sidecar/requirements.txt
 	@touch $(VENV_PY)
 
 # ---------- Python sidecar (native, MPS-accelerated) ----------
-sidecar: venv
+sidecar: setup-luxtts
 	@echo ""
 	@echo "  🚀 Starting native Python sidecar (MPS acceleration)"
 	@echo "  ℹ  Listening on http://localhost:8100"
@@ -44,9 +44,12 @@ sidecar: venv
 # ---------- Setup scripts ----------
 setup-luxtts: venv
 	@test -d sidecar/LuxTTS || git clone https://github.com/ysharma3501/LuxTTS.git sidecar/LuxTTS
-	$(VENV_PIP) install "linacodec @ git+https://github.com/ysharma3501/LinaCodec.git"
-	$(VENV_PIP) install piper-phonemize --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html
-	$(VENV_PIP) install sidecar/LuxTTS
+	@test -f $(VENV_DIR)/.luxtts_installed || ( \
+		$(VENV_PIP) install "linacodec @ git+https://github.com/ysharma3501/LinaCodec.git" && \
+		$(VENV_PIP) install piper-phonemize --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html && \
+		$(VENV_PIP) install sidecar/LuxTTS && \
+		touch $(VENV_DIR)/.luxtts_installed \
+	)
 
 setup-models: venv
 	cd sidecar && $(abspath $(VENV_PY)) ../scripts/download_models.py

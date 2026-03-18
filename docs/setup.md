@@ -256,7 +256,7 @@ migrate:        # Run GORM migrations only
 lint:           # golangci-lint
 venv:           # Create Python 3.11 venv + install deps
 sidecar:        # Start Python sidecar (auto-creates venv)
-setup-luxtts:   # Clone LuxTTS repo into sidecar/
+setup-luxtts:   # Clone LuxTTS + install deps into venv
 setup-models:   # Pre-download all ML models
 setup-voices:   # Download LibriTTS-R voice presets
 setup:          # Clone LuxTTS + venv + models + voices
