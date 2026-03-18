@@ -1,9 +1,11 @@
 """
 GoTranscribeSrv — Python Inference Sidecar
 
-FastAPI server providing ASR (Parakeet TDT), diarization (Sortformer),
-TTS (LuxTTS), and VAD (Silero) endpoints. Communicates with the Go
-backend over localhost HTTP/WebSocket.
+FastAPI server providing diarization (Sortformer), TTS (LuxTTS),
+and LLM (MLX) endpoints. ASR and VAD have moved to the Node.js
+CoreML sidecar for ANE-accelerated inference.
+
+Communicates with the Go backend over localhost HTTP.
 """
 
 import logging
@@ -15,10 +17,8 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
 from config import Settings
-from engines.asr_engine import ASREngine
 from engines.diarizer import Diarizer
 from engines.tts_engine import TTSEngine
-from engines.vad import VADEngine
 from routers import asr, tts, process
 
 # Configure logging
@@ -47,17 +47,8 @@ async def lifespan(app: FastAPI):
         os.environ["HF_DATASETS_OFFLINE"] = "1"
         logger.info("Offline mode ON — using cached models only (no network)")
 
-    # Load ASR engine (required — exit if this fails)
-    try:
-        logger.info(f"Loading ASR model: {settings.asr_model}")
-        engines["asr"] = ASREngine(
-            model_name=settings.asr_model,
-        )
-        engines["asr"].warmup()
-        logger.info("ASR engine loaded and warmed up")
-    except Exception as e:
-        logger.critical(f"ASR engine failed to load — cannot start: {e}")
-        sys.exit(1)
+    # NOTE: ASR + VAD have moved to the Node.js CoreML sidecar (port 8101).
+    # This Python sidecar only loads diarization, TTS, and LLM.
 
     # Load diarizer (optional — degrade gracefully)
     if settings.enable_diarization:
@@ -76,14 +67,6 @@ async def lifespan(app: FastAPI):
             logger.info("TTS engine loaded")
         except Exception as e:
             logger.error(f"TTS engine failed to load (continuing without): {e}")
-
-    # Load VAD (optional — degrade gracefully)
-    try:
-        logger.info("Loading Silero VAD...")
-        engines["vad"] = VADEngine()
-        logger.info("VAD loaded")
-    except Exception as e:
-        logger.error(f"VAD failed to load (continuing without): {e}")
 
     # Load LLM engine (optional — degrade gracefully)
     if settings.enable_llm:

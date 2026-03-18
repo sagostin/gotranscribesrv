@@ -64,8 +64,12 @@ func main() {
 		return
 	}
 
-	// Create sidecar client
-	sc := sidecar.NewClient(cfg.SidecarURL, cfg.SidecarWSURL)
+	// Create dual-sidecar client:
+	// Python sidecar (TTS, diarization, LLM) + Node.js ASR sidecar (CoreML/ANE)
+	sc := sidecar.NewClient(
+		cfg.SidecarURL, cfg.SidecarWSURL,
+		cfg.ASRSidecarURL, cfg.ASRSidecarWSURL,
+	)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{

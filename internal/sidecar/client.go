@@ -11,18 +11,26 @@ import (
 	"time"
 )
 
-// Client communicates with the Python inference sidecar.
+// Client communicates with the inference sidecars.
+// ASR/VAD goes to the Node.js CoreML sidecar.
+// TTS, diarization, and LLM go to the Python sidecar.
 type Client struct {
-	baseURL    string
+	baseURL    string // Python sidecar (TTS, diarization, LLM)
 	wsURL      string
+	asrBaseURL string // Node.js ASR sidecar (CoreML/ANE)
+	asrWSURL   string
 	httpClient *http.Client
 }
 
-// NewClient creates a new sidecar HTTP client.
-func NewClient(baseURL, wsURL string) *Client {
+// NewClient creates a new dual-sidecar client.
+// pyBaseURL/pyWSURL = Python sidecar (TTS, diarization, LLM)
+// asrBaseURL/asrWSURL = Node.js ASR sidecar (CoreML/ANE)
+func NewClient(pyBaseURL, pyWSURL, asrBaseURL, asrWSURL string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		wsURL:   wsURL,
+		baseURL:    pyBaseURL,
+		wsURL:      pyWSURL,
+		asrBaseURL: asrBaseURL,
+		asrWSURL:   asrWSURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Long timeout for large audio files
 		},
@@ -88,24 +96,51 @@ type HealthResponse struct {
 	Models map[string]string `json:"models"`
 }
 
-// Health checks the sidecar health endpoint.
+// Health checks both sidecar health endpoints and merges results.
 func (c *Client) Health() (*HealthResponse, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/health")
-	if err != nil {
-		return nil, fmt.Errorf("sidecar health check failed: %w", err)
+	merged := &HealthResponse{
+		Status: "ok",
+		Models: make(map[string]string),
 	}
-	defer resp.Body.Close()
 
-	var health HealthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
-		return nil, fmt.Errorf("decode health response: %w", err)
+	// Check Node.js ASR sidecar
+	asrResp, err := c.httpClient.Get(c.asrBaseURL + "/health")
+	if err != nil {
+		merged.Models["asr"] = "disconnected"
+		merged.Models["vad"] = "disconnected"
+	} else {
+		defer asrResp.Body.Close()
+		var asrHealth HealthResponse
+		if err := json.NewDecoder(asrResp.Body).Decode(&asrHealth); err == nil {
+			for k, v := range asrHealth.Models {
+				merged.Models[k] = v
+			}
+		}
 	}
-	return &health, nil
+
+	// Check Python sidecar
+	pyResp, err := c.httpClient.Get(c.baseURL + "/health")
+	if err != nil {
+		merged.Models["tts"] = "disconnected"
+		merged.Models["diarizer"] = "disconnected"
+	} else {
+		defer pyResp.Body.Close()
+		var pyHealth HealthResponse
+		if err := json.NewDecoder(pyResp.Body).Decode(&pyHealth); err == nil {
+			for k, v := range pyHealth.Models {
+				merged.Models[k] = v
+			}
+		}
+	}
+
+	return merged, nil
 }
 
-// Transcribe sends audio to the sidecar for transcription.
+// Transcribe sends audio to the Node.js ASR sidecar for transcription.
+// If req.Diarize is true, it then sends the result to the Python sidecar
+// for speaker diarization (two-hop: Node.js ASR → Python diarize).
 func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) {
-	// Build multipart request
+	// Build multipart request for Node.js ASR sidecar
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
@@ -118,33 +153,88 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	}
 
 	_ = writer.WriteField("language", req.Language)
-	if req.Diarize {
-		_ = writer.WriteField("diarize", "true")
-	}
 	writer.Close()
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/transcribe", &buf)
+	httpReq, err := http.NewRequest("POST", c.asrBaseURL+"/transcribe", &buf)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending transcription request to sidecar", "filename", req.Filename, "size", len(req.Audio))
+	slog.Debug("sending transcription request to ASR sidecar", "filename", req.Filename, "size", len(req.Audio))
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("sidecar request failed: %w", err)
+		return nil, fmt.Errorf("ASR sidecar request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("ASR sidecar returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result TranscribeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode transcript: %w", err)
+	}
+
+	// Two-hop: if diarization requested, send to Python sidecar
+	if req.Diarize {
+		diarized, err := c.Diarize(req.Audio, req.Filename, &result)
+		if err != nil {
+			slog.Warn("diarization failed, returning undiarized transcript", "error", err)
+			return &result, nil
+		}
+		return diarized, nil
+	}
+
+	return &result, nil
+}
+
+// Diarize sends audio and a transcript to the Python sidecar for speaker diarization.
+func (c *Client) Diarize(audio []byte, filename string, transcript *TranscribeResponse) (*TranscribeResponse, error) {
+	transcriptJSON, err := json.Marshal(transcript)
+	if err != nil {
+		return nil, fmt.Errorf("marshal transcript: %w", err)
+	}
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("audio", filename)
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(audio); err != nil {
+		return nil, fmt.Errorf("write audio data: %w", err)
+	}
+
+	_ = writer.WriteField("transcript", string(transcriptJSON))
+	writer.Close()
+
+	httpReq, err := http.NewRequest("POST", c.baseURL+"/diarize", &buf)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+
+	slog.Debug("sending diarization request to Python sidecar")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("diarization sidecar request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("diarization sidecar returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result TranscribeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode diarized transcript: %w", err)
 	}
 	return &result, nil
 }
@@ -183,6 +273,8 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 }
 
 // StreamURL returns the WebSocket URL for streaming ASR.
+// NOTE: Streaming currently stays on the Python sidecar since
+// parakeet-coreml doesn't have a streaming API yet.
 func (c *Client) StreamURL() string {
 	return c.wsURL + "/stream"
 }

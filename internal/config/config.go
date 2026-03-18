@@ -19,9 +19,13 @@ type Config struct {
 	JWTAccessTTL  time.Duration
 	JWTRefreshTTL time.Duration
 
-	// Python Sidecar
+	// Python Sidecar (TTS, Diarization, LLM)
 	SidecarURL   string
 	SidecarWSURL string
+
+	// Node.js ASR Sidecar (CoreML/ANE)
+	ASRSidecarURL   string
+	ASRSidecarWSURL string
 
 	// Models
 	ASRModel          string
@@ -53,6 +57,9 @@ func Load() *Config {
 
 		SidecarURL:   envOrDefault("SIDECAR_URL", "http://localhost:8100"),
 		SidecarWSURL: envOrDefault("SIDECAR_WS_URL", "ws://localhost:8100"),
+
+		ASRSidecarURL:   envOrDefault("ASR_SIDECAR_URL", "http://127.0.0.1:8101"),
+		ASRSidecarWSURL: envOrDefault("ASR_SIDECAR_WS_URL", "ws://127.0.0.1:8101"),
 
 		ASRModel:          envOrDefault("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3"),
 		ASRRuntime:        envOrDefault("ASR_RUNTIME", "mlx"),

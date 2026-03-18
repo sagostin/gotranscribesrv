@@ -45,9 +45,12 @@ services:
       JWT_SECRET: ${JWT_SECRET:-CHANGE_THIS_TO_A_RANDOM_64_CHAR_STRING}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
-      # Sidecar runs natively on the host for MPS GPU acceleration
+      # Python sidecar runs natively on the host for MPS GPU acceleration
       SIDECAR_URL: ${SIDECAR_URL:-http://host.docker.internal:8100}
       SIDECAR_WS_URL: ${SIDECAR_WS_URL:-ws://host.docker.internal:8100}
+      # Node.js ASR sidecar runs natively on the host for CoreML/ANE
+      ASR_SIDECAR_URL: ${ASR_SIDECAR_URL:-http://host.docker.internal:8101}
+      ASR_SIDECAR_WS_URL: ${ASR_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
       RATE_LIMIT_FREE: ${RATE_LIMIT_FREE:-20}
       RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
       RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
