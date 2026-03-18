@@ -1,4 +1,4 @@
-.PHONY: run build test migrate lint sidecar clean setup-models setup-voices venv \
+.PHONY: run build test migrate lint sidecar swift-sidecar clean setup-models setup-voices venv \
        up down logs rebuild
 
 # ---------- Config ----------
@@ -22,6 +22,18 @@ migrate:
 lint:
 	golangci-lint run ./...
 
+# ---------- Swift sidecar (CoreML/ANE — ASR, VAD, Diarization, TTS) ----------
+swift-sidecar:
+	@echo ""
+	@echo "  🚀 Starting Swift sidecar (CoreML/ANE)"
+	@echo "  ℹ  Listening on http://localhost:8101"
+	@echo "  ℹ  ASR, VAD, Diarization, TTS via FluidAudio"
+	@echo ""
+	cd sidecar-swift && swift run Server
+
+swift-build:
+	cd sidecar-swift && swift build -c release
+
 # ---------- Python venv ----------
 venv: $(VENV_PY)
 
@@ -33,33 +45,23 @@ $(VENV_PY): sidecar/requirements.txt
 	$(VENV_PIP) install -r sidecar/requirements.txt
 	@touch $(VENV_PY)
 
-# ---------- Python sidecar (native, MPS-accelerated) ----------
-sidecar: setup-luxtts
+# ---------- Python sidecar (LLM only — MLX) ----------
+sidecar: venv
 	@echo ""
-	@echo "  🚀 Starting native Python sidecar (MPS acceleration)"
+	@echo "  🚀 Starting Python sidecar (LLM only — MLX)"
 	@echo "  ℹ  Listening on http://localhost:8100"
-	@echo "  ℹ  Workers: auto-detect (override with SIDECAR_WORKERS=N)"
 	@echo ""
-	cd sidecar && PYTHONPATH="$$(pwd)/LuxTTS:$$PYTHONPATH" $(abspath $(VENV_PY)) main.py
+	cd sidecar && $(abspath $(VENV_PY)) main.py
 
 # ---------- Setup scripts ----------
-setup-luxtts: venv
-	@test -d sidecar/LuxTTS || git clone https://github.com/ysharma3501/LuxTTS.git sidecar/LuxTTS
-	@test -f $(VENV_DIR)/.luxtts_installed || ( \
-		$(VENV_PIP) install "linacodec @ git+https://github.com/ysharma3501/LinaCodec.git" && \
-		$(VENV_PIP) install piper-phonemize --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html && \
-		$(VENV_PIP) install sidecar/LuxTTS && \
-		touch $(VENV_DIR)/.luxtts_installed \
-	)
-
 setup-models: venv
 	cd sidecar && $(abspath $(VENV_PY)) ../scripts/download_models.py
 
-setup-voices: venv
-	$(VENV_PY) scripts/setup_voices.py
+setup-voices:
+	@echo "Voices now managed by Swift sidecar (PocketTTS)"
 
-setup: setup-luxtts venv setup-models setup-voices
-	@echo "✅ All models and voices ready"
+setup: venv setup-models
+	@echo "✅ LLM models ready. Swift sidecar downloads models on first run."
 
 # ---------- Docker (Postgres + Go server) ----------
 up:
@@ -67,7 +69,7 @@ up:
 	@echo ""
 	@echo "  ✅ Postgres + Go server running"
 	@echo "  ℹ  API at http://localhost:3000"
-	@echo "  ℹ  Run 'make sidecar' in another terminal"
+	@echo "  ℹ  Run 'make swift-sidecar' and 'make sidecar' in other terminals"
 	@echo ""
 
 down:
@@ -81,7 +83,7 @@ rebuild:
 
 # ---------- Utilities ----------
 clean:
-	rm -rf bin/ $(VENV_DIR)
+	rm -rf bin/ $(VENV_DIR) sidecar-swift/.build
 	go clean
 
 tidy:

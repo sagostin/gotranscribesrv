@@ -32,3 +32,4 @@ sample_test.mp3
 *.swo
 .DS_Store
 Thumbs.db
+/sidecar-swift/.build/

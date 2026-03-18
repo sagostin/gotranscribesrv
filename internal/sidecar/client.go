@@ -12,32 +12,30 @@ import (
 )
 
 // Client communicates with the inference sidecars.
-// ASR/VAD goes to the Node.js CoreML sidecar.
-// TTS, diarization, and LLM go to the Python sidecar.
+// Swift sidecar → ASR, VAD, diarization, TTS (CoreML/ANE, port 8101)
+// Python sidecar → LLM processing only (MLX, port 8100)
 type Client struct {
-	baseURL    string // Python sidecar (TTS, diarization, LLM)
-	wsURL      string
-	asrBaseURL string // Node.js ASR sidecar (CoreML/ANE)
-	asrWSURL   string
+	swiftURL   string // Swift sidecar (ASR, VAD, diarization, TTS)
+	swiftWSURL string
+	llmURL     string // Python sidecar (LLM only)
 	httpClient *http.Client
 }
 
 // NewClient creates a new dual-sidecar client.
-// pyBaseURL/pyWSURL = Python sidecar (TTS, diarization, LLM)
-// asrBaseURL/asrWSURL = Node.js ASR sidecar (CoreML/ANE)
-func NewClient(pyBaseURL, pyWSURL, asrBaseURL, asrWSURL string) *Client {
+// swiftURL/swiftWSURL = Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE)
+// llmURL = Python sidecar (LLM processing — MLX)
+func NewClient(swiftURL, swiftWSURL, llmURL string) *Client {
 	return &Client{
-		baseURL:    pyBaseURL,
-		wsURL:      pyWSURL,
-		asrBaseURL: asrBaseURL,
-		asrWSURL:   asrWSURL,
+		swiftURL:   swiftURL,
+		swiftWSURL: swiftWSURL,
+		llmURL:     llmURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Long timeout for large audio files
 		},
 	}
 }
 
-// TranscribeRequest is sent to the Python sidecar for file-based ASR.
+// TranscribeRequest is sent to the Swift sidecar for ASR.
 type TranscribeRequest struct {
 	Audio    []byte `json:"-"`
 	Filename string `json:"filename"`
@@ -81,7 +79,7 @@ type Word struct {
 	Speaker string  `json:"speaker,omitempty"`
 }
 
-// SynthesizeRequest is sent to the Python sidecar for TTS.
+// SynthesizeRequest is sent to the Swift sidecar for TTS.
 type SynthesizeRequest struct {
 	Text     string  `json:"text"`
 	Voice    string  `json:"voice"`
@@ -103,26 +101,27 @@ func (c *Client) Health() (*HealthResponse, error) {
 		Models: make(map[string]string),
 	}
 
-	// Check Node.js ASR sidecar
-	asrResp, err := c.httpClient.Get(c.asrBaseURL + "/health")
+	// Check Swift sidecar (ASR, VAD, diarization, TTS)
+	swiftResp, err := c.httpClient.Get(c.swiftURL + "/health")
 	if err != nil {
 		merged.Models["asr"] = "disconnected"
 		merged.Models["vad"] = "disconnected"
+		merged.Models["diarizer"] = "disconnected"
+		merged.Models["tts"] = "disconnected"
 	} else {
-		defer asrResp.Body.Close()
-		var asrHealth HealthResponse
-		if err := json.NewDecoder(asrResp.Body).Decode(&asrHealth); err == nil {
-			for k, v := range asrHealth.Models {
+		defer swiftResp.Body.Close()
+		var swiftHealth HealthResponse
+		if err := json.NewDecoder(swiftResp.Body).Decode(&swiftHealth); err == nil {
+			for k, v := range swiftHealth.Models {
 				merged.Models[k] = v
 			}
 		}
 	}
 
-	// Check Python sidecar
-	pyResp, err := c.httpClient.Get(c.baseURL + "/health")
+	// Check Python sidecar (LLM only)
+	pyResp, err := c.httpClient.Get(c.llmURL + "/health")
 	if err != nil {
-		merged.Models["tts"] = "disconnected"
-		merged.Models["diarizer"] = "disconnected"
+		merged.Models["llm"] = "disconnected"
 	} else {
 		defer pyResp.Body.Close()
 		var pyHealth HealthResponse
@@ -136,11 +135,10 @@ func (c *Client) Health() (*HealthResponse, error) {
 	return merged, nil
 }
 
-// Transcribe sends audio to the Node.js ASR sidecar for transcription.
-// If req.Diarize is true, it then sends the result to the Python sidecar
-// for speaker diarization (two-hop: Node.js ASR → Python diarize).
+// Transcribe sends audio to the Swift sidecar for transcription.
+// If req.Diarize is true, the Swift sidecar handles diarization inline
+// (single-hop — no separate Python call needed).
 func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) {
-	// Build multipart request for Node.js ASR sidecar
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
@@ -153,25 +151,29 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	}
 
 	_ = writer.WriteField("language", req.Language)
+	if req.Diarize {
+		_ = writer.WriteField("diarize", "true")
+	}
 	writer.Close()
 
-	httpReq, err := http.NewRequest("POST", c.asrBaseURL+"/transcribe", &buf)
+	httpReq, err := http.NewRequest("POST", c.swiftURL+"/transcribe", &buf)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending transcription request to ASR sidecar", "filename", req.Filename, "size", len(req.Audio))
+	slog.Debug("sending transcription request to Swift sidecar",
+		"filename", req.Filename, "size", len(req.Audio), "diarize", req.Diarize)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("ASR sidecar request failed: %w", err)
+		return nil, fmt.Errorf("Swift sidecar request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ASR sidecar returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("Swift sidecar returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result TranscribeResponse
@@ -179,20 +181,10 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 		return nil, fmt.Errorf("decode transcript: %w", err)
 	}
 
-	// Two-hop: if diarization requested, send to Python sidecar
-	if req.Diarize {
-		diarized, err := c.Diarize(req.Audio, req.Filename, &result)
-		if err != nil {
-			slog.Warn("diarization failed, returning undiarized transcript", "error", err)
-			return &result, nil
-		}
-		return diarized, nil
-	}
-
 	return &result, nil
 }
 
-// Diarize sends audio and a transcript to the Python sidecar for speaker diarization.
+// Diarize sends audio and a transcript to the Swift sidecar for speaker diarization.
 func (c *Client) Diarize(audio []byte, filename string, transcript *TranscribeResponse) (*TranscribeResponse, error) {
 	transcriptJSON, err := json.Marshal(transcript)
 	if err != nil {
@@ -213,13 +205,13 @@ func (c *Client) Diarize(audio []byte, filename string, transcript *TranscribeRe
 	_ = writer.WriteField("transcript", string(transcriptJSON))
 	writer.Close()
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/diarize", &buf)
+	httpReq, err := http.NewRequest("POST", c.swiftURL+"/diarize", &buf)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending diarization request to Python sidecar")
+	slog.Debug("sending diarization request to Swift sidecar")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -239,14 +231,14 @@ func (c *Client) Diarize(audio []byte, filename string, transcript *TranscribeRe
 	return &result, nil
 }
 
-// Synthesize sends text to the sidecar for TTS and returns raw audio bytes.
+// Synthesize sends text to the Swift sidecar for TTS and returns raw audio bytes.
 func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/synthesize", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", c.swiftURL+"/synthesize", bytes.NewReader(body))
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}
@@ -272,11 +264,9 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	return audio, contentType, nil
 }
 
-// StreamURL returns the WebSocket URL for streaming ASR.
-// NOTE: Streaming currently stays on the Python sidecar since
-// parakeet-coreml doesn't have a streaming API yet.
+// StreamURL returns the WebSocket URL for streaming ASR on the Swift sidecar.
 func (c *Client) StreamURL() string {
-	return c.wsURL + "/stream"
+	return c.swiftWSURL + "/stream"
 }
 
 // VoiceInfo describes a single TTS voice preset.
@@ -291,9 +281,9 @@ type VoicesResponse struct {
 	Voices []VoiceInfo `json:"voices"`
 }
 
-// ListVoices fetches available TTS voice presets from the sidecar.
+// ListVoices fetches available TTS voice presets from the Swift sidecar.
 func (c *Client) ListVoices() (*VoicesResponse, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/voices")
+	resp, err := c.httpClient.Get(c.swiftURL + "/voices")
 	if err != nil {
 		return nil, fmt.Errorf("sidecar voices request failed: %w", err)
 	}
@@ -336,20 +326,20 @@ type TasksResponse struct {
 	Descriptions map[string]string `json:"descriptions"`
 }
 
-// Process sends transcript text to the sidecar for LLM processing.
+// Process sends transcript text to the Python sidecar for LLM processing.
 func (c *Client) Process(req ProcessRequest) (*ProcessResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/process", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", c.llmURL+"/process", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	slog.Debug("sending LLM process request to sidecar", "task", req.Task, "text_len", len(req.TranscriptText))
+	slog.Debug("sending LLM process request to Python sidecar", "task", req.Task, "text_len", len(req.TranscriptText))
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -369,9 +359,9 @@ func (c *Client) Process(req ProcessRequest) (*ProcessResponse, error) {
 	return &result, nil
 }
 
-// ListTasks fetches available LLM processing tasks from the sidecar.
+// ListTasks fetches available LLM processing tasks from the Python sidecar.
 func (c *Client) ListTasks() (*TasksResponse, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/process/tasks")
+	resp, err := c.httpClient.Get(c.llmURL + "/process/tasks")
 	if err != nil {
 		return nil, fmt.Errorf("sidecar tasks request failed: %w", err)
 	}
