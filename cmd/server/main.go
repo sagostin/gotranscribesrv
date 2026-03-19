@@ -116,7 +116,7 @@ func main() {
 	usageTracker := middleware.NewUsageTracker(db.DB, 1000)
 
 	// Create handlers
-	authHandler := handlers.NewAuthHandler(db.DB, authCfg)
+	authHandler := handlers.NewAuthHandler(db.DB, authCfg, cfg.RegistrationEnabled)
 	asrHandler := handlers.NewASRHandler(sc)
 	whisperHandler := handlers.NewWhisperHandler(sc)
 	ttsHandler := handlers.NewTTSHandler(sc)
@@ -233,6 +233,7 @@ func main() {
 	authed.Get("/api/v1/usage/summary", usageHandler.Summary)
 	authed.Get("/api/v1/usage/history", usageHandler.History)
 	authed.Get("/api/v1/usage/keys/:id", usageHandler.KeySummary)
+	authed.Get("/api/v1/usage/me", usageHandler.MyUsage)
 
 	// API Keys
 	authed.Post("/api/v1/keys", keysHandler.Create)

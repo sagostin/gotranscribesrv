@@ -59,7 +59,7 @@ Create a new user account.
 }
 ```
 
-**Errors:** `409` email exists, `422` validation failed
+**Errors:** `403` registration disabled (`REGISTRATION_ENABLED=false`), `409` email exists, `422` validation failed
 
 ---
 
@@ -959,6 +959,42 @@ Usage summary for a specific API key owned by the authenticated user.
 ```
 
 **Errors:** `400` invalid key ID, `404` key not found or not owned by user
+
+---
+
+### GET `/api/v1/usage/me`
+
+Usage stats for the API key used to authenticate the current request. This allows API key holders to check their own usage without knowing the key UUID. **Requires API key authentication** — returns `400` if authenticated via JWT.
+
+**Query params:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `period` | string | `"day"`, `"week"`, `"month"` (default: `"month"`) |
+
+**Example:**
+```bash
+curl -H "X-API-Key: gtx_live_abc123..." http://localhost:3000/api/v1/usage/me
+```
+
+**Response (200):**
+```json
+{
+  "period": "month",
+  "key": {
+    "key_id": "uuid",
+    "label": "production-app",
+    "total_requests": 1500,
+    "total_audio_duration_sec": 30000,
+    "total_processing_time_sec": 400,
+    "by_endpoint": {
+      "asr": {"requests": 1000, "audio_duration_sec": 24000}
+    }
+  }
+}
+```
+
+**Errors:** `400` not authenticated via API key
 
 ---
 

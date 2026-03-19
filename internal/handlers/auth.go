@@ -10,18 +10,29 @@ import (
 
 // AuthHandler handles authentication routes.
 type AuthHandler struct {
-	db      *gorm.DB
-	authCfg middleware.AuthConfig
+	db                  *gorm.DB
+	authCfg             middleware.AuthConfig
+	registrationEnabled bool
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(db *gorm.DB, authCfg middleware.AuthConfig) *AuthHandler {
-	return &AuthHandler{db: db, authCfg: authCfg}
+func NewAuthHandler(db *gorm.DB, authCfg middleware.AuthConfig, registrationEnabled bool) *AuthHandler {
+	return &AuthHandler{db: db, authCfg: authCfg, registrationEnabled: registrationEnabled}
 }
 
 // Register creates a new user account.
 // POST /api/v1/auth/register
 func (h *AuthHandler) Register(c *fiber.Ctx) error {
+	if !h.registrationEnabled {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":    "REGISTRATION_DISABLED",
+				"message": "Registration is currently disabled",
+				"status":  403,
+			},
+		})
+	}
+
 	var req models.RegisterRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{

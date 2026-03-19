@@ -38,6 +38,9 @@ type Config struct {
 	RateLimitPro        int
 	RateLimitEnterprise int
 
+	// Registration
+	RegistrationEnabled bool
+
 	// Logging
 	LogLevel string
 }
@@ -68,6 +71,8 @@ func Load() *Config {
 		RateLimitFree:       envOrDefaultInt("RATE_LIMIT_FREE", 20),
 		RateLimitPro:        envOrDefaultInt("RATE_LIMIT_PRO", 120),
 		RateLimitEnterprise: envOrDefaultInt("RATE_LIMIT_ENTERPRISE", 0),
+
+		RegistrationEnabled: envOrDefault("REGISTRATION_ENABLED", "false") == "true",
 
 		LogLevel: envOrDefault("LOG_LEVEL", "info"),
 	}

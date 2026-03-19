@@ -230,6 +230,83 @@ func (h *UsageHandler) KeySummary(c *fiber.Ctx) error {
 	})
 }
 
+// MyUsage returns usage stats for the API key used to authenticate the current request.
+// This allows API key holders to check their own usage without knowing the key UUID.
+// GET /api/v1/usage/me
+func (h *UsageHandler) MyUsage(c *fiber.Ctx) error {
+	// Require API key authentication (not JWT)
+	akStr, ok := c.Locals("api_key_id").(string)
+	if !ok || akStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":    "API_KEY_REQUIRED",
+				"message": "This endpoint requires API key authentication",
+				"status":  400,
+			},
+		})
+	}
+
+	keyID, err := uuid.Parse(akStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":    "INVALID_KEY",
+				"message": "Invalid API key context",
+				"status":  400,
+			},
+		})
+	}
+
+	// Look up key label
+	var apiKey models.APIKey
+	if result := h.db.First(&apiKey, "id = ?", keyID); result.Error != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":    "NOT_FOUND",
+				"message": "API key not found",
+				"status":  404,
+			},
+		})
+	}
+
+	period := c.Query("period", "month")
+	var since time.Time
+	switch period {
+	case "day":
+		since = time.Now().AddDate(0, 0, -1)
+	case "week":
+		since = time.Now().AddDate(0, 0, -7)
+	default:
+		period = "month"
+		since = time.Now().AddDate(0, -1, 0)
+	}
+
+	var logs []models.UsageLog
+	h.db.Where("api_key_id = ? AND created_at >= ?", keyID, since).Find(&logs)
+
+	ks := models.KeyUsageSummary{
+		KeyID:      keyID,
+		Label:      apiKey.Label,
+		ByEndpoint: make(map[string]models.EndpointUsage),
+	}
+
+	for _, log := range logs {
+		ks.TotalRequests++
+		ks.TotalAudioDurationSec += float64(log.AudioDuration) / 1000
+		ks.TotalProcessTimeSec += float64(log.ProcessTime) / 1000
+
+		ep := ks.ByEndpoint[log.Endpoint]
+		ep.Requests++
+		ep.AudioDurationSec += float64(log.AudioDuration) / 1000
+		ks.ByEndpoint[log.Endpoint] = ep
+	}
+
+	return c.JSON(fiber.Map{
+		"period": period,
+		"key":    ks,
+	})
+}
+
 // KeysHandler handles API key CRUD.
 type KeysHandler struct {
 	db *gorm.DB
