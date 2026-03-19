@@ -10,7 +10,9 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
+	"gorm.io/gorm"
 )
 
 // DeepgramHandler handles the Deepgram-compatible streaming endpoint.
@@ -18,11 +20,12 @@ import (
 // translating between Deepgram's protocol and the internal protocol.
 type DeepgramHandler struct {
 	sidecar *sidecar.Client
+	db      *gorm.DB
 }
 
 // NewDeepgramHandler creates a new DeepgramHandler.
-func NewDeepgramHandler(sc *sidecar.Client) *DeepgramHandler {
-	return &DeepgramHandler{sidecar: sc}
+func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB) *DeepgramHandler {
+	return &DeepgramHandler{sidecar: sc, db: db}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -155,12 +158,13 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	slog.Info("[DG] Deepgram-compat session started", "request_id", requestID,
 		"interim_results", interimResults)
 
+	sessionStart := time.Now()
+	var totalAudioBytes int
 	errCh := make(chan error, 2)
 
 	// Client → Sidecar: forward binary audio and translate control messages
 	go func() {
 		var frameCount int
-		var totalBytes int
 		for {
 			msgType, msg, err := c.ReadMessage()
 			if err != nil {
@@ -180,7 +184,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 							slog.Info("[DG] KeepAlive from client", "request_id", requestID)
 							continue
 						case "CloseStream":
-							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalBytes)
+							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"CloseStream"}`))
 							continue
@@ -197,9 +201,9 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 			// Binary audio frame
 			frameCount++
-			totalBytes += len(msg)
+			totalAudioBytes += len(msg)
 			if frameCount%50 == 1 {
-				slog.Info("[DG] Forwarding audio to sidecar", "frame", frameCount, "bytes", len(msg), "total_bytes", totalBytes, "request_id", requestID)
+				slog.Info("[DG] Forwarding audio to sidecar", "frame", frameCount, "bytes", len(msg), "total_bytes", totalAudioBytes, "request_id", requestID)
 			}
 
 			if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
@@ -281,7 +285,22 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	}()
 
 	<-errCh
-	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID)
+
+	// Log usage for this streaming session
+	sessionDuration := time.Since(sessionStart)
+	// Estimate audio duration from total bytes (PCM 16-bit 16kHz mono = 32 bytes/ms)
+	audioDurationMs := 0
+	if totalAudioBytes > 0 {
+		audioDurationMs = totalAudioBytes / 32
+	}
+	userID, _ := c.Locals("user_id").(string)
+	apiKeyID, _ := c.Locals("api_key_id").(string)
+	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_deepgram",
+		audioDurationMs, int(sessionDuration.Milliseconds()), false)
+
+	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID,
+		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
+		"session_duration_ms", sessionDuration.Milliseconds())
 }
 
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.

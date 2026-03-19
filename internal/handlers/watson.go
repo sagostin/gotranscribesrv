@@ -8,22 +8,26 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	ws "github.com/fasthttp/websocket"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
+	"gorm.io/gorm"
 )
 
 // WatsonHandler handles IBM Watson Speech-to-Text compatible endpoints.
 type WatsonHandler struct {
 	sidecar *sidecar.Client
+	db      *gorm.DB
 }
 
 // NewWatsonHandler creates a new WatsonHandler.
-func NewWatsonHandler(sc *sidecar.Client) *WatsonHandler {
-	return &WatsonHandler{sidecar: sc}
+func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB) *WatsonHandler {
+	return &WatsonHandler{sidecar: sc, db: db}
 }
 
 // --- Watson Response Types ---
@@ -212,12 +216,13 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	// Send Watson "listening" state
 	_ = c.WriteJSON(fiber.Map{"state": "listening"})
 
+	sessionStart := time.Now()
+	var totalAudioBytes int
 	errCh := make(chan error, 2)
 
 	// Client → Sidecar: forward binary audio and translate Watson control messages
 	go func() {
 		var frameCount int
-		var totalBytes int
 		for {
 			msgType, msg, err := c.ReadMessage()
 			if err != nil {
@@ -249,7 +254,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 							continue
 						case "stop":
 							slog.Info("[Watson] Stop message from client, forwarding to sidecar",
-								"request_id", requestID, "total_frames", frameCount, "total_bytes", totalBytes)
+								"request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"CloseStream"}`))
 							continue
@@ -266,10 +271,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 			// Binary audio frame
 			frameCount++
-			totalBytes += len(msg)
+			totalAudioBytes += len(msg)
 			if frameCount%50 == 1 {
 				slog.Info("[Watson] Forwarding audio to sidecar", "frame", frameCount,
-					"bytes", len(msg), "total_bytes", totalBytes, "request_id", requestID)
+					"bytes", len(msg), "total_bytes", totalAudioBytes, "request_id", requestID)
 			}
 
 			if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
@@ -351,7 +356,21 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	}()
 
 	<-errCh
-	slog.Info("[Watson] Watson-compat session ended", "request_id", requestID)
+
+	// Log usage for this streaming session
+	sessionDuration := time.Since(sessionStart)
+	audioDurationMs := 0
+	if totalAudioBytes > 0 {
+		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+	}
+	userID, _ := c.Locals("user_id").(string)
+	apiKeyID, _ := c.Locals("api_key_id").(string)
+	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_watson_stream",
+		audioDurationMs, int(sessionDuration.Milliseconds()), speakerLabels)
+
+	slog.Info("[Watson] Watson-compat session ended", "request_id", requestID,
+		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
+		"session_duration_ms", sessionDuration.Milliseconds())
 }
 
 // --- Helper Functions ---

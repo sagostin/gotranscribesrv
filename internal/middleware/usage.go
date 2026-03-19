@@ -11,6 +11,37 @@ import (
 	"gorm.io/gorm"
 )
 
+// LogWebSocketUsage writes a UsageLog entry directly for WebSocket sessions,
+// which bypass the HTTP middleware pipeline.
+func LogWebSocketUsage(db *gorm.DB, userID, apiKeyID, endpoint string, audioDurationMs, processTimeMs int, diarized bool) {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		slog.Warn("ws usage: invalid user_id, skipping log", "user_id", userID)
+		return
+	}
+
+	log := models.UsageLog{
+		UserID:        uid,
+		Endpoint:      endpoint,
+		AudioDuration: audioDurationMs,
+		ProcessTime:   processTimeMs,
+		Diarized:      diarized,
+		Metadata:      "{}",
+	}
+
+	if apiKeyID != "" {
+		if akID, err := uuid.Parse(apiKeyID); err == nil {
+			log.APIKeyID = &akID
+		}
+	}
+
+	if result := db.Create(&log); result.Error != nil {
+		slog.Error("ws usage: failed to write usage log", "error", result.Error, "endpoint", endpoint)
+	} else {
+		slog.Debug("ws usage: logged", "endpoint", endpoint, "audio_ms", audioDurationMs, "process_ms", processTimeMs)
+	}
+}
+
 // UsageTracker is middleware that asynchronously logs API usage to PostgreSQL.
 // On success (2xx): writes a UsageLog with enriched metadata.
 // On failure (4xx/5xx): writes a RequestLog with rough info + verbose slog output.
