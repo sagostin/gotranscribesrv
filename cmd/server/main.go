@@ -122,6 +122,7 @@ func main() {
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	processHandler := handlers.NewProcessHandler(sc)
+	watsonHandler := handlers.NewWatsonHandler(sc)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -177,6 +178,30 @@ func main() {
 	}, middleware.NewAuthMiddleware(authCfg))
 	app.Get("/v1/listen", dgHandler.Upgrade())
 
+	// Watson-compatible streaming (WebSocket only — POST /v1/recognize is in the authed group below)
+	app.Use("/v1/recognize", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			slog.Info("Watson WebSocket upgrade request", "path", "/v1/recognize", "remote", c.IP())
+			return c.Next()
+		}
+		// For non-WebSocket requests (POST), skip this middleware chain entirely
+		// so the request reaches the authed group's POST handler.
+		if c.Method() != fiber.MethodGet {
+			return c.Next()
+		}
+		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
+			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
+		})
+	})
+	app.Use("/v1/recognize", func(c *fiber.Ctx) error {
+		// Only apply auth middleware to WebSocket upgrades
+		if websocket.IsWebSocketUpgrade(c) {
+			return middleware.NewAuthMiddleware(authCfg)(c)
+		}
+		return c.Next()
+	})
+	app.Get("/v1/recognize", watsonHandler.Upgrade())
+
 	// === Authenticated Routes ===
 	authed := app.Group("",
 		middleware.NewAuthMiddleware(authCfg),
@@ -192,6 +217,9 @@ func main() {
 
 	// Whisper-compatible
 	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)
+
+	// Watson-compatible
+	authed.Post("/v1/recognize", watsonHandler.Recognize)
 
 	// TTS
 	authed.Post("/api/v1/tts", ttsHandler.Synthesize)

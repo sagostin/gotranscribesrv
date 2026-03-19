@@ -5,6 +5,7 @@ Base URL: `http://localhost:3000`
 All endpoints except `/auth/*` require authentication via either:
 - **JWT**: `Authorization: Bearer <access_token>`
 - **API Key**: `X-API-Key: <key>`
+- **Basic Auth**: `Authorization: Basic base64(apikey:<key>)` (Watson-compatible)
 
 ---
 
@@ -450,6 +451,188 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 ```
 
 > **Compatibility note:** Fields like `encoding`, `sample_rate`, `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT v3 (CoreML/ANE).
+
+---
+
+### POST `/v1/recognize` (Watson-Compatible)
+
+Drop-in replacement for the IBM Watson Speech-to-Text API. Allows existing Watson SDKs and tools to transcribe audio via GoTranscribeSrv without code changes.
+
+**Request:** Raw audio in the request body (not multipart).
+
+**Authentication:**
+- `Authorization: Basic base64(apikey:<api_key>)` (Watson format)
+- `Authorization: Bearer <api_key>` (OpenAI format)
+- `X-API-Key: <key>` (GoTranscribeSrv format)
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | yes | Audio format: `audio/wav`, `audio/flac`, `audio/mp3`, `audio/ogg`, `audio/webm`, `audio/l16`, `application/octet-stream` |
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT v3) |
+| `timestamps` | string | `"true"` to include word-level timestamps |
+| `word_confidence` | string | `"true"` to include per-word confidence scores |
+| `speaker_labels` | string | `"true"` to enable speaker diarization |
+| `max_alternatives` | string | Accepted for compatibility (ignored, always returns 1) |
+| `profanity_filter` | string | Accepted for compatibility (ignored) |
+| `smart_formatting` | string | Accepted for compatibility (ignored) |
+| `inactivity_timeout` | string | Accepted for compatibility (ignored) |
+| `language` | string | Language code (default: `"en"`) |
+
+**Response (200):**
+```json
+{
+  "results": [
+    {
+      "alternatives": [
+        {
+          "transcript": "Hello, how are you doing today?",
+          "confidence": 0.99
+        }
+      ],
+      "final": true
+    }
+  ],
+  "result_index": 0
+}
+```
+
+**With `timestamps=true`:**
+```json
+{
+  "results": [{
+    "alternatives": [{
+      "transcript": "Hello, how are you doing today?",
+      "confidence": 0.99,
+      "timestamps": [
+        ["Hello", 0.0, 0.4],
+        ["how", 0.5, 0.7],
+        ["are", 0.7, 0.85],
+        ["you", 0.85, 1.0],
+        ["doing", 1.0, 1.3],
+        ["today", 1.4, 1.8]
+      ]
+    }],
+    "final": true
+  }],
+  "result_index": 0
+}
+```
+
+**With `speaker_labels=true`:**
+```json
+{
+  "results": [...],
+  "result_index": 0,
+  "speaker_labels": [
+    {"from": 0.0, "to": 0.4, "speaker": 0, "confidence": 0.99, "final": true},
+    {"from": 0.5, "to": 0.7, "speaker": 0, "confidence": 0.99, "final": true},
+    {"from": 2.3, "to": 2.8, "speaker": 1, "confidence": 0.99, "final": true}
+  ]
+}
+```
+
+**Example (curl):**
+```bash
+curl -X POST "http://localhost:3000/v1/recognize?timestamps=true" \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: audio/mp3" \
+  --data-binary @audio.mp3
+```
+
+> **Compatibility note:** The `model` and `max_alternatives` parameters are accepted without error but ignored. GoTranscribeSrv always uses Parakeet TDT v3 (CoreML/ANE) and returns a single alternative.
+
+**Errors:** `400` no audio data, `413` file too large (>100 MB), `503` sidecar unavailable
+
+---
+
+### WS `/v1/recognize` (Watson-Compatible Streaming)
+
+Drop-in replacement for the IBM Watson Speech-to-Text WebSocket API. Allows existing Watson SDKs to stream audio for real-time transcription.
+
+**Connection:**
+```
+ws://localhost:3000/v1/recognize?token=gtx_live_abc123
+ws://localhost:3000/v1/recognize?token=<access_token>&timestamps=true
+```
+
+**Authentication:**
+- `Authorization: Basic base64(apikey:<api_key>)` (Watson format)
+- `Authorization: Bearer <api_key>` header
+- `?token=<api_key>` query param
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `timestamps` | string | `"true"` to include word-level timestamps (default: `"false"`) |
+| `word_confidence` | string | `"true"` to include per-word confidence (default: `"false"`) |
+| `speaker_labels` | string | `"true"` to enable speaker diarization (default: `"false"`) |
+| `interim_results` | string | `"true"` to receive partial transcripts (default: `"true"`) |
+| `language` | string | Language code (default: `"en"`) |
+| `encoding` | string | Accepted for compatibility (ignored) |
+| `sample_rate` | string | Accepted for compatibility (ignored) |
+
+**Server → Client:** JSON events
+
+**`state` message** (sent on connection open and after processing completes):
+```json
+{"state": "listening"}
+```
+
+**Interim result** (`final: false`):
+```json
+{
+  "results": [{
+    "alternatives": [{"transcript": "hello how", "confidence": 0}],
+    "final": false
+  }],
+  "result_index": 0
+}
+```
+
+**Final result** (`final: true`):
+```json
+{
+  "results": [{
+    "alternatives": [{
+      "transcript": "Hello, how are you doing today?",
+      "confidence": 0.99,
+      "timestamps": [["Hello", 0.0, 0.4], ["how", 0.5, 0.7]]
+    }],
+    "final": true
+  }],
+  "result_index": 0
+}
+```
+
+**Client → Server:**
+
+Start message (optional, parameters can also be set via query params):
+```json
+{
+  "action": "start",
+  "content-type": "audio/l16;rate=16000",
+  "interim_results": true,
+  "timestamps": true,
+  "speaker_labels": true
+}
+```
+
+Binary audio frames (PCM 16-bit, 16kHz, mono).
+
+Stop message:
+```json
+{"action": "stop"}
+```
+
+> **Compatibility note:** GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT v3 (CoreML/ANE). The `content-type` field in the start message is accepted but ignored.
 
 ---
 

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -43,6 +44,25 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 			// Deepgram format — always authenticate as API key
 			tokenValue := strings.TrimPrefix(authHeader, "Token ")
 			return authenticateAPIKey(c, cfg.DB, tokenValue)
+		}
+		if strings.HasPrefix(authHeader, "Basic ") {
+			// Watson format — "Basic base64(apikey:THE_KEY)"
+			encoded := strings.TrimPrefix(authHeader, "Basic ")
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err == nil {
+				parts := strings.SplitN(string(decoded), ":", 2)
+				if len(parts) == 2 {
+					// Use the password portion as the API key
+					return authenticateAPIKey(c, cfg.DB, parts[1])
+				}
+			}
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "UNAUTHORIZED",
+					"message": "Invalid Basic auth credentials",
+					"status":  401,
+				},
+			})
 		}
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			bearerValue := strings.TrimPrefix(authHeader, "Bearer ")
