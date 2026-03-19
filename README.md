@@ -14,6 +14,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **File Upload ASR** | Single file or chunked upload; returns full transcript with timestamps |
 | **Whisper-Compatible API** | Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint |
 | **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` WebSocket endpoint |
+| **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS with voice cloning support, 24 kHz output |
 | **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B (optional) |
@@ -105,7 +106,7 @@ make setup               # Downloads LLM models
 make sidecar &           # Serves on :8100
 
 # Start Go backend
-make dev                 # Runs migrations, seeds admin, serves on :3000
+make run                 # Starts Go backend, runs migrations, seeds admin (:3000)
 ```
 
 ### Test It
@@ -140,16 +141,22 @@ curl -X POST http://localhost:3000/api/v1/tts \
 | `POST` | `/api/v1/auth/register` | Create account |
 | `POST` | `/api/v1/auth/login` | Login → JWT tokens |
 | `POST` | `/api/v1/auth/refresh` | Refresh access token |
+| `POST` | `/api/v1/auth/logout` | Invalidate refresh token |
 | `POST` | `/api/v1/asr` | Transcribe uploaded audio file |
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
+| `POST` | `/v1/recognize` | Watson-compatible file transcription |
+| `WS`   | `/v1/recognize` | Watson-compatible streaming transcription |
 | `POST` | `/api/v1/tts` | Synthesize speech from text |
 | `GET`  | `/api/v1/voices` | List available TTS voice presets |
 | `POST` | `/api/v1/process` | LLM transcript processing (summarize, action items, etc.) |
 | `GET`  | `/api/v1/process/tasks` | List available LLM processing tasks |
 | `GET`  | `/api/v1/usage/summary` | Usage stats for current user |
 | `GET`  | `/api/v1/usage/history` | Detailed usage history |
+| `POST` | `/api/v1/keys` | Generate API key |
+| `GET`  | `/api/v1/keys` | List API keys |
+| `DELETE` | `/api/v1/keys/:id` | Revoke API key |
 
 Full reference: [docs/api.md](docs/api.md)
 
@@ -217,10 +224,14 @@ gotranscribesrv/
 │       ├── EngineManager.swift # Model lifecycle (ASR, VAD, diarizer, TTS)
 │       ├── AudioConverter.swift
 │       └── Routes/             # Transcribe, Stream, VAD, Diarize, TTS, Health
-├── sidecar/                    # Python sidecar (LLM only)
+├── sidecar/                    # Python sidecar (LLM, diarization, TTS — legacy)
 │   ├── main.py                 # FastAPI server
-│   ├── routers/                # LLM processing endpoints
-│   └── engines/                # LLM engine wrapper
+│   ├── routers/                # Processing endpoints
+│   ├── engines/                # ML engine wrappers (LLM, diarizer, TTS, VAD)
+│   └── inference_pool.py       # Concurrency-managed inference queue
+├── sidecar-node/               # Node.js sidecar (legacy, pre-Swift — ASR + VAD only)
+│   ├── server.js               # Express server
+│   └── routes/                 # Transcribe, VAD, Health
 ├── docs/                       # Architecture, API, setup
 ├── .env.example
 ├── Makefile

@@ -96,7 +96,13 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     // Build sentence-level segments by grouping tokens with gaps < 0.8s
     let segments = buildSegmentsFromWords(words)
 
-    let audioDuration = result.duration
+    // FluidAudio's result.duration may be 0 for some models — fall back to sample count
+    let audioDuration: Double
+    if result.duration > 0 {
+        audioDuration = result.duration
+    } else {
+        audioDuration = Double(samples.count) / 16000.0
+    }
 
     let diarize = (audio.diarize ?? "").lowercased() == "true"
 

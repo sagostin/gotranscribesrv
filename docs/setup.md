@@ -95,6 +95,13 @@ LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 # Rate Limits
 RATE_LIMIT_FREE=20       # requests/min
 RATE_LIMIT_PRO=120
+RATE_LIMIT_ENTERPRISE=0  # 0 = unlimited
+
+# Logging
+LOG_LEVEL=info
+
+# ASR model (Swift sidecar auto-downloads)
+ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 ```
 
 ---
@@ -151,9 +158,8 @@ curl http://localhost:8100/health
 ### 5. Start the Go Backend
 
 ```bash
-make dev        # Runs go mod tidy + starts server
+make run        # Starts Go backend (cmd/server/main.go)
 # or manually:
-go mod download
 go run cmd/server/main.go
 ```
 
@@ -336,7 +342,7 @@ JWT_SECRET=your-shared-secret
 
 Start the server:
 ```bash
-make dev   # or: docker compose up server db
+make run   # or: docker compose up server db
 ```
 
 #### Architecture Diagram
@@ -362,7 +368,6 @@ build:            # Build binary to bin/server
 test:             # Run Go tests
 migrate:          # Run GORM migrations only
 lint:             # golangci-lint
-dev:              # go mod tidy + run
 
 # Swift sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
 swift-sidecar:    # Build & run Swift sidecar on :8101

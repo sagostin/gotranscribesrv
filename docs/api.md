@@ -6,6 +6,7 @@ All endpoints except `/auth/*` require authentication via either:
 - **JWT**: `Authorization: Bearer <access_token>`
 - **API Key**: `X-API-Key: <key>`
 - **Basic Auth**: `Authorization: Basic base64(apikey:<key>)` (Watson-compatible)
+- **Deepgram Token**: `Authorization: Token <key>` (Deepgram-compatible)
 
 ---
 
@@ -188,22 +189,61 @@ Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs t
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `file` | file | yes | Audio file (mp3, mp4, mpeg, mpga, m4a, wav, webm) |
-| `model` | string | yes | Model name (accepted but ignored; always uses Parakeet TDT v3 via CoreML) |
+| `model` | string | yes | Model name — accepted for compatibility. If name contains `"diarize"` (e.g. `"gpt-4o-transcribe-diarize"`), speaker diarization is enabled automatically. Always uses Parakeet TDT v3 via CoreML. |
 | `language` | string | no | ISO-639-1 language code (default: `"en"`) |
 | `prompt` | string | no | Hint text (accepted for compatibility, best-effort) |
-| `response_format` | string | no | `"json"`, `"text"`, `"srt"`, `"vtt"`, `"verbose_json"` (default: `"json"`) |
+| `response_format` | string | no | `"json"`, `"text"`, `"srt"`, `"vtt"`, `"verbose_json"`, `"diarized_json"` (default: `"json"`) |
 | `stream` | string | no | `"true"` to enable SSE streaming (see below) |
 | `temperature` | number | no | Accepted for compatibility (ignored) |
-| `timestamp_granularities[]` | array | no | `"word"` and/or `"segment"` (requires `verbose_json`) |
+| `timestamp_granularities[]` | array | no | `"word"` and/or `"segment"` — controls which timestamp fields appear in `verbose_json`. Defaults to both if omitted. |
+
+> **Verbose logging:** All request parameters (`model`, `language`, `temperature`, `prompt`, `stream`, `response_format`, `timestamp_granularities[]`, `diarize`) are logged at INFO level for debugging and auditing.
+
+> **Diarization:** Enabled when `response_format=diarized_json` or when the `model` field contains `"diarize"`. Uses Sortformer (CoreML/ANE) for neural speaker detection.
 
 **Response — `json` (default):**
 ```json
 {
-  "text": "Hello, how are you doing today?"
+  "text": "Hello, how are you doing today?",
+  "usage": {"type": "duration", "seconds": 2}
+}
+```
+
+**Response — `diarized_json`:**
+
+Speaker-labeled segments per the OpenAI `TranscriptionDiarized` schema:
+
+```json
+{
+  "task": "transcribe",
+  "duration": 6.5,
+  "text": "Thanks for calling support.\nHi, I need help with my account.",
+  "segments": [
+    {
+      "type": "transcript.text.segment",
+      "id": "seg_001",
+      "start": 0.0,
+      "end": 2.8,
+      "text": "Thanks for calling support.",
+      "speaker": "A"
+    },
+    {
+      "type": "transcript.text.segment",
+      "id": "seg_002",
+      "start": 3.1,
+      "end": 6.5,
+      "text": "Hi, I need help with my account.",
+      "speaker": "B"
+    }
+  ],
+  "usage": {"type": "duration", "seconds": 7}
 }
 ```
 
 **Response — `verbose_json`:**
+
+Enriched segments with Whisper-spec fields, optional word-level timestamps, and **VAD speech detection segments** from Silero VAD:
+
 ```json
 {
   "task": "transcribe",
@@ -213,14 +253,15 @@ Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs t
   "segments": [
     {
       "id": 0,
+      "seek": 0,
       "start": 0.0,
       "end": 1.8,
       "text": "Hello, how are you doing today?",
-      "tokens": [15947, 11, 577, 527, 345],
+      "tokens": [],
       "temperature": 0.0,
       "avg_logprob": -0.15,
       "compression_ratio": 1.2,
-      "no_speech_prob": 0.01
+      "no_speech_prob": 0.02
     }
   ],
   "words": [
@@ -230,9 +271,30 @@ Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs t
     {"word": "you", "start": 0.85, "end": 1.0},
     {"word": "doing", "start": 1.0, "end": 1.3},
     {"word": "today", "start": 1.4, "end": 1.8}
-  ]
+  ],
+  "vad_segments": [
+    {"start": 0.0, "end": 1.85}
+  ],
+  "vad_processing_time_ms": 12,
+  "usage": {"type": "duration", "seconds": 2}
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `segments[].seek` | Seek offset (centiseconds from start) |
+| `segments[].tokens` | Token IDs (empty — Parakeet TDT doesn't produce these) |
+| `segments[].no_speech_prob` | Estimated probability of non-speech, derived from VAD overlap (0.0 = speech, 1.0 = silence) |
+| `vad_segments` | Array of `{start, end}` from Silero VAD — detected speech regions |
+| `vad_processing_time_ms` | VAD inference time in milliseconds |
+| `usage` | Duration-based billing: `{type: "duration", seconds: N}` |
+
+> **`timestamp_granularities[]` behavior:**
+> - `["word"]` → response includes `words` only (no `segments`)
+> - `["segment"]` → response includes `segments` only (no `words`)
+> - `["word", "segment"]` or omitted → both included
+
+> **Note:** `vad_segments` are included in `verbose_json` when the VAD sidecar is available. If unavailable, they are omitted gracefully.
 
 **Response — `text`:**
 ```
@@ -273,10 +335,10 @@ event: transcript.text.delta
 data: {"type":"transcript.text.delta","delta":"Hello, how are you doing today?","logprobs":null}
 ```
 
-2. **`transcript.text.done`** — final event with the complete transcript:
+2. **`transcript.text.done`** — final event with the complete transcript and usage:
 ```
 event: transcript.text.done
-data: {"type":"transcript.text.done","text":"Hello, how are you doing today?","duration":1.8,"words":[{"word":"Hello","start":0.0,"end":0.4}],"logprobs":null}
+data: {"type":"transcript.text.done","text":"Hello, how are you doing today?","logprobs":null,"usage":{"type":"duration","seconds":2}}
 ```
 
 3. **Terminal sentinel:**

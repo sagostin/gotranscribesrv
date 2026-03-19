@@ -31,7 +31,8 @@ This keeps each component in the language where it's strongest: Go for API infra
 │  │  • REST Handlers         │  │  • PocketTTS (CoreML/ANE)       │ │
 │  │  • Whisper-compat API    │  │  • POST /transcribe             │ │
 │  │  • Deepgram-compat API   │  │  • WS   /stream                │ │
-│  │  • WebSocket ASR Proxy   │  │  • POST /synthesize             │ │
+│  │  • Watson-compat API     │  │  • POST /synthesize             │ │
+│  │  • WebSocket ASR Proxy   │  │  • POST /diarize                │ │
 │  │  • Sidecar HTTP Client   │──│  • POST /vad                     │ │
 │  └──────────┬───────────────┘  └──────────────────────────────────┘ │
 │             │                                                       │

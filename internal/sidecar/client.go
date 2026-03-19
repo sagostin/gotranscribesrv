@@ -88,6 +88,19 @@ type SynthesizeRequest struct {
 	Format   string  `json:"format"`
 }
 
+// VadResponse is the JSON result from the Swift sidecar VAD endpoint.
+type VadResponse struct {
+	SpeechSegments []VadSegment `json:"speech_segments"`
+	Duration       float64      `json:"duration"`
+	ProcessTimeMs  int          `json:"processing_time_ms"`
+}
+
+// VadSegment represents a detected speech region with start/end times in seconds.
+type VadSegment struct {
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
 // HealthResponse from the sidecar health check.
 type HealthResponse struct {
 	Status string            `json:"status"`
@@ -179,6 +192,49 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	var result TranscribeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode transcript: %w", err)
+	}
+
+	return &result, nil
+}
+
+// VAD sends audio to the Swift sidecar for voice activity detection.
+// Returns speech segment boundaries (start/end times in seconds).
+func (c *Client) VAD(audio []byte, filename string) (*VadResponse, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("audio", filename)
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(audio); err != nil {
+		return nil, fmt.Errorf("write audio data: %w", err)
+	}
+	writer.Close()
+
+	httpReq, err := http.NewRequest("POST", c.swiftURL+"/vad", &buf)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+
+	slog.Debug("sending VAD request to Swift sidecar",
+		"filename", filename, "size", len(audio))
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("Swift sidecar VAD request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Swift sidecar VAD returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result VadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode VAD response: %w", err)
 	}
 
 	return &result, nil
