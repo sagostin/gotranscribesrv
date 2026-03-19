@@ -32,7 +32,7 @@ This keeps each component in the language where it's strongest: Go for API infra
 │  │  • Whisper-compat API    │  │  • POST /transcribe             │ │
 │  │  • Deepgram-compat API   │  │  • WS   /stream                │ │
 │  │  • WebSocket ASR Proxy   │  │  • POST /synthesize             │ │
-│  │  • Sidecar HTTP Client   │──│  • POST /vad, /diarize          │ │
+│  │  • Sidecar HTTP Client   │──│  • POST /vad                     │ │
 │  └──────────┬───────────────┘  └──────────────────────────────────┘ │
 │             │                                                       │
 │             │                  ┌──────────────────────────────────┐ │

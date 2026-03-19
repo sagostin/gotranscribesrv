@@ -184,53 +184,6 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	return &result, nil
 }
 
-// Diarize sends audio and a transcript to the Swift sidecar for speaker diarization.
-func (c *Client) Diarize(audio []byte, filename string, transcript *TranscribeResponse) (*TranscribeResponse, error) {
-	transcriptJSON, err := json.Marshal(transcript)
-	if err != nil {
-		return nil, fmt.Errorf("marshal transcript: %w", err)
-	}
-
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	part, err := writer.CreateFormFile("audio", filename)
-	if err != nil {
-		return nil, fmt.Errorf("create form file: %w", err)
-	}
-	if _, err := part.Write(audio); err != nil {
-		return nil, fmt.Errorf("write audio data: %w", err)
-	}
-
-	_ = writer.WriteField("transcript", string(transcriptJSON))
-	writer.Close()
-
-	httpReq, err := http.NewRequest("POST", c.swiftURL+"/diarize", &buf)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
-
-	slog.Debug("sending diarization request to Swift sidecar")
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("diarization sidecar request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("diarization sidecar returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result TranscribeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode diarized transcript: %w", err)
-	}
-	return &result, nil
-}
-
 // Synthesize sends text to the Swift sidecar for TTS and returns raw audio bytes.
 func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	body, err := json.Marshal(req)

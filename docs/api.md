@@ -8,6 +8,31 @@ All endpoints except `/auth/*` require authentication via either:
 
 ---
 
+## Health
+
+### GET `/health`
+
+Check server and sidecar connectivity. **No authentication required.**
+
+**Response (200):**
+```json
+{
+  "status": "ok",
+  "sidecar": "connected",
+  "models": {
+    "asr": "parakeet-tdt-v3",
+    "vad": "silero-vad",
+    "diarizer": "sortformer",
+    "tts": "pockettts",
+    "llm": "llama-3.1-8b-q4"
+  }
+}
+```
+
+> **Note:** If a sidecar is unreachable, its models show as `"disconnected"`. The overall `status` is always `"ok"` as long as the Go server is running.
+
+---
+
 ## Authentication
 
 ### POST `/api/v1/auth/register`
@@ -108,9 +133,8 @@ Transcribe an uploaded audio file.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `audio` | file | yes | Audio file (WAV, MP3, FLAC, OGG, M4A) |
+| `audio` | file | yes | Audio file (WAV, MP3, FLAC, OGG, M4A), max 100 MB |
 | `diarize` | string | no | `"true"` to enable speaker diarization |
-| `timestamps` | string | no | `"true"` for word-level timestamps (default: true) |
 | `language` | string | no | Language code (default: `"en"`) |
 
 **Response (200):**
@@ -150,7 +174,7 @@ Transcribe an uploaded audio file.
 }
 ```
 
-**Errors:** `413` file too large, `415` unsupported format, `422` invalid params
+**Errors:** `413` file too large (>100 MB), `415` unsupported format, `422` invalid params
 
 ---
 
@@ -466,7 +490,7 @@ Synthesize speech using PocketTTS with voice cloning support. 24 kHz output.
 ```
 Content-Type: audio/wav
 Content-Length: 96000
-X-Audio-Sample-Rate: 24000
+X-Audio-Sample-Rate: 48000
 ```
 
 ---
@@ -485,6 +509,76 @@ List available TTS voice presets.
     {"id": "narrator", "name": "Narrator", "description": "Deep, documentary style"},
     {"id": "bright", "name": "Bright", "description": "Energetic, upbeat"}
   ]
+}
+```
+
+---
+
+## LLM Transcript Processing
+
+### POST `/api/v1/process`
+
+Run LLM processing on transcript text. Requires the Python sidecar (mlx-lm).
+
+**Request:**
+```json
+{
+  "transcript_text": "Hello, how are you? I'm doing well, thanks for asking...",
+  "task": "summarize",
+  "max_tokens": 1024,
+  "temperature": 0.3
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `transcript_text` | string | yes | The transcript text to process |
+| `task` | string | no | Processing task (default: `"summarize"`) |
+| `language` | string | conditional | Required when `task` is `"translate"` |
+| `prompt` | string | conditional | Required when `task` is `"qa"` or `"custom"` |
+| `max_tokens` | int | no | Max tokens to generate (default: 1024) |
+| `temperature` | number | no | Sampling temperature (default: 0.3) |
+
+**Available tasks:**
+
+| Task | Description |
+|------|-------------|
+| `summarize` | Concise summary of the transcript |
+| `action_items` | Extract action items and next steps |
+| `translate` | Translate to target `language` |
+| `qa` | Answer a question about the transcript (`prompt` required) |
+| `custom` | Run a custom prompt against the transcript (`prompt` required) |
+
+**Response (200):**
+```json
+{
+  "result": "The discussion covered project timelines and resource allocation...",
+  "task": "summarize",
+  "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+  "processing_time_ms": 2340,
+  "tokens_generated": 156
+}
+```
+
+**Errors:** `422` missing required fields, `502` LLM sidecar unavailable
+
+---
+
+### GET `/api/v1/process/tasks`
+
+List available LLM processing tasks.
+
+**Response (200):**
+```json
+{
+  "tasks": ["summarize", "action_items", "translate", "qa", "custom"],
+  "descriptions": {
+    "summarize": "Generate a concise summary of the transcript",
+    "action_items": "Extract action items and next steps",
+    "translate": "Translate the transcript to a target language",
+    "qa": "Answer a question about the transcript",
+    "custom": "Run a custom prompt against the transcript"
+  }
 }
 ```
 
@@ -525,7 +619,8 @@ Aggregated usage stats for the authenticated user.
   "by_endpoint": {
     "asr": {"requests": 1200, "audio_duration_sec": 28000},
     "asr_stream": {"requests": 600, "audio_duration_sec": 7200},
-    "tts": {"requests": 47, "audio_duration_sec": 1220}
+    "tts": {"requests": 47, "audio_duration_sec": 1220},
+    "process": {"requests": 85, "audio_duration_sec": 0}
   }
 }
 ```
