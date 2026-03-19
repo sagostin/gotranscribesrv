@@ -163,7 +163,7 @@ Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs t
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `file` | file | yes | Audio file (mp3, mp4, mpeg, mpga, m4a, wav, webm) |
-| `model` | string | yes | Model name (accepted but ignored; always uses Parakeet TDT) |
+| `model` | string | yes | Model name (accepted but ignored; always uses Parakeet TDT v3 via CoreML) |
 | `language` | string | no | ISO-639-1 language code (default: `"en"`) |
 | `prompt` | string | no | Hint text (accepted for compatibility, best-effort) |
 | `response_format` | string | no | `"json"`, `"text"`, `"srt"`, `"vtt"`, `"verbose_json"` (default: `"json"`) |
@@ -268,7 +268,7 @@ curl --no-buffer -X POST http://localhost:3000/v1/audio/transcriptions \
   -F "stream=true"
 ```
 
-> **Compatibility note:** The `model` field is required by the OpenAI spec, so clients will send it (e.g., `"whisper-1"`). GoTranscribeSrv accepts any value but always uses Parakeet TDT. Fields like `temperature` are accepted without error but have no effect.
+> **Compatibility note:** The `model` field is required by the OpenAI spec, so clients will send it (e.g., `"whisper-1"`). GoTranscribeSrv accepts any value but always uses Parakeet TDT v3 (CoreML/ANE). Fields like `temperature` are accepted without error but have no effect.
 
 **Errors:** `413` file too large (>25 MB), `415` unsupported format
 
@@ -353,7 +353,7 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 | `interim_results` | string | `"true"` to receive partial transcripts (default: `"true"`) |
 | `encoding` | string | Accepted for compatibility (ignored, expects PCM 16-bit) |
 | `sample_rate` | string | Accepted for compatibility (ignored, expects 16kHz) |
-| `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT) |
+| `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT v3 via CoreML) |
 | `punctuate` | string | Accepted for compatibility (ignored) |
 | `smart_format` | string | Accepted for compatibility (ignored) |
 | `utterance_end_ms` | string | Accepted for compatibility (best-effort) |
@@ -425,15 +425,15 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 }
 ```
 
-> **Compatibility note:** Fields like `encoding`, `sample_rate`, `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT.
+> **Compatibility note:** Fields like `encoding`, `sample_rate`, `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT v3 (CoreML/ANE).
 
 ---
 
-## Text-to-Speech (TTS) — LuxTTS
+## Text-to-Speech (TTS) — PocketTTS
 
 ### POST `/api/v1/tts`
 
-Synthesize speech using LuxTTS with zero-shot voice cloning. 48 kHz output.
+Synthesize speech using PocketTTS with voice cloning support. 24 kHz output.
 
 **Request:**
 ```json
@@ -453,24 +453,20 @@ Synthesize speech using LuxTTS with zero-shot voice cloning. 48 kHz output.
 | `speed` | number | no | Playback speed 0.5–2.0 (default: 1.0) |
 | `format` | string | no | `"wav"`, `"opus"`, `"mp3"` (default: `"wav"`) |
 
-> **Note:** If both `voice` and `voice_ref` are provided, `voice_ref` takes priority.
+> **Note:** If both `voice` and `voice_ref` are provided, `voice_ref` takes priority. TTS runs on the Swift sidecar via PocketTTS (CoreML/ANE).
 
-**Built-in voice presets** (curated from LibriTTS-R, CC BY 4.0):
+**Built-in voice presets:**
 
 | Voice ID | Description |
 |----------|-------------|
-| `default` | Neutral, clear American English |
-| `professional` | Formal, confident tone |
-| `friendly` | Warm, conversational |
-| `narrator` | Deep, documentary style |
-| `bright` | Energetic, upbeat |
+| `default` | PocketTTS default voice |
 
-**Response (200):** Audio binary stream at 48 kHz.
+**Response (200):** Audio binary stream at 24 kHz.
 
 ```
 Content-Type: audio/wav
 Content-Length: 96000
-X-Audio-Sample-Rate: 48000
+X-Audio-Sample-Rate: 24000
 ```
 
 ---
@@ -498,6 +494,8 @@ List available TTS voice presets.
 
 Speaker diarization is available as part of the ASR endpoint by setting `diarize=true`.
 See [`POST /api/v1/asr`](#post-apiv1asr) above.
+
+Diarization is handled by the Swift sidecar using the Sortformer model (end-to-end neural, up to 4 speakers) running on CoreML/ANE.
 
 > **Note:** Standalone speaker detection (without transcription) is not supported.
 > The Sortformer diarizer requires transcript word/segment timestamps to produce

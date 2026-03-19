@@ -1,18 +1,26 @@
 # Setup Guide
 
-## Quick Start (Docker)
+## Quick Start (Docker + Native Sidecars)
 
-The fastest way to get running:
+The fastest way to get running. Docker handles PostgreSQL and the Go API server. The Swift and Python sidecars run natively on the Mac for CoreML/ANE access.
 
 ```bash
 cp .env.example .env
 # Edit .env: set JWT_SECRET and POSTGRES_PASSWORD
 
-docker compose up -d
+# Terminal 1 — Postgres + Go server
+make up
 docker compose logs -f server   # Watch for admin credentials
+
+# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS)
+make swift-sidecar              # Builds & serves on :8101
+
+# Terminal 3 — Python sidecar (LLM only, optional)
+make setup                      # Download LLM models
+make sidecar                    # Serves on :8100
 ```
 
-This starts PostgreSQL, the Python inference sidecar (with auto model download), and the Go backend. On first boot, an admin user and API key are printed to the console.
+This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar runs natively for CoreML/ANE access. The Python sidecar is optional — only needed for LLM transcript processing. On first boot, an admin user and API key are printed to the console.
 
 ---
 
@@ -24,9 +32,10 @@ This starts PostgreSQL, the Python inference sidecar (with auto model download),
 |-----------|---------|-------|
 | macOS | 14 Sonoma+ | Apple Silicon required (M1/M2/M4) |
 | Go | 1.22+ | |
-| Python | 3.11 | 3.12+ not supported by nemo_toolkit yet |
+| Swift | 6.0+ | Xcode 16+ (for FluidAudio / CoreML) |
+| Python | 3.11+ | Only needed for LLM processing |
 | PostgreSQL | 15+ | Local or remote |
-| RAM | 16 GB min | 24 GB recommended for 1.1B model |
+| RAM | 16 GB min | 24 GB recommended for full stack |
 
 ---
 
@@ -68,15 +77,20 @@ JWT_SECRET=generate-a-random-64-char-string-here
 JWT_ACCESS_TTL=15m
 JWT_REFRESH_TTL=168h
 
-# Python Sidecar
-SIDECAR_URL=http://localhost:8100
-SIDECAR_WS_URL=ws://localhost:8100
+# Swift Sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+SWIFT_SIDECAR_URL=http://localhost:8101
+SWIFT_SIDECAR_WS_URL=ws://localhost:8101
 
-# Models
-ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3    # Parakeet TDT on MLX
-ASR_RUNTIME=mlx                        # mlx or coreml
+# Python Sidecar (LLM only — MLX, optional)
+LLM_SIDECAR_URL=http://localhost:8100
+
+# Models (Swift sidecar auto-downloads on first run)
 ENABLE_DIARIZATION=true
 ENABLE_TTS=true
+
+# LLM Processing (opt-in, requires ~4.5 GB extra RAM + Python sidecar)
+ENABLE_LLM=false
+LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 # Rate Limits
 RATE_LIMIT_FREE=20       # requests/min
@@ -85,49 +99,51 @@ RATE_LIMIT_PRO=120
 
 ---
 
-### 3. Pre-Download Models & Voices
+### 3. Start the Swift Sidecar
+
+The Swift sidecar handles all audio AI — ASR, VAD, diarization, and TTS — via CoreML and the Apple Neural Engine.
 
 ```bash
-# Download all ML models (~3.5 GB total)
-make setup-models
-
-# Download and curate LibriTTS-R voice presets
-make setup-voices
-```
-
-Or download selectively:
-```bash
-make venv
-.venv/bin/python3 scripts/download_models.py --skip-tts    # ASR + diarizer + VAD only
-```
-
-**Model sizes:**
-
-| Model | Size | First-Run Download |
-|-------|------|--------------------||
-| Parakeet TDT 1.1B | ~2.2 GB | ~2 min on fast connection |
-| Parakeet TDT 0.6B | ~1.2 GB | ~1 min |
-| LuxTTS | ~1.0 GB | ~1 min |
-| Sortformer (diarization) | ~160 MB | ~15 sec |
-| TitaNet (speaker embed) | ~46 MB | ~5 sec |
-| Silero VAD | ~4 MB | instant |
-| Voice presets (LibriTTS-R) | ~50 MB | via setup script |
-
----
-
-### 4. Start the Python Sidecar
-
-```bash
-# The Makefile handles venv creation, dependency install, and LuxTTS clone:
-make sidecar
-# Serving on http://0.0.0.0:8100
-# Models loaded in ~5s on M4
+# Build and run (models auto-download on first launch):
+make swift-sidecar
+# 🚀 Initializing FluidAudio engines (CoreML/ANE)...
+# ✅ ASR engine loaded (Parakeet TDT v3, ANE)
+# ✅ VAD engine loaded (Silero, ANE)
+# ✅ Diarizer loaded (Sortformer, ANE)
+# ✅ TTS engine loaded (PocketTTS, ANE)
+# 🎙  Swift sidecar listening on 0.0.0.0:8101
 ```
 
 Verify it's running:
 ```bash
+curl http://localhost:8101/health
+# {"status":"ok","models":{"asr":"loaded","vad":"loaded","diarizer":"loaded","tts":"loaded"}}
+```
+
+**First build note:** The initial `swift build` may take a few minutes to compile Vapor and FluidAudio dependencies. Subsequent builds are fast (incremental).
+
+**Model auto-download:** FluidAudio downloads CoreML models from HuggingFace on first launch (~2 GB total). Models are cached in `~/.cache/huggingface` and persist across restarts.
+
+---
+
+### 4. Start the Python Sidecar (LLM Only — Optional)
+
+The Python sidecar is only needed if you want on-device LLM transcript processing (summarization, action items, translation). Skip this step if you don't need LLM features.
+
+```bash
+# Pre-download LLM models
+make setup
+
+# Start sidecar
+make sidecar
+# 🚀 Starting Python sidecar (LLM only — MLX)
+# Serving on http://0.0.0.0:8100
+```
+
+Verify:
+```bash
 curl http://localhost:8100/health
-# {"status": "ok", "models": {"asr": "loaded", "diarizer": "loaded", "tts": "loaded", "vad": "loaded"}}
+# {"status":"ok","models":{"llm":"loaded"}}
 ```
 
 ---
@@ -157,7 +173,7 @@ On first boot, the server creates an admin user and prints credentials:
 Verify:
 ```bash
 curl http://localhost:3000/health
-# {"status": "ok", "sidecar": "connected"}
+# {"status":"ok","models":{"asr":"loaded","vad":"loaded","diarizer":"loaded","tts":"loaded"}}
 ```
 
 ---
@@ -187,35 +203,41 @@ curl -s http://localhost:3000/api/v1/usage/summary \
 
 ### Services
 
+Docker Compose runs PostgreSQL and the Go API server. Both sidecars run natively on the host for CoreML/ANE access.
+
 | Service | Image | Port | Notes |
 |---------|-------|------|-------|
 | `db` | postgres:16-alpine | 5432 | Persistent volume `pgdata` |
-| `sidecar` | Custom (Python 3.11) | 8100 | Model cache volume, 60s start period |
-| `server` | Custom (Go, alpine) | 3000 | Waits for healthy db + sidecar |
+| `server` | Custom (Go, alpine) | 3000 | Waits for healthy db |
+
+The Go server connects to the native sidecars via `host.docker.internal`:
+- Swift sidecar: `http://host.docker.internal:8101`
+- Python sidecar: `http://host.docker.internal:8100`
 
 ### Commands
 
 ```bash
-docker compose up -d          # Start all services
-docker compose logs -f        # Watch all logs
-docker compose logs -f server # Watch Go server only (admin creds here)
-docker compose down           # Stop all services
-docker compose down -v        # Stop + delete volumes (⚠️ data loss)
+# Start Postgres + Go server (run sidecars separately)
+make up
+
+# Start sidecars in separate terminals:
+make swift-sidecar       # Terminal 2 — ASR, VAD, diarization, TTS
+make sidecar             # Terminal 3 — LLM only (optional)
+
+docker compose logs -f server   # Watch Go server logs (admin creds here)
+docker compose down              # Stop Docker services
+docker compose down -v           # Stop + delete volumes (⚠️ data loss)
 ```
-
-### Model Persistence
-
-ML models are cached in a Docker volume (`model_cache` → `~/.cache/huggingface`). This means models are downloaded once and persist across container restarts.
 
 ---
 
 ## Multi-Node Deployment
 
 There are two approaches for multi-node deployments:
-- **Co-located** — Go + Python on every Mac Mini (simpler, all-in-one)
+- **Co-located** — Go + Swift + Python on every Mac Mini (simpler, all-in-one)
 - **Split** — Go API on normal server infra, Macs as pure inference nodes (recommended)
 
-### Option A: Co-Located (Go + Python on Every Mac)
+### Option A: Co-Located (All-in-One on Every Mac)
 
 **On each Mac Mini:**
 
@@ -244,19 +266,24 @@ Run the Go API gateway on your normal server infrastructure and keep Macs as ded
 
 #### 1. Mac Minis (Inference Only)
 
-Each Mac only runs the Python sidecar:
+Each Mac runs the Swift sidecar (and optionally the Python sidecar for LLM):
 
 ```bash
 git clone https://github.com/yourorg/gotranscribesrv.git
 cd gotranscribesrv
-make setup       # Download models + voices
-make sidecar     # Starts FastAPI on :8100
+
+# Start Swift sidecar (models auto-download on first run)
+make swift-sidecar       # ASR, VAD, diarization, TTS on :8101
+
+# Optional: Start Python sidecar for LLM
+make setup               # Download LLM models
+make sidecar             # LLM processing on :8100
 ```
 
 Verify each Mac is serving:
 ```bash
-curl http://mini1.local:8100/health
-# {"status": "ok", "models": {"asr": "loaded", ...}}
+curl http://mini1.local:8101/health
+# {"status":"ok","models":{"asr":"loaded","vad":"loaded","diarizer":"loaded","tts":"loaded"}}
 ```
 
 #### 2. Caddy Reverse Proxy (Inference Load Balancer)
@@ -271,7 +298,7 @@ Create `Caddyfile`:
 
 ```
 inference.internal {
-    reverse_proxy mini1.local:8100 mini2.local:8100 mini3.local:8100 {
+    reverse_proxy mini1.local:8101 mini2.local:8101 mini3.local:8101 {
         lb_policy round_robin
         health_uri /health
         health_interval 10s
@@ -296,11 +323,12 @@ Run the Go server anywhere — Docker, K8s, VPS, bare metal:
 
 ```bash
 # .env on the Go server
-SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
-SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
+SWIFT_SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
+SWIFT_SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
+LLM_SIDECAR_URL=http://inference.internal:80         # Optional
 # Or with TLS:
-# SIDECAR_URL=https://inference.internal:443
-# SIDECAR_WS_URL=wss://inference.internal:443
+# SWIFT_SIDECAR_URL=https://inference.internal:443
+# SWIFT_SIDECAR_WS_URL=wss://inference.internal:443
 
 DATABASE_URL=postgres://user:pass@db-host:5432/transcribesrv?sslmode=disable
 JWT_SECRET=your-shared-secret
@@ -314,9 +342,9 @@ make dev   # or: docker compose up server db
 #### Architecture Diagram
 
 ```
-  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (:8100)
-              on VPS/K8s         ↗   → Mac Mini 2 (:8100)
-                           LB  ↗    → Mac Mini 3 (:8100)
+  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (Swift :8101, Py :8100)
+              on VPS/K8s         ↗   → Mac Mini 2 (Swift :8101, Py :8100)
+                           LB  ↗    → Mac Mini 3 (Swift :8101, Py :8100)
                     ↓
               PostgreSQL
 ```
@@ -328,22 +356,33 @@ WebSocket connections are automatically proxied and remain sticky to the connect
 ## Makefile Reference
 
 ```makefile
-run:            # Start Go backend
-build:          # Build binary to bin/server
-test:           # Run Go tests
-migrate:        # Run GORM migrations only
-lint:           # golangci-lint
-venv:           # Create Python 3.11 venv + install deps
-sidecar:        # Start Python sidecar (auto-creates venv)
-setup-luxtts:   # Clone LuxTTS + install deps into venv
-setup-models:   # Pre-download all ML models
-setup-voices:   # Download LibriTTS-R voice presets
-setup:          # Clone LuxTTS + venv + models + voices
-up:             # docker compose up -d
-down:           # docker compose down
-logs:           # docker compose logs -f
-clean:          # Remove bin/ and .venv
-dev:            # go mod tidy + run
+# Go backend
+run:              # Start Go backend
+build:            # Build binary to bin/server
+test:             # Run Go tests
+migrate:          # Run GORM migrations only
+lint:             # golangci-lint
+dev:              # go mod tidy + run
+
+# Swift sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+swift-sidecar:    # Build & run Swift sidecar on :8101
+swift-build:      # Build Swift sidecar in release mode
+
+# Python sidecar (LLM only — MLX)
+sidecar:          # Start Python sidecar on :8100
+venv:             # Create Python 3.11 venv + install deps
+setup-models:     # Pre-download LLM models
+setup:            # Create venv + download LLM models
+
+# Docker (Postgres + Go server)
+up:               # docker compose up -d --build
+down:             # docker compose down
+logs:             # docker compose logs -f
+rebuild:          # docker compose up -d --build
+
+# Utilities
+clean:            # Remove bin/, .venv, sidecar-swift/.build
+tidy:             # go mod tidy
 ```
 
 ---
@@ -352,12 +391,15 @@ dev:            # go mod tidy + run
 
 | Issue | Solution |
 |-------|----------|
-| `CUDA not available` | Expected — we use MLX/CoreML, not CUDA |
-| Models downloading slowly | Set `HF_HUB_CACHE` to a fast SSD path |
-| `mps not available` | Ensure macOS 14+ and PyTorch 2.1+ |
+| Swift build fails | Ensure Xcode 16+ and Swift 6.0+ (`swift --version`) |
+| `CUDA not available` | Expected — we use CoreML/ANE, not CUDA |
+| Swift model download slow | Models download from HuggingFace on first run (~2 GB). Set `HF_HUB_CACHE` to a fast SSD |
+| `ASR engine not loaded` | Check Swift sidecar logs — CoreML model may have failed to download |
+| Port 8101 in use | Change `AUDIO_SIDECAR_PORT` env var for Swift sidecar |
 | Port 3000 in use | Change `PORT` in `.env` |
 | PostgreSQL connection refused | Check `brew services list` for postgres status |
-| Sidecar health check fails | Ensure Python sidecar is running on port 8100 |
-| Out of memory on 16 GB | Use default 0.6B model or set `HF_HUB_CACHE` to a larger drive |
+| Sidecar health check fails | Ensure Swift sidecar is running on port 8101 |
+| Out of memory on 16 GB | Disable LLM (`ENABLE_LLM=false`) or use a smaller ASR model |
 | Admin credentials lost | Delete all users from DB and restart — seed runs again |
-| Docker sidecar slow to start | Normal — models load on first boot (60s start period) |
+| Python sidecar not needed | Python is only required for LLM processing — skip it if you only need ASR/TTS |
+| `PocketTTS model not initialized` | Check Swift sidecar logs — TTS model may have failed to download |

@@ -2,15 +2,15 @@
 
 ## Design Philosophy
 
-GoTranscribeSrv follows a **simple hybrid** architecture:
+GoTranscribeSrv follows a **modular multi-sidecar** architecture:
 
 1. **Go (Fiber)** handles everything HTTP — routing, auth, WebSocket management, usage tracking
-2. **Python (FastAPI)** handles everything ML — model loading, inference, audio processing
-3. They communicate over **localhost HTTP/WebSocket** — no gRPC, no message queues
+2. **Swift (Vapor + FluidAudio)** handles all audio AI — ASR, VAD, diarization, TTS via CoreML/Apple Neural Engine
+3. **Python (FastAPI + mlx-lm)** handles LLM processing only — summarization, action items, translation *(optional)*
 4. **PostgreSQL** is the only shared service across nodes
 5. **Each node is stateless and identical** — horizontal scaling is just "add another Mac Mini"
 
-This keeps each component in the language where it's strongest, with the simplest possible integration.
+This keeps each component in the language where it's strongest: Go for API infrastructure, Swift for native Apple Silicon performance, Python for ML-framework-heavy LLM inference.
 
 ---
 
@@ -19,22 +19,32 @@ This keeps each component in the language where it's strongest, with the simples
 ### Single Node
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Mac Mini (M4, 24 GB)                                       │
-│                                                             │
-│  ┌──────────────────────────┐  ┌──────────────────────────┐ │
-│  │  Go — Fiber (:3000)      │  │  Python — FastAPI (:8100)│ │
-│  │                          │  │                          │ │
-│  │  • JWT Auth Middleware    │  │  • Parakeet TDT (MLX)    │ │
-│  │  • Usage Tracking MW     │  │  • Sortformer Diarizer   │ │
-│  │  • Rate Limiting (mem)   │  │  • Silero VAD            │ │
-│  │  • REST Handlers         │  │  • LuxTTS (48kHz)        │ │
-│  │  • Whisper-compat API    │  │  • POST /transcribe      │ │
-│  │  • WebSocket ASR Proxy   │  │  • WS /stream            │ │
-│  │  • Sidecar HTTP Client   │──│  • POST /synthesize      │ │
-│  └──────────┬───────────────┘  └──────────────────────────┘ │
-│             │                                               │
-└─────────────┼───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Mac Mini (M4, 24 GB)                                               │
+│                                                                     │
+│  ┌──────────────────────────┐  ┌──────────────────────────────────┐ │
+│  │  Go — Fiber (:3000)      │  │  Swift — Vapor (:8101)           │ │
+│  │                          │  │                                  │ │
+│  │  • JWT Auth Middleware    │  │  • Parakeet TDT v3 (CoreML/ANE) │ │
+│  │  • Usage Tracking MW     │  │  • Sortformer Diarizer (ANE)    │ │
+│  │  • Rate Limiting (mem)   │  │  • Silero VAD (CoreML/ANE)      │ │
+│  │  • REST Handlers         │  │  • PocketTTS (CoreML/ANE)       │ │
+│  │  • Whisper-compat API    │  │  • POST /transcribe             │ │
+│  │  • Deepgram-compat API   │  │  • WS   /stream                │ │
+│  │  • WebSocket ASR Proxy   │  │  • POST /synthesize             │ │
+│  │  • Sidecar HTTP Client   │──│  • POST /vad, /diarize          │ │
+│  └──────────┬───────────────┘  └──────────────────────────────────┘ │
+│             │                                                       │
+│             │                  ┌──────────────────────────────────┐ │
+│             │                  │  Python — FastAPI (:8100)        │ │
+│             │                  │  (optional — LLM only)           │ │
+│             │                  │                                  │ │
+│             │                  │  • Llama 3.1 8B Q4 (mlx-lm)     │ │
+│             └─────────────────→│  • POST /process                │ │
+│                                │  • GET  /process/tasks          │ │
+│                                └──────────────────────────────────┘ │
+│                                                                     │
+└─────────────┬───────────────────────────────────────────────────────┘
               ▼
        ┌──────────────┐
        │  PostgreSQL   │
@@ -72,7 +82,7 @@ This keeps each component in the language where it's strongest, with the simples
 
 ### Split Deployment (Recommended for Production)
 
-The Go API gateway and the Python inference sidecar don't need to run on the same machine. Since the sidecar is already accessed via `SIDECAR_URL` / `SIDECAR_WS_URL` environment variables, you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
+The Go API gateway and the inference sidecars don't need to run on the same machine. Since the sidecars are accessed via environment variables (`SWIFT_SIDECAR_URL`, `SWIFT_SIDECAR_WS_URL`, `LLM_SIDECAR_URL`), you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
 
 ```
                     ┌──────────────────────────────┐
@@ -92,24 +102,26 @@ The Go API gateway and the Python inference sidecar don't need to run on the sam
                  ▼             ▼             ▼
            ┌──────────┐ ┌──────────┐ ┌──────────┐
            │Mac Mini 1│ │Mac Mini 2│ │Mac Mini 3│
-           │Python    │ │Python    │ │Python    │
-           │:8100     │ │:8100     │ │:8100     │
+           │Swift     │ │Swift     │ │Swift     │
+           │:8101     │ │:8101     │ │:8101     │
+           │(+Py 8100)│ │(+Py 8100)│ │(+Py 8100)│
            └──────────┘ └──────────┘ └──────────┘
 ```
 
 **Why split?**
-- Macs become pure inference appliances — only run `make sidecar`, no Go, no Postgres
+- Macs become pure inference appliances — only run `make swift-sidecar` (and optionally `make sidecar`), no Go, no Postgres
 - API layer runs on standard commodity infra (Docker, K8s, $5/mo VPS, etc.)
 - Scale API and inference independently
 - Caddy provides automatic health checks and failover across Mac pool
 
 **Config (Go server `.env`):**
 ```bash
-SIDECAR_URL=https://inference.internal:443      # Caddy proxy to Mac pool
-SIDECAR_WS_URL=wss://inference.internal:443     # WebSocket via Caddy
+SWIFT_SIDECAR_URL=https://inference.internal:443    # Caddy proxy to Mac pool
+SWIFT_SIDECAR_WS_URL=wss://inference.internal:443   # WebSocket via Caddy
+LLM_SIDECAR_URL=https://inference.internal:443       # Optional, same proxy
 ```
 
-**Note:** The Python sidecar must stay on Apple Silicon because `parakeet-mlx` (ASR engine) requires the MLX framework. Diarization, TTS, and VAD use standard PyTorch and could run on CUDA GPUs in the future.
+**Note:** Both sidecars must stay on Apple Silicon — the Swift sidecar requires CoreML (ASR, VAD, diarization, TTS engines) and the Python sidecar requires MLX (LLM inference).
 
 See the [Setup Guide](setup.md#split-deployment) for detailed configuration steps.
 
@@ -120,18 +132,18 @@ See the [Setup Guide](setup.md#split-deployment) for detailed configuration step
 ### File Upload ASR
 
 ```
-Client                    Go (Fiber)                Python (FastAPI)
+Client                    Go (Fiber)                Swift (Vapor/FluidAudio)
   │                          │                           │
   │  POST /api/v1/asr       │                           │
   │  [multipart: audio.wav]  │                           │
   │─────────────────────────►│                           │
   │                          │  POST /transcribe         │
-  │                          │  [audio bytes + config]   │
+  │                          │  [multipart: audio + cfg] │
   │                          │──────────────────────────►│
-  │                          │                           │ Load audio
-  │                          │                           │ Resample → 16kHz
-  │                          │                           │ Parakeet TDT inference
-  │                          │                           │ (optional) Diarize
+  │                          │                           │ AudioConverter
+  │                          │                           │ → 16kHz mono PCM
+  │                          │                           │ Parakeet TDT v3 (CoreML)
+  │                          │                           │ (optional) Sortformer diarize
   │                          │  JSON transcript          │
   │                          │◄──────────────────────────│
   │  JSON response           │                           │
@@ -143,7 +155,7 @@ Client                    Go (Fiber)                Python (FastAPI)
 ### Streaming ASR (Real-Time)
 
 ```
-Client                    Go (Fiber)                Python (FastAPI)
+Client                    Go (Fiber)                Swift (Vapor/FluidAudio)
   │                          │                           │
   │  WS /ws/asr              │                           │
   │  [upgrade]               │                           │
@@ -155,7 +167,9 @@ Client                    Go (Fiber)                Python (FastAPI)
   │  binary: audio chunk 1   │                           │
   │─────────────────────────►│  forward chunk 1          │
   │                          │──────────────────────────►│
-  │                          │                           │ VAD + buffer
+  │                          │                           │ Decode (PCM/μ-law/A-law)
+  │                          │                           │ Resample → 16kHz
+  │                          │                           │ Buffer + ASR (CoreML)
   │                          │  partial transcript       │
   │                          │◄──────────────────────────│
   │  text: partial result    │                           │
@@ -173,6 +187,24 @@ Client                    Go (Fiber)                Python (FastAPI)
   │─────────────────────────►│──────────────────────────►│
 ```
 
+### LLM Processing (Optional)
+
+```
+Client                    Go (Fiber)                Python (FastAPI/mlx-lm)
+  │                          │                           │
+  │  POST /api/v1/process    │                           │
+  │  [transcript + task]     │                           │
+  │─────────────────────────►│                           │
+  │                          │  POST /process            │
+  │                          │  [transcript + task]      │
+  │                          │──────────────────────────►│
+  │                          │                           │ Llama 3.1 8B (MLX)
+  │                          │  JSON result              │
+  │                          │◄──────────────────────────│
+  │  JSON response           │                           │
+  │◄─────────────────────────│                           │
+```
+
 ---
 
 ## Model Pipeline
@@ -183,32 +215,32 @@ Client                    Go (Fiber)                Python (FastAPI)
 Audio Input (any format)
     │
     ▼
-Resample → 16kHz mono PCM
-    │
+AudioConverter (FluidAudio)
+    │  Format detection + resample → 16kHz mono PCM
     ▼
-[Streaming only] Silero VAD
+[Streaming only] Silero VAD (CoreML/ANE)
     │  Detects speech segments
-    │  Runs on ANE (CoreML) — no GPU contention
+    │  Runs on Apple Neural Engine — no GPU contention
     ▼
-Parakeet TDT 1.1B (MLX on GPU)
+Parakeet TDT v3 (CoreML/ANE)
     │  FastConformer encoder
     │  TDT decoder
     │  → text + word-level timestamps
     ▼
 [Optional] Speaker Diarization
-    │  TitaNet speaker embeddings
-    │  Sortformer end-to-end clustering
+    │  Sortformer (end-to-end neural, up to 4 speakers)
+    │  Maps words to speakers via overlap analysis
     │  → speaker labels per segment
     ▼
 JSON Response
     {
       "text": "full transcript",
       "segments": [
-        {"speaker": "A", "start": 0.0, "end": 2.1, "text": "Hello..."},
-        {"speaker": "B", "start": 2.3, "end": 4.5, "text": "Hi there..."}
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 2.1, "text": "Hello..."},
+        {"speaker": "SPEAKER_01", "start": 2.3, "end": 4.5, "text": "Hi there..."}
       ],
       "duration": 60.0,
-      "processing_time": 0.55
+      "processing_time_ms": 52
     }
 ```
 
@@ -219,20 +251,19 @@ JSON Response
 │  Unified Memory — 24 GB                       │
 │                                               │
 │  ┌────────────┐  macOS + system    ~3.5 GB    │
-│  ├────────────┤  Parakeet TDT 1.1B ~2.2 GB    │
-│  ├────────────┤  LuxTTS            ~1.0 GB    │
+│  ├────────────┤  Parakeet TDT v3   ~1.2 GB    │
+│  ├────────────┤  PocketTTS         ~0.5 GB    │
 │  ├────────────┤  Sortformer        ~0.2 GB    │
-│  ├────────────┤  TitaNet + VAD     ~0.05 GB   │
+│  ├────────────┤  Silero VAD        ~0.05 GB   │
 │  ├────────────┤  LLM (Llama 8B Q4) ~4.5 GB *  │
-│  ├────────────┤  Python runtime    ~0.8 GB    │
+│  ├────────────┤  Swift runtime     ~0.2 GB    │
 │  ├────────────┤  Go runtime        ~0.1 GB    │
 │  ├────────────┤  Audio buffers     ~0.3 GB    │
-│  ├────────────┤  Voice presets     ~0.05 GB   │
 │  ├────────────┤  PostgreSQL**      ~1.0 GB    │
-│  ├────────────┤  ── Free (24GB) ── ~10.3 GB   │
-│  ├────────────┤  ── Free (32GB) ── ~18.3 GB   │
+│  ├────────────┤  ── Free (24GB) ── ~12.5 GB   │
+│  ├────────────┤  ── Free (32GB) ── ~20.5 GB   │
 │  └────────────┘                               │
-│  *  Only if ENABLE_LLM=true                   │
+│  *  Only if ENABLE_LLM=true (Python sidecar)  │
 │  ** Only if DB is colocated on this node       │
 └───────────────────────────────────────────────┘
 ```
@@ -313,7 +344,7 @@ CREATE INDEX idx_usage_user_created ON usage_log(user_id, created_at DESC);
 ## Scaling Strategy
 
 | Stage | Nodes | Infra Cost (CAD) | Handles |
-|-------|-------|-----------|---------|
+|-------|-------|-----------|---------| 
 | **Dev** | 1× M4 16GB | $700 | 3–5 streams, 0.6B model |
 | **Launch** | 1× M4 24GB | $950 | 5–8 streams, ASR + TTS + diarization |
 | **Recommended** | 1× M4 32GB | $1,150 | Full stack incl. LLM processing |

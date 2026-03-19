@@ -1,8 +1,8 @@
 # GoTranscribeSrv
 
-**On-device speech services powered by NVIDIA Parakeet TDT on Apple Silicon.**
+**On-device speech services powered by CoreML/Apple Neural Engine on Apple Silicon.**
 
-A Go/Fiber backend with a Python inference sidecar providing ASR (speech-to-text), TTS (text-to-speech), and speaker diarization — all running locally on Mac Mini hardware. No cloud APIs, no GPU rental, full data privacy.
+A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (speech-to-text), TTS (text-to-speech), speaker diarization, and VAD — all running natively on Mac Mini hardware via CoreML and the Apple Neural Engine. An optional Python sidecar handles on-device LLM processing. No cloud APIs, no GPU rental, full data privacy.
 
 ---
 
@@ -13,9 +13,10 @@ A Go/Fiber backend with a Python inference sidecar providing ASR (speech-to-text
 | **Real-Time Streaming ASR** | WebSocket endpoint for live transcription with partial results |
 | **File Upload ASR** | Single file or chunked upload; returns full transcript with timestamps |
 | **Whisper-Compatible API** | Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint |
-| **Speaker Diarization** | Optional per-request; identifies and labels speakers (NeMo Sortformer) |
-| **Text-to-Speech** | LuxTTS with zero-shot voice cloning, 48 kHz output, pre-built voice presets |
-| **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B |
+| **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` WebSocket endpoint |
+| **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
+| **Text-to-Speech** | PocketTTS with voice cloning support, 24 kHz output |
+| **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B (optional) |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
 | **Rate Limiting** | Per-user, in-memory sliding window |
@@ -34,7 +35,8 @@ A Go/Fiber backend with a Python inference sidecar providing ASR (speech-to-text
                ▼              ▼              ▼
          ┌──────────┐  ┌──────────┐  ┌──────────┐
          │Mac Mini 1│  │Mac Mini 2│  │Mac Mini 3│
-         │ Go+Py    │  │ Go+Py    │  │ Go+Py    │
+         │Go+Swift  │  │Go+Swift  │  │Go+Swift  │
+         │  (+Py)   │  │  (+Py)   │  │  (+Py)   │
          └────┬─────┘  └────┬─────┘  └────┬─────┘
               └──────────────┼──────────────┘
                              ▼
@@ -46,10 +48,11 @@ A Go/Fiber backend with a Python inference sidecar providing ASR (speech-to-text
 
 Each node runs:
 - **Go (Fiber)** — API gateway, auth, WebSocket handling, usage tracking
-- **Python (FastAPI)** — ML inference (Parakeet TDT via MLX, Sortformer diarization, LuxTTS)
-- Communication: HTTP/WebSocket on localhost (no gRPC overhead needed)
+- **Swift (Vapor + FluidAudio)** — Audio AI inference: ASR (Parakeet TDT v3), VAD (Silero), speaker diarization (Sortformer), TTS (PocketTTS) — all via CoreML/ANE
+- **Python (FastAPI)** *(optional)* — LLM transcript processing (Llama 3.1 8B via mlx-lm)
+- Communication: HTTP/WebSocket on localhost between all components
 
-**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. The sidecar URL is fully configurable via `SIDECAR_URL` / `SIDECAR_WS_URL` env vars — no code changes needed.
+**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` / `LLM_SIDECAR_URL` env vars — no code changes needed.
 
 See [docs/architecture.md](docs/architecture.md) for detailed design.
 
@@ -57,7 +60,9 @@ See [docs/architecture.md](docs/architecture.md) for detailed design.
 
 ## Quick Start
 
-### Option A: Docker (Recommended)
+### Option A: Docker + Native Sidecars (Recommended)
+
+Docker runs PostgreSQL and the Go API server. The Swift and Python sidecars run natively on the Mac for CoreML/ANE access.
 
 ```bash
 git clone https://github.com/yourorg/gotranscribesrv.git
@@ -65,8 +70,14 @@ cd gotranscribesrv
 cp .env.example .env
 # Edit .env: set JWT_SECRET and POSTGRES_PASSWORD
 
-docker compose up -d
-docker compose logs -f server   # Watch for admin credentials
+# Terminal 1 — Postgres + Go API
+make up
+
+# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS)
+make swift-sidecar       # Builds & serves on :8101
+
+# Terminal 3 — Python sidecar (LLM only, optional)
+make sidecar             # Serves on :8100
 ```
 
 On first boot, an admin user is automatically created with a **random password** and API key printed to the console:
@@ -77,26 +88,27 @@ On first boot, an admin user is automatically created with a **random password**
   │ API Key:  gtx_live_a4b8...
 ```
 
-### Option B: Manual Setup
+### Option B: Fully Manual Setup
 
-**Prerequisites:** macOS 14+ (Apple Silicon M1/M2/M4), Go 1.22+, Python 3.11+, PostgreSQL 15+
+**Prerequisites:** macOS 14+ (Apple Silicon M1/M2/M4), Go 1.22+, Swift 6.0+ (Xcode 16+), Python 3.11+ (for LLM only), PostgreSQL 15+
 
 ```bash
 git clone https://github.com/yourorg/gotranscribesrv.git
 cd gotranscribesrv
 cp .env.example .env     # Edit DB credentials, JWT secret
 
-# Pre-download ML models + voice presets
-make setup               # Runs setup-models + setup-voices
+# Start Swift sidecar (downloads models on first run)
+make swift-sidecar &     # Loads CoreML models, serves on :8101
 
-# Start Python sidecar
-make sidecar &           # Loads models, serves on :8100
+# Optional: Start Python sidecar for LLM processing
+make setup               # Downloads LLM models
+make sidecar &           # Serves on :8100
 
 # Start Go backend
 make dev                 # Runs migrations, seeds admin, serves on :3000
 ```
 
-### 4. Test It
+### Test It
 
 ```bash
 # Use the admin API key from the console output:
@@ -115,7 +127,7 @@ curl -X POST http://localhost:3000/v1/audio/transcriptions \
 curl -X POST http://localhost:3000/api/v1/tts \
   -H "X-API-Key: gtx_live_..." \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello from GoTranscribeSrv", "voice": "professional"}' \
+  -d '{"text": "Hello from GoTranscribeSrv", "voice": "default"}' \
   --output speech.wav
 ```
 
@@ -131,7 +143,9 @@ curl -X POST http://localhost:3000/api/v1/tts \
 | `POST` | `/api/v1/asr` | Transcribe uploaded audio file |
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
+| `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
 | `POST` | `/api/v1/tts` | Synthesize speech from text |
+| `GET`  | `/api/v1/voices` | List available TTS voice presets |
 | `POST` | `/api/v1/process` | LLM transcript processing (summarize, action items, etc.) |
 | `GET`  | `/api/v1/process/tasks` | List available LLM processing tasks |
 | `GET`  | `/api/v1/usage/summary` | Usage stats for current user |
@@ -178,10 +192,9 @@ A 3-node cluster pays for itself in **under 2 months** vs cloud pricing at 1,000
 ### Throughput Reference
 
 | Model | Speed (vs real-time) | 1 hr audio transcribed in |
-|-------|---------------------|--------------------------|
-| Parakeet TDT 0.6B (CoreML, M4 Pro) | ~110x | ~33 seconds |
-| Parakeet TDT 1.1B (CoreML, M4) | ~60–80x | ~45–60 seconds |
-| Parakeet TDT 1.1B (MLX, M4) | ~40–60x | ~60–90 seconds |
+|-------|---------------------|-----------------------------|
+| Parakeet TDT v3 (CoreML, M4 Pro) | ~110x | ~33 seconds |
+| Parakeet TDT v3 (CoreML, M4) | ~60–80x | ~45–60 seconds |
 
 ---
 
@@ -196,12 +209,18 @@ gotranscribesrv/
 │   ├── models/                 # User, APIKey, UsageLog
 │   ├── middleware/             # Auth, usage, rate limit
 │   ├── handlers/               # Route handlers
-│   └── sidecar/                # HTTP/WS client for Python
-├── sidecar/
-│   ├── main.py                 # FastAPI inference server
-│   ├── routers/                # ASR, TTS endpoints
-│   ├── engines/                # Model wrappers
-│   └── voices/                 # Pre-built voice presets (LibriTTS-R)
+│   └── sidecar/                # HTTP/WS client for sidecars
+├── sidecar-swift/              # Swift inference sidecar
+│   ├── Package.swift           # SPM manifest (Vapor + FluidAudio)
+│   └── Sources/Server/
+│       ├── main.swift          # Entry point
+│       ├── EngineManager.swift # Model lifecycle (ASR, VAD, diarizer, TTS)
+│       ├── AudioConverter.swift
+│       └── Routes/             # Transcribe, Stream, VAD, Diarize, TTS, Health
+├── sidecar/                    # Python sidecar (LLM only)
+│   ├── main.py                 # FastAPI server
+│   ├── routers/                # LLM processing endpoints
+│   └── engines/                # LLM engine wrapper
 ├── docs/                       # Architecture, API, setup
 ├── .env.example
 ├── Makefile
@@ -217,12 +236,12 @@ gotranscribesrv/
 | API Gateway | Go + [Fiber v2](https://gofiber.io) |
 | Auth | JWT (access/refresh) + API keys, bcrypt |
 | Database | PostgreSQL 15+ via [GORM](https://gorm.io) |
-| Inference Server | Python + [FastAPI](https://fastapi.tiangolo.com) |
-| ASR Model | [Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) via MLX |
-| Diarization | NeMo Sortformer + TitaNet |
-| VAD | Silero VAD |
-| TTS | [LuxTTS](https://github.com/ysharma3501/LuxTTS) — 48 kHz, zero-shot voice cloning |
-| LLM Processing | Llama 3.1 8B (4-bit) via [mlx-lm](https://github.com/ml-explore/mlx-examples) — opt-in |
+| Inference Server | Swift + [Vapor](https://vapor.codes) + [FluidAudio](https://github.com/FluidInference/FluidAudio) |
+| ASR Model | [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) via CoreML/ANE |
+| Diarization | Sortformer (end-to-end neural, up to 4 speakers) |
+| VAD | Silero VAD (CoreML/ANE) |
+| TTS | PocketTTS — 24 kHz, voice cloning support |
+| LLM Processing | Llama 3.1 8B (4-bit) via [mlx-lm](https://github.com/ml-explore/mlx-examples) — opt-in, Python sidecar |
 | Load Balancer | Caddy / Nginx (multi-node) |
 
 ---
