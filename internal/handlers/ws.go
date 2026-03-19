@@ -63,12 +63,14 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 
 	slog.Info("WebSocket ASR session started")
 
-	sessionStart := time.Now()
 	var totalAudioBytes int
+	var firstAudioAt time.Time
+	var lastResultAt time.Time
 	errCh := make(chan error, 2)
 
 	// Client → Sidecar (audio frames)
 	go func() {
+		var frameCount int
 		for {
 			msgType, msg, err := c.ReadMessage()
 			if err != nil {
@@ -76,7 +78,11 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 				return
 			}
 			if msgType == websocket.BinaryMessage {
+				frameCount++
 				totalAudioBytes += len(msg)
+				if frameCount == 1 {
+					firstAudioAt = time.Now()
+				}
 			}
 			if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
 				errCh <- err
@@ -93,6 +99,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 				errCh <- err
 				return
 			}
+			lastResultAt = time.Now()
 			if err := c.WriteMessage(msgType, msg); err != nil {
 				errCh <- err
 				return
@@ -103,18 +110,21 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	// Wait for either direction to close
 	<-errCh
 
-	// Log usage for this streaming session
-	sessionDuration := time.Since(sessionStart)
+	// Log usage — processing time = first audio frame → last sidecar response
 	audioDurationMs := 0
 	if totalAudioBytes > 0 {
 		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
 	}
+	processTimeMs := 0
+	if !firstAudioAt.IsZero() && !lastResultAt.IsZero() {
+		processTimeMs = int(lastResultAt.Sub(firstAudioAt).Milliseconds())
+	}
 	userID, _ := c.Locals("user_id").(string)
 	apiKeyID, _ := c.Locals("api_key_id").(string)
 	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_stream",
-		audioDurationMs, int(sessionDuration.Milliseconds()), false)
+		audioDurationMs, processTimeMs, false)
 
 	slog.Info("WebSocket ASR session ended",
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"session_duration_ms", sessionDuration.Milliseconds())
+		"process_ms", processTimeMs)
 }

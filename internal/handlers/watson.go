@@ -216,8 +216,9 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	// Send Watson "listening" state
 	_ = c.WriteJSON(fiber.Map{"state": "listening"})
 
-	sessionStart := time.Now()
 	var totalAudioBytes int
+	var firstAudioAt time.Time
+	var lastResultAt time.Time
 	errCh := make(chan error, 2)
 
 	// Client → Sidecar: forward binary audio and translate Watson control messages
@@ -272,6 +273,9 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 			// Binary audio frame
 			frameCount++
 			totalAudioBytes += len(msg)
+			if frameCount == 1 {
+				firstAudioAt = time.Now()
+			}
 			if frameCount%50 == 1 {
 				slog.Info("[Watson] Forwarding audio to sidecar", "frame", frameCount,
 					"bytes", len(msg), "total_bytes", totalAudioBytes, "request_id", requestID)
@@ -326,6 +330,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 					errCh <- err
 					return
 				}
+				lastResultAt = time.Now()
 				slog.Info("[Watson] Sent final result to client", "request_id", requestID)
 
 			case "ready":
@@ -357,20 +362,23 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	<-errCh
 
-	// Log usage for this streaming session
-	sessionDuration := time.Since(sessionStart)
+	// Log usage — processing time = first audio frame → last final result
 	audioDurationMs := 0
 	if totalAudioBytes > 0 {
 		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
 	}
+	processTimeMs := 0
+	if !firstAudioAt.IsZero() && !lastResultAt.IsZero() {
+		processTimeMs = int(lastResultAt.Sub(firstAudioAt).Milliseconds())
+	}
 	userID, _ := c.Locals("user_id").(string)
 	apiKeyID, _ := c.Locals("api_key_id").(string)
 	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_watson_stream",
-		audioDurationMs, int(sessionDuration.Milliseconds()), speakerLabels)
+		audioDurationMs, processTimeMs, speakerLabels)
 
 	slog.Info("[Watson] Watson-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"session_duration_ms", sessionDuration.Milliseconds())
+		"process_ms", processTimeMs)
 }
 
 // --- Helper Functions ---

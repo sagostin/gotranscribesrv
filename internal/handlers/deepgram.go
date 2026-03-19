@@ -158,8 +158,9 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	slog.Info("[DG] Deepgram-compat session started", "request_id", requestID,
 		"interim_results", interimResults)
 
-	sessionStart := time.Now()
 	var totalAudioBytes int
+	var firstAudioAt time.Time
+	var lastResultAt time.Time
 	errCh := make(chan error, 2)
 
 	// Client → Sidecar: forward binary audio and translate control messages
@@ -202,6 +203,9 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			// Binary audio frame
 			frameCount++
 			totalAudioBytes += len(msg)
+			if frameCount == 1 {
+				firstAudioAt = time.Now()
+			}
 			if frameCount%50 == 1 {
 				slog.Info("[DG] Forwarding audio to sidecar", "frame", frameCount, "bytes", len(msg), "total_bytes", totalAudioBytes, "request_id", requestID)
 			}
@@ -257,6 +261,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					errCh <- err
 					return
 				}
+				lastResultAt = time.Now()
 				slog.Info("[DG] Sent Deepgram final Results to client", "request_id", requestID)
 
 			case "ready":
@@ -286,21 +291,23 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	<-errCh
 
-	// Log usage for this streaming session
-	sessionDuration := time.Since(sessionStart)
-	// Estimate audio duration from total bytes (PCM 16-bit 16kHz mono = 32 bytes/ms)
+	// Log usage — processing time = first audio frame → last final result
 	audioDurationMs := 0
 	if totalAudioBytes > 0 {
-		audioDurationMs = totalAudioBytes / 32
+		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+	}
+	processTimeMs := 0
+	if !firstAudioAt.IsZero() && !lastResultAt.IsZero() {
+		processTimeMs = int(lastResultAt.Sub(firstAudioAt).Milliseconds())
 	}
 	userID, _ := c.Locals("user_id").(string)
 	apiKeyID, _ := c.Locals("api_key_id").(string)
 	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_deepgram",
-		audioDurationMs, int(sessionDuration.Milliseconds()), false)
+		audioDurationMs, processTimeMs, false)
 
 	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"session_duration_ms", sessionDuration.Milliseconds())
+		"process_ms", processTimeMs)
 }
 
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.
