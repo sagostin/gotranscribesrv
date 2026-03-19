@@ -33,3 +33,4 @@ sample_test.mp3
 .DS_Store
 Thumbs.db
 /sidecar-swift/.build/
+/docs/cost-benefit-analysis.md

@@ -222,6 +222,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 
 	// SSE streaming mode (OpenAI-compatible)
 	if stream {
+		c.Locals("endpoint_override", "asr_whisper_stream")
 		return streamWhisperResponse(c, result)
 	}
 

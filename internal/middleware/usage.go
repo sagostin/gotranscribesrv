@@ -41,7 +41,7 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 		err := c.Next()
 
 		// Only log for speech/API endpoints
-		endpoint := classifyEndpoint(c.Path())
+		endpoint := classifyEndpoint(c)
 		if endpoint == "" {
 			return err
 		}
@@ -239,10 +239,18 @@ func extractErrorCode(body []byte) string {
 	return ""
 }
 
-func classifyEndpoint(path string) string {
+func classifyEndpoint(c *fiber.Ctx) string {
+	// Allow handlers to override the endpoint classification (e.g. for streaming variants)
+	if override, ok := c.Locals("endpoint_override").(string); ok && override != "" {
+		return override
+	}
+
+	path := c.Path()
 	switch {
-	case path == "/api/v1/asr" || path == "/v1/audio/transcriptions":
+	case path == "/api/v1/asr":
 		return "asr"
+	case path == "/v1/audio/transcriptions":
+		return "asr_whisper"
 	case path == "/ws/asr":
 		return "asr_stream"
 	case path == "/v1/recognize":
