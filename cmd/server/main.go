@@ -74,8 +74,9 @@ func main() {
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
-		AppName:   "GoTranscribeSrv",
-		BodyLimit: 100 * 1024 * 1024, // 100MB
+		AppName:     "GoTranscribeSrv",
+		BodyLimit:   100 * 1024 * 1024, // 100MB
+		ProxyHeader: "X-Forwarded-For", // Trust proxy headers from Caddy/nginx
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
@@ -231,6 +232,7 @@ func main() {
 	// Usage
 	authed.Get("/api/v1/usage/summary", usageHandler.Summary)
 	authed.Get("/api/v1/usage/history", usageHandler.History)
+	authed.Get("/api/v1/usage/keys/:id", usageHandler.KeySummary)
 
 	// API Keys
 	authed.Post("/api/v1/keys", keysHandler.Create)

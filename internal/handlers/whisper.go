@@ -184,6 +184,17 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 
 	// Store metadata for usage tracking
 	c.Locals("audio_duration_ms", int(result.Duration*1000))
+	c.Locals("diarized", result.Diarized)
+	c.Locals("usage_meta", map[string]interface{}{
+		"file_size_bytes": file.Size,
+		"filename":        file.Filename,
+		"word_count":      len(result.Words),
+		"segment_count":   len(result.Segments),
+		"language":        language,
+		"model":           model,
+		"response_format": responseFormat,
+		"num_speakers":    result.NumSpeakers,
+	})
 
 	// If VAD detected multiple speech regions but sidecar returned just 1-2 segments,
 	// split the transcript using VAD boundaries + word timestamps.

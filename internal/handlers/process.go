@@ -82,6 +82,12 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 			},
 		})
 	}
+	c.Locals("usage_meta", map[string]interface{}{
+		"input_length":     len(req.TranscriptText),
+		"task":             result.Task,
+		"tokens_generated": result.TokensGenerated,
+		"model":            result.Model,
+	})
 
 	return c.JSON(result)
 }

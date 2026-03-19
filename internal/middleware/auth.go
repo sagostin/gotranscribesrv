@@ -158,6 +158,7 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 	}
 
 	c.Locals("user_id", apiKey.UserID.String())
+	c.Locals("api_key_id", apiKey.ID.String())
 	c.Locals("email", apiKey.User.Email)
 	c.Locals("tier", apiKey.User.Tier)
 	return c.Next()
@@ -181,6 +182,7 @@ func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) bool {
 	}
 
 	c.Locals("user_id", apiKey.UserID.String())
+	c.Locals("api_key_id", apiKey.ID.String())
 	c.Locals("email", apiKey.User.Email)
 	c.Locals("tier", apiKey.User.Tier)
 	return true

@@ -10,17 +10,19 @@ import (
 
 // APIKey represents a user-generated API key for programmatic access.
 type APIKey struct {
-	ID        uuid.UUID      `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	UserID    uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	KeyHash   string         `json:"-" gorm:"not null"`
-	Label     string         `json:"label"`
-	Scopes    pq.StringArray `json:"scopes" gorm:"type:text[]"`
-	Active    bool           `json:"active" gorm:"default:true"`
-	CreatedAt time.Time      `json:"created_at"`
-	RevokedAt *time.Time     `json:"revoked_at,omitempty"`
+	ID         uuid.UUID      `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
+	UserID     uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	KeyHash    string         `json:"-" gorm:"not null"`
+	Label      string         `json:"label"`
+	Scopes     pq.StringArray `json:"scopes" gorm:"type:text[]"`
+	Active     bool           `json:"active" gorm:"default:true"`
+	CreatedAt  time.Time      `json:"created_at"`
+	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time     `json:"revoked_at,omitempty"`
 
-	// Association
-	User User `json:"-" gorm:"foreignKey:UserID"`
+	// Associations
+	User  User       `json:"-" gorm:"foreignKey:UserID"`
+	Usage []UsageLog `json:"-" gorm:"foreignKey:APIKeyID"`
 }
 
 // BeforeCreate generates a UUID if not already set.

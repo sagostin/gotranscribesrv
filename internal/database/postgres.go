@@ -48,6 +48,7 @@ func (db *DB) Migrate() error {
 		&models.User{},
 		&models.APIKey{},
 		&models.UsageLog{},
+		&models.RequestLog{},
 	)
 }
 

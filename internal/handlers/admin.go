@@ -131,10 +131,28 @@ func (h *AdminHandler) GetUser(c *fiber.Ctx) error {
 	var totalRequests int64
 	h.db.Model(&models.UsageLog{}).Where("user_id = ?", userID).Count(&totalRequests)
 
+	// Per-key usage counts
+	type KeyUsageCount struct {
+		APIKeyID     uuid.UUID `json:"api_key_id"`
+		Label        string    `json:"label"`
+		RequestCount int64     `json:"request_count"`
+	}
+	var keyUsage []KeyUsageCount
+	h.db.Raw(`
+		SELECT ak.id AS api_key_id, ak.label,
+		       COUNT(ul.id) AS request_count
+		FROM api_keys ak
+		LEFT JOIN usage_logs ul ON ul.api_key_id = ak.id
+		WHERE ak.user_id = ?
+		GROUP BY ak.id, ak.label
+		ORDER BY request_count DESC
+	`, userID).Scan(&keyUsage)
+
 	return c.JSON(fiber.Map{
 		"user":           user,
 		"api_keys":       user.APIKeys,
 		"total_requests": totalRequests,
+		"key_usage":      keyUsage,
 	})
 }
 

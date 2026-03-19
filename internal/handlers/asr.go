@@ -88,6 +88,14 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	// Store metadata for usage tracking middleware
 	c.Locals("audio_duration_ms", int(result.Duration*1000))
 	c.Locals("diarized", result.Diarized)
+	c.Locals("usage_meta", map[string]interface{}{
+		"file_size_bytes": file.Size,
+		"filename":        file.Filename,
+		"word_count":      len(result.Words),
+		"segment_count":   len(result.Segments),
+		"language":        language,
+		"model":           result.Model,
+	})
 
 	return c.JSON(result)
 }

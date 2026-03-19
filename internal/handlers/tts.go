@@ -71,6 +71,13 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 		})
 	}
 
+	c.Locals("usage_meta", map[string]interface{}{
+		"text_length":  len(req.Text),
+		"voice":        req.Voice,
+		"format":       req.Format,
+		"output_bytes": len(audio),
+	})
+
 	c.Set("Content-Type", contentType)
 	c.Set("X-Audio-Sample-Rate", "48000")
 	return c.Send(audio)

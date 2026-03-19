@@ -864,11 +864,35 @@ Aggregated usage stats for the authenticated user.
   "by_endpoint": {
     "asr": {"requests": 1200, "audio_duration_sec": 28000},
     "asr_stream": {"requests": 600, "audio_duration_sec": 7200},
-    "tts": {"requests": 47, "audio_duration_sec": 1220},
-    "process": {"requests": 85, "audio_duration_sec": 0}
-  }
+    "tts": {"requests": 47, "audio_duration_sec": 1220}
+  },
+  "by_key": [
+    {
+      "key_id": "uuid",
+      "label": "production-app",
+      "total_requests": 1500,
+      "total_audio_duration_sec": 30000,
+      "total_processing_time_sec": 400,
+      "by_endpoint": {
+        "asr": {"requests": 1000, "audio_duration_sec": 24000},
+        "asr_stream": {"requests": 500, "audio_duration_sec": 6000}
+      }
+    },
+    {
+      "key_id": "uuid",
+      "label": "dev-testing",
+      "total_requests": 247,
+      "total_audio_duration_sec": 5200,
+      "total_processing_time_sec": 70,
+      "by_endpoint": {
+        "asr": {"requests": 200, "audio_duration_sec": 4000}
+      }
+    }
+  ]
 }
 ```
+
+> **Note:** Requests made via JWT (session auth) have no `api_key_id` and are excluded from `by_key` but included in the totals.
 
 ---
 
@@ -883,6 +907,7 @@ Paginated usage log entries.
 | `page` | int | Page number (default: 1) |
 | `limit` | int | Items per page, max 100 (default: 20) |
 | `endpoint` | string | Filter by endpoint |
+| `key_id` | uuid | Filter by API key ID |
 
 **Response (200):**
 ```json
@@ -890,6 +915,7 @@ Paginated usage log entries.
   "items": [
     {
       "id": "uuid",
+      "api_key_id": "uuid",
       "endpoint": "asr",
       "audio_duration_ms": 60000,
       "processing_time_ms": 550,
@@ -902,6 +928,37 @@ Paginated usage log entries.
   "pages": 93
 }
 ```
+
+---
+
+### GET `/api/v1/usage/keys/:id`
+
+Usage summary for a specific API key owned by the authenticated user.
+
+**Query params:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `period` | string | `"day"`, `"week"`, `"month"` (default: `"month"`) |
+
+**Response (200):**
+```json
+{
+  "period": "month",
+  "key": {
+    "key_id": "uuid",
+    "label": "production-app",
+    "total_requests": 1500,
+    "total_audio_duration_sec": 30000,
+    "total_processing_time_sec": 400,
+    "by_endpoint": {
+      "asr": {"requests": 1000, "audio_duration_sec": 24000}
+    }
+  }
+}
+```
+
+**Errors:** `400` invalid key ID, `404` key not found or not owned by user
 
 ---
 
