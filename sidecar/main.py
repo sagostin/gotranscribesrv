@@ -18,8 +18,7 @@ from contextlib import asynccontextmanager
 
 from config import Settings
 from engines.diarizer import Diarizer
-from engines.tts_engine import TTSEngine
-from routers import asr, tts, process
+from routers import asr, process
 
 # Configure logging
 logging.basicConfig(
@@ -47,8 +46,8 @@ async def lifespan(app: FastAPI):
         os.environ["HF_DATASETS_OFFLINE"] = "1"
         logger.info("Offline mode ON — using cached models only (no network)")
 
-    # NOTE: ASR + VAD have moved to the Node.js CoreML sidecar (port 8101).
-    # This Python sidecar only loads diarization, TTS, and LLM.
+    # NOTE: ASR, VAD, and TTS have moved to the Swift CoreML sidecar (port 8101).
+    # This Python sidecar only loads diarization and LLM.
 
     # Load diarizer (optional — degrade gracefully)
     if settings.enable_diarization:
@@ -58,15 +57,6 @@ async def lifespan(app: FastAPI):
             logger.info("Diarizer loaded")
         except Exception as e:
             logger.error(f"Diarizer failed to load (continuing without): {e}")
-
-    # Load TTS engine (optional — degrade gracefully)
-    if settings.enable_tts:
-        try:
-            logger.info("Loading LuxTTS engine...")
-            engines["tts"] = TTSEngine(voices_dir=settings.voices_dir)
-            logger.info("TTS engine loaded")
-        except Exception as e:
-            logger.error(f"TTS engine failed to load (continuing without): {e}")
 
     # Load LLM engine (optional — degrade gracefully)
     if settings.enable_llm:
@@ -113,7 +103,6 @@ async def health():
 
 # Mount routers
 app.include_router(asr.router)
-app.include_router(tts.router)
 app.include_router(process.router)
 
 

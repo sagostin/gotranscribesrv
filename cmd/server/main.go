@@ -131,7 +131,8 @@ func main() {
 	authHandler := handlers.NewAuthHandler(db.DB, authCfg, cfg.RegistrationEnabled)
 	asrHandler := handlers.NewASRHandler(sc)
 	whisperHandler := handlers.NewWhisperHandler(sc)
-	ttsHandler := handlers.NewTTSHandler(sc)
+	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir)
+	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	processHandler := handlers.NewProcessHandler(sc)
@@ -236,7 +237,12 @@ func main() {
 
 	// TTS
 	authed.Post("/api/v1/tts", ttsHandler.Synthesize)
-	authed.Get("/api/v1/voices", ttsHandler.ListVoices)
+
+	// Voice Management
+	authed.Post("/api/v1/voices/clone", voiceHandler.Clone)
+	authed.Get("/api/v1/voices", voiceHandler.List)
+	authed.Get("/api/v1/voices/:id", voiceHandler.Get)
+	authed.Delete("/api/v1/voices/:id", voiceHandler.Delete)
 
 	// LLM Transcript Processing
 	authed.Post("/api/v1/process", processHandler.Process)

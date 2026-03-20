@@ -50,6 +50,7 @@ func (db *DB) Migrate() error {
 		&models.UsageLog{},
 		&models.RequestLog{},
 		&models.TokenBlacklist{},
+		&models.Voice{},
 	)
 }
 

@@ -41,6 +41,9 @@ type Config struct {
 	// Registration
 	RegistrationEnabled bool
 
+	// Voice Storage
+	VoicesDataDir string
+
 	// Logging
 	LogLevel string
 
@@ -77,6 +80,8 @@ func Load() *Config {
 		RateLimitEnterprise: envOrDefaultInt("RATE_LIMIT_ENTERPRISE", 0),
 
 		RegistrationEnabled: envOrDefault("REGISTRATION_ENABLED", "false") == "true",
+
+		VoicesDataDir: envOrDefault("VOICES_DATA_DIR", "data/voices"),
 
 		LogLevel: envOrDefault("LOG_LEVEL", "info"),
 

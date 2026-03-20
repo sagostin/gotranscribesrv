@@ -146,7 +146,7 @@ An NVIDIA GPU can't run on its own — it needs a full host machine. Here are re
 | Parakeet TDT ASR | ✅ via parakeet-mlx | ✅ via NeMo (requires migration) |
 | Streaming ASR | ✅ | ✅ (would need re-integration) |
 | Speaker Diarization (Sortformer) | ✅ PyTorch/MPS | ✅ PyTorch/CUDA (native) |
-| TTS (LuxTTS) | ✅ PyTorch/MPS | ✅ PyTorch/CUDA (native) |
+| TTS (PocketTTS) | ✅ CoreML/ANE | ✅ PyTorch/CUDA (native) |
 | VAD (Silero) | ✅ ONNX/CoreML | ✅ ONNX/CUDA |
 | LLM Processing (Llama 8B) | ✅ via mlx-lm | ✅ via vLLM/TRT-LLM (faster) |
 | Batch inference | ❌ Single stream | ✅ Up to 128 concurrent |

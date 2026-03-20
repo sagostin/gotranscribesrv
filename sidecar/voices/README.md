@@ -1,31 +1,16 @@
 # Voice Presets
 
-This directory contains pre-built voice reference clips for LuxTTS.
+This directory previously contained pre-built voice reference clips for LuxTTS.
 
-## Shipped Presets
+**LuxTTS has been removed** — TTS is now handled exclusively by the Swift sidecar
+using **PocketTTS** (via FluidAudio, CoreML/ANE).
 
-Voice presets should be .wav files (5-15 seconds of clean speech).
-They are loaded on startup and available via the `voice` parameter in the TTS API.
+## System Voices
 
-### Adding Presets
+PocketTTS includes 17+ built-in voices (Jane, Charles, Alba, etc.) that are
+available through the `GET /api/v1/voices` endpoint with `"type": "system"`.
 
-1. Source high-quality voice clips from LibriTTS-R (CC BY 4.0):
-   https://huggingface.co/datasets/blaze999/libritts_r
+## Custom Voices
 
-2. Trim to 10-15 seconds of clear, single-speaker speech.
-
-3. Save as WAV (any sample rate — will be resampled internally).
-
-4. Name the file descriptively: `professional.wav`, `narrator.wav`, etc.
-
-### Expected Files
-
-```
-voices/
-├── default.wav        # Neutral, clear American English
-├── professional.wav   # Formal, confident tone
-├── friendly.wav       # Warm, conversational
-├── narrator.wav       # Deep, documentary style
-├── bright.wav         # Energetic, upbeat
-└── custom/            # User-uploaded reference clips (runtime)
-```
+Users can create custom cloned voices via `POST /api/v1/voices/clone`.
+Voice embeddings are stored under the Go backend's `data/voices/` directory.

@@ -131,11 +131,11 @@ actor EngineManager {
         diarizerReady
     }
 
-    func synthesize(text: String) async throws -> Data {
+    func synthesize(text: String, voice: String? = nil) async throws -> Data {
         guard let manager = ttsManager else {
             throw Abort(.serviceUnavailable, reason: "TTS engine not loaded")
         }
-        return try await manager.synthesize(text: text)
+        return try await manager.synthesize(text: text, voice: voice)
     }
 
     func synthesizeWithClone(text: String, voiceURL: URL) async throws -> Data {
@@ -144,6 +144,37 @@ actor EngineManager {
         }
         let voiceData = try await manager.cloneVoice(from: voiceURL)
         return try await manager.synthesize(text: text, voiceData: voiceData)
+    }
+
+    /// Extract a voice embedding from an audio file without synthesis.
+    /// Returns serialized voice data (raw Float32 binary) that can be stored and reused.
+    func extractVoiceEmbedding(audioURL: URL) async throws -> Data {
+        guard let manager = ttsManager else {
+            throw Abort(.serviceUnavailable, reason: "TTS engine not loaded")
+        }
+        let voiceData = try await manager.cloneVoice(from: audioURL)
+
+        // Serialize PocketTtsVoiceData → raw Float32 binary via temp file
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voice-embed-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try manager.saveClonedVoice(voiceData, to: tempURL)
+        return try Data(contentsOf: tempURL)
+    }
+
+    /// Synthesize speech using a pre-extracted voice embedding (raw Float32 binary).
+    func synthesizeWithEmbedding(text: String, voiceData: Data) async throws -> Data {
+        guard let manager = ttsManager else {
+            throw Abort(.serviceUnavailable, reason: "TTS engine not loaded")
+        }
+
+        // Deserialize raw Float32 binary → PocketTtsVoiceData via temp file
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voice-load-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try voiceData.write(to: tempURL)
+        let pocketVoice = try manager.loadClonedVoice(from: tempURL)
+        return try await manager.synthesize(text: text, voiceData: pocketVoice)
     }
 
     func healthStatus() -> [String: String] {

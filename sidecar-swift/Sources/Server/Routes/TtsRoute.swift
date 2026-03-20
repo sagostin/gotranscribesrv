@@ -3,10 +3,15 @@ import Vapor
 
 /// TTS routes:
 /// - POST /synthesize — Text-to-speech synthesis
-/// - GET /voices — List available voice presets
+/// - POST /clone-voice — Extract voice embedding from audio
+/// - GET /voices — List available voice presets (system + filesystem)
 func ttsRoutes(_ app: Application, engines: EngineManager) {
     app.post("synthesize") { req async throws -> Response in
         try await handleSynthesize(req: req, engines: engines)
+    }
+
+    app.post("clone-voice") { req async throws -> Response in
+        try await handleCloneVoice(req: req, engines: engines)
     }
 
     app.get("voices") { req async throws -> VoicesListResponse in
@@ -19,7 +24,14 @@ private func handleSynthesize(req: Request, engines: EngineManager) async throws
 
     let audioData: Data
 
-    if let voiceRef = body.voice_ref, !voiceRef.isEmpty {
+    if let voiceData = body.voice_data, !voiceData.isEmpty {
+        // Pre-extracted voice embedding — fastest path (stored voices)
+        guard let embeddingBytes = Data(base64Encoded: voiceData) else {
+            throw Abort(.badRequest, reason: "Invalid base64 voice_data")
+        }
+        audioData = try await engines.synthesizeWithEmbedding(text: body.text, voiceData: embeddingBytes)
+    } else if let voiceRef = body.voice_ref, !voiceRef.isEmpty {
+        // Raw audio reference — one-shot voice cloning
         guard let refBytes = Data(base64Encoded: voiceRef) else {
             throw Abort(.badRequest, reason: "Invalid base64 voice reference")
         }
@@ -34,8 +46,8 @@ private func handleSynthesize(req: Request, engines: EngineManager) async throws
         // Voice cloning + synthesis (runs inside actor)
         audioData = try await engines.synthesizeWithClone(text: body.text, voiceURL: refURL)
     } else {
-        // Default voice (runs inside actor)
-        audioData = try await engines.synthesize(text: body.text)
+        // Named system voice (runs inside actor)
+        audioData = try await engines.synthesize(text: body.text, voice: body.voice)
     }
 
     var headers = HTTPHeaders()
@@ -44,28 +56,85 @@ private func handleSynthesize(req: Request, engines: EngineManager) async throws
     return Response(status: .ok, headers: headers, body: .init(data: audioData))
 }
 
-private func handleListVoices() -> VoicesListResponse {
-    let voicesDir = URL(fileURLWithPath: "voices")
-    var voices: [VoiceInfo] = []
+/// Extract a voice embedding from uploaded audio.
+/// Returns raw embedding bytes that can be stored and reused in voice_data.
+private func handleCloneVoice(req: Request, engines: EngineManager) async throws -> Response {
+    // Accept multipart audio upload
+    guard let audioFile = try? req.content.decode(CloneVoiceRequest.self) else {
+        // Try raw body as audio
+        guard let body = req.body.data else {
+            throw Abort(.badRequest, reason: "Audio file required")
+        }
+        let audioBytes = Data(buffer: body)
+        return try await extractEmbedding(audioBytes: audioBytes, engines: engines)
+    }
 
+    return try await extractEmbedding(audioBytes: Data(buffer: audioFile.audio.data), engines: engines)
+}
+
+private func extractEmbedding(audioBytes: Data, engines: EngineManager) async throws -> Response {
+    let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clone-\(UUID().uuidString).wav")
+    defer { try? FileManager.default.removeItem(at: tempURL) }
+
+    let samples = try await SidecarAudioConverter.toPCM16kMono(audioBytes)
+    try writeWav(samples: samples, sampleRate: 16000, to: tempURL)
+
+    let embedding: Data
+    do {
+        embedding = try await engines.extractVoiceEmbedding(audioURL: tempURL)
+    } catch let error as PocketTTSError {
+        // Surface the actual PocketTTS error (e.g. "Audio too long", "Audio too short")
+        throw Abort(.unprocessableEntity, reason: "\(error)")
+    }
+
+    var headers = HTTPHeaders()
+    headers.add(name: .contentType, value: "application/octet-stream")
+    headers.add(name: "Content-Length", value: "\(embedding.count)")
+    return Response(status: .ok, headers: headers, body: .init(data: embedding))
+}
+
+private func handleListVoices() -> VoicesListResponse {
+    // PocketTTS built-in voices
+    let systemVoices: [VoiceInfo] = [
+        VoiceInfo(id: "default", name: "default", description: "PocketTTS default voice", type: "system"),
+        VoiceInfo(id: "jane", name: "Jane", description: "Female, conversational", type: "system"),
+        VoiceInfo(id: "alba", name: "Alba", description: "Male, reading & conversational", type: "system"),
+        VoiceInfo(id: "charles", name: "Charles", description: "Male, conversational", type: "system"),
+        VoiceInfo(id: "anna", name: "Anna", description: "Female, conversational", type: "system"),
+        VoiceInfo(id: "eve", name: "Eve", description: "Female, conversational", type: "system"),
+        VoiceInfo(id: "george", name: "George", description: "Male, conversational", type: "system"),
+        VoiceInfo(id: "paul", name: "Paul", description: "Male, conversational", type: "system"),
+        VoiceInfo(id: "mary", name: "Mary", description: "Female, conversational", type: "system"),
+        VoiceInfo(id: "michael", name: "Michael", description: "Male, conversational", type: "system"),
+        VoiceInfo(id: "vera", name: "Vera", description: "Female, conversational", type: "system"),
+        VoiceInfo(id: "jean", name: "Jean", description: "Male, conversational", type: "system"),
+        VoiceInfo(id: "eponine", name: "Eponine", description: "Female, reading", type: "system"),
+        VoiceInfo(id: "fantine", name: "Fantine", description: "Female, reading", type: "system"),
+        VoiceInfo(id: "marius", name: "Marius", description: "Male", type: "system"),
+        VoiceInfo(id: "cosette", name: "Cosette", description: "Female", type: "system"),
+        VoiceInfo(id: "azelma", name: "Azelma", description: "Female, reading", type: "system"),
+    ]
+
+    // Also scan filesystem for any .wav presets
+    var voices = systemVoices
+    let voicesDir = URL(fileURLWithPath: "voices")
     if FileManager.default.fileExists(atPath: voicesDir.path) {
         if let contents = try? FileManager.default.contentsOfDirectory(
             at: voicesDir, includingPropertiesForKeys: nil
         ) {
             for file in contents where file.pathExtension == "wav" {
-                voices.append(VoiceInfo(
-                    id: file.deletingPathExtension().lastPathComponent,
-                    name: file.deletingPathExtension().lastPathComponent,
-                    description: nil
-                ))
+                let id = file.deletingPathExtension().lastPathComponent
+                if !voices.contains(where: { $0.id == id }) {
+                    voices.append(VoiceInfo(
+                        id: id,
+                        name: file.deletingPathExtension().lastPathComponent,
+                        description: "File-based voice preset",
+                        type: "system"
+                    ))
+                }
             }
         }
-    }
-
-    if !voices.contains(where: { $0.id == "default" }) {
-        voices.insert(VoiceInfo(
-            id: "default", name: "default", description: "PocketTTS default voice"
-        ), at: 0)
     }
 
     return VoicesListResponse(voices: voices)
@@ -106,9 +175,14 @@ private func writeWav(samples: [Float], sampleRate: Int, to url: URL) throws {
 struct SynthesizeRequest: Content {
     let text: String
     var voice: String?
-    var voice_ref: String?
+    var voice_ref: String?    // Base64 raw audio for one-shot cloning
+    var voice_data: String?   // Base64 pre-extracted embedding for stored voices
     var speed: Double?
     var format: String?
+}
+
+struct CloneVoiceRequest: Content {
+    let audio: File
 }
 
 struct VoicesListResponse: Content {
@@ -119,4 +193,5 @@ struct VoiceInfo: Content {
     let id: String
     let name: String?
     let description: String?
+    let type: String?
 }

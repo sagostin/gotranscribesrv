@@ -81,11 +81,12 @@ type Word struct {
 
 // SynthesizeRequest is sent to the Swift sidecar for TTS.
 type SynthesizeRequest struct {
-	Text     string  `json:"text"`
-	Voice    string  `json:"voice"`
-	VoiceRef string  `json:"voice_ref,omitempty"`
-	Speed    float64 `json:"speed"`
-	Format   string  `json:"format"`
+	Text      string  `json:"text"`
+	Voice     string  `json:"voice"`
+	VoiceRef  string  `json:"voice_ref,omitempty"`  // Base64 raw audio for one-shot cloning
+	VoiceData string  `json:"voice_data,omitempty"` // Base64 pre-extracted embedding for stored voices
+	Speed     float64 `json:"speed"`
+	Format    string  `json:"format"`
 }
 
 // VadResponse is the JSON result from the Swift sidecar VAD endpoint.
@@ -273,16 +274,60 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	return audio, contentType, nil
 }
 
+// CloneVoice sends audio to the Swift sidecar to extract a voice embedding.
+// Returns the raw embedding bytes that can be stored and reused.
+func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("audio", filename)
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(audio); err != nil {
+		return nil, fmt.Errorf("write audio data: %w", err)
+	}
+	writer.Close()
+
+	httpReq, err := http.NewRequest("POST", c.swiftURL+"/clone-voice", &buf)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+
+	slog.Debug("sending clone-voice request to Swift sidecar",
+		"filename", filename, "size", len(audio))
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar clone-voice request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sidecar clone-voice returned %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	embedding, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read embedding response: %w", err)
+	}
+
+	return embedding, nil
+}
+
 // StreamURL returns the WebSocket URL for streaming ASR on the Swift sidecar.
 func (c *Client) StreamURL() string {
 	return c.swiftWSURL + "/stream"
 }
 
-// VoiceInfo describes a single TTS voice preset.
+// VoiceInfo describes a single TTS voice.
 type VoiceInfo struct {
 	ID          string `json:"id"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"` // "system" or "custom"
 }
 
 // VoicesResponse is the JSON list of available TTS voices.

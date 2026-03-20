@@ -16,7 +16,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` WebSocket endpoint |
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
-| **Text-to-Speech** | PocketTTS with voice cloning support, 24 kHz output |
+| **Text-to-Speech** | PocketTTS with per-user stored voice cloning + 17 built-in system voices, 24 kHz output |
 | **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B (optional) |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
@@ -149,7 +149,10 @@ curl -X POST http://localhost:3000/api/v1/tts \
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |
 | `WS`   | `/v1/recognize` | Watson-compatible streaming transcription |
 | `POST` | `/api/v1/tts` | Synthesize speech from text |
-| `GET`  | `/api/v1/voices` | List available TTS voice presets |
+| `POST` | `/api/v1/voices/clone` | Upload audio to create a stored cloned voice |
+| `GET`  | `/api/v1/voices` | List custom + system voices |
+| `GET`  | `/api/v1/voices/:id` | Get custom voice details |
+| `DELETE` | `/api/v1/voices/:id` | Delete a custom voice |
 | `POST` | `/api/v1/process` | LLM transcript processing (summarize, action items, etc.) |
 | `GET`  | `/api/v1/process/tasks` | List available LLM processing tasks |
 | `GET`  | `/api/v1/usage/summary` | Usage stats for current user |
@@ -213,9 +216,9 @@ gotranscribesrv/
 ├── internal/
 │   ├── config/                 # Environment config
 │   ├── database/               # PostgreSQL + migrations
-│   ├── models/                 # User, APIKey, UsageLog
+│   ├── models/                 # User, APIKey, UsageLog, Voice
 │   ├── middleware/             # Auth, usage, rate limit
-│   ├── handlers/               # Route handlers
+│   ├── handlers/               # Route handlers (incl. voice cloning)
 │   └── sidecar/                # HTTP/WS client for sidecars
 ├── sidecar-swift/              # Swift inference sidecar
 │   ├── Package.swift           # SPM manifest (Vapor + FluidAudio)
@@ -223,11 +226,11 @@ gotranscribesrv/
 │       ├── main.swift          # Entry point
 │       ├── EngineManager.swift # Model lifecycle (ASR, VAD, diarizer, TTS)
 │       ├── AudioConverter.swift
-│       └── Routes/             # Transcribe, Stream, VAD, Diarize, TTS, Health
-├── sidecar/                    # Python sidecar (LLM, diarization, TTS — legacy)
+│       └── Routes/             # Transcribe, Stream, VAD, Diarize, TTS, CloneVoice, Health
+├── sidecar/                    # Python sidecar (LLM, diarization)
 │   ├── main.py                 # FastAPI server
 │   ├── routers/                # Processing endpoints
-│   ├── engines/                # ML engine wrappers (LLM, diarizer, TTS, VAD)
+│   ├── engines/                # ML engine wrappers (LLM, diarizer)
 │   └── inference_pool.py       # Concurrency-managed inference queue
 ├── sidecar-node/               # Node.js sidecar (legacy, pre-Swift — ASR + VAD only)
 │   ├── server.js               # Express server
@@ -251,7 +254,7 @@ gotranscribesrv/
 | ASR Model | [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) via CoreML/ANE |
 | Diarization | Sortformer (end-to-end neural, up to 4 speakers) |
 | VAD | Silero VAD (CoreML/ANE) |
-| TTS | PocketTTS — 24 kHz, voice cloning support |
+| TTS | PocketTTS — 24 kHz, per-user stored voice cloning, 17+ built-in voices |
 | LLM Processing | Llama 3.1 8B (4-bit) via [mlx-lm](https://github.com/ml-explore/mlx-examples) — opt-in, Python sidecar |
 | Load Balancer | Caddy / Nginx (multi-node) |
 

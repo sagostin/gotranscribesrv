@@ -708,7 +708,7 @@ Synthesize speech using PocketTTS with voice cloning support. 24 kHz output.
 ```json
 {
   "text": "Hello, welcome to GoTranscribeSrv.",
-  "voice": "professional",
+  "voice": "jane",
   "speed": 1.0,
   "format": "wav"
 }
@@ -717,44 +717,124 @@ Synthesize speech using PocketTTS with voice cloning support. 24 kHz output.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `text` | string | yes | Text to synthesize (max 5,000 chars) |
-| `voice` | string | no | Preset voice ID (default: `"default"`) |
-| `voice_ref` | string | no | Base64-encoded audio reference for custom voice cloning (5–15 sec) |
+| `voice` | string | no | System voice name — e.g. `"jane"`, `"charles"` (default: `"default"`) |
+| `voice_id` | string | no | UUID of a stored custom voice (from `/api/v1/voices/clone`) |
+| `voice_ref` | string | no | Base64-encoded audio reference for one-shot voice cloning (5–15 sec) |
 | `speed` | number | no | Playback speed 0.5–2.0 (default: 1.0) |
 | `format` | string | no | `"wav"`, `"opus"`, `"mp3"` (default: `"wav"`) |
 
-> **Note:** If both `voice` and `voice_ref` are provided, `voice_ref` takes priority. TTS runs on the Swift sidecar via PocketTTS (CoreML/ANE).
-
-**Built-in voice presets:**
-
-| Voice ID | Description |
-|----------|-------------|
-| `default` | PocketTTS default voice |
+> **Priority:** `voice_id` > `voice_ref` > `voice`. If `voice_id` is provided, the stored voice embedding is used (fastest, no re-cloning). If `voice_ref` is provided, one-shot cloning is performed. Otherwise the named system voice is used.
 
 **Response (200):** Audio binary stream at 24 kHz.
 
 ```
 Content-Type: audio/wav
-Content-Length: 96000
-X-Audio-Sample-Rate: 48000
+X-Audio-Sample-Rate: 24000
 ```
 
 ---
 
-### GET `/api/v1/voices`
+### Voice Management
 
-List available TTS voice presets.
+#### POST `/api/v1/voices/clone`
+
+Upload an audio recording to create a stored cloned voice. The sidecar extracts a voice embedding that can be reused in TTS synthesis via `voice_id`.
+
+**Request:** Multipart form data
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `audio` | file | yes | Audio file (WAV, MP3, etc.) — max 10 MB. 5–15 seconds of clear, single-speaker speech recommended. |
+| `name` | string | yes | Display name for the voice (must be unique per user) |
+| `description` | string | no | Optional description |
+
+**Response (201):**
+```json
+{
+  "id": "uuid",
+  "name": "my-voice",
+  "description": "My custom voice",
+  "type": "custom",
+  "size_bytes": 48000,
+  "created_at": "2026-03-20T14:00:00Z"
+}
+```
+
+**Errors:** `409` voice name already exists, `422` missing name/audio or file too large, `502` sidecar unavailable
+
+---
+
+#### GET `/api/v1/voices`
+
+List the current user's custom (cloned) voices and all system (PocketTTS built-in) voices.
 
 **Response (200):**
 ```json
 {
-  "voices": [
-    {"id": "default", "name": "Default", "description": "Neutral, clear American English"},
-    {"id": "professional", "name": "Professional", "description": "Formal, confident tone"},
-    {"id": "friendly", "name": "Friendly", "description": "Warm, conversational"},
-    {"id": "narrator", "name": "Narrator", "description": "Deep, documentary style"},
-    {"id": "bright", "name": "Bright", "description": "Energetic, upbeat"}
+  "custom": [
+    {
+      "id": "uuid",
+      "name": "my-voice",
+      "description": "My custom voice",
+      "type": "custom",
+      "size_bytes": 48000,
+      "created_at": "2026-03-20T14:00:00Z"
+    }
+  ],
+  "system": [
+    {"name": "default", "description": "PocketTTS default voice", "type": "system"},
+    {"name": "Jane", "description": "Female, conversational", "type": "system"},
+    {"name": "Alba", "description": "Male, reading & conversational", "type": "system"},
+    {"name": "Charles", "description": "Male, conversational", "type": "system"},
+    {"name": "Anna", "description": "Female, conversational", "type": "system"},
+    {"name": "Eve", "description": "Female, conversational", "type": "system"},
+    {"name": "George", "description": "Male, conversational", "type": "system"},
+    {"name": "Paul", "description": "Male, conversational", "type": "system"},
+    {"name": "Mary", "description": "Female, conversational", "type": "system"},
+    {"name": "Michael", "description": "Male, conversational", "type": "system"},
+    {"name": "Vera", "description": "Female, conversational", "type": "system"},
+    {"name": "Jean", "description": "Male, conversational", "type": "system"},
+    {"name": "Eponine", "description": "Female, reading", "type": "system"},
+    {"name": "Fantine", "description": "Female, reading", "type": "system"},
+    {"name": "Marius", "description": "Male", "type": "system"},
+    {"name": "Cosette", "description": "Female", "type": "system"},
+    {"name": "Azelma", "description": "Female, reading", "type": "system"}
   ]
 }
+```
+
+---
+
+#### GET `/api/v1/voices/:id`
+
+Get details for a specific custom voice.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "name": "my-voice",
+  "description": "My custom voice",
+  "type": "custom",
+  "size_bytes": 48000,
+  "created_at": "2026-03-20T14:00:00Z"
+}
+```
+
+**Errors:** `400` invalid ID, `404` voice not found
+
+---
+
+#### DELETE `/api/v1/voices/:id`
+
+Delete a custom voice and remove the stored embedding.
+
+**Response (200):**
+```json
+{"message": "Voice deleted"}
+```
+
+**Errors:** `400` invalid ID, `404` voice not found
 ```
 
 ---
