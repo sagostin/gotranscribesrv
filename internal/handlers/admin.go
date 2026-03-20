@@ -64,6 +64,7 @@ func (h *AdminHandler) CreateUser(c *fiber.Ctx) error {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 		Tier     string `json:"tier"`
+		Admin    bool   `json:"admin"`
 	}
 
 	var req createUserReq
@@ -94,6 +95,7 @@ func (h *AdminHandler) CreateUser(c *fiber.Ctx) error {
 		Email:    req.Email,
 		Password: string(hash),
 		Tier:     req.Tier,
+		Admin:    req.Admin,
 	}
 
 	if result := h.db.Create(&user); result.Error != nil {
@@ -170,6 +172,7 @@ func (h *AdminHandler) UpdateUser(c *fiber.Ctx) error {
 		Email    string `json:"email,omitempty"`
 		Tier     string `json:"tier,omitempty"`
 		Password string `json:"password,omitempty"`
+		Admin    *bool  `json:"admin,omitempty"`
 	}
 
 	var req updateReq
@@ -194,6 +197,9 @@ func (h *AdminHandler) UpdateUser(c *fiber.Ctx) error {
 			})
 		}
 		updates["password"] = string(hash)
+	}
+	if req.Admin != nil {
+		updates["admin"] = *req.Admin
 	}
 
 	if len(updates) == 0 {

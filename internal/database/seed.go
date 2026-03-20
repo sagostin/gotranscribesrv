@@ -43,6 +43,7 @@ func SeedAdmin(db *gorm.DB) {
 		Email:    defaultAdminEmail,
 		Password: string(hash),
 		Tier:     "enterprise",
+		Admin:    true,
 	}
 
 	if result := db.Create(&admin); result.Error != nil {

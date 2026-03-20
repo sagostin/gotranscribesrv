@@ -17,6 +17,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/database"
 	"github.com/shaunagostinho/gotranscribesrv/internal/handlers"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -245,12 +246,32 @@ func main() {
 	admin := app.Group("/api/v1/admin",
 		middleware.NewAuthMiddleware(authCfg),
 		func(c *fiber.Ctx) error {
-			tier, _ := c.Locals("tier").(string)
-			if tier != "enterprise" {
+			// Real-time DB check — admin flag is authoritative, not JWT claims
+			userID, err := middleware.ParseUserID(c)
+			if err != nil {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error": fiber.Map{
+						"code":    "UNAUTHORIZED",
+						"message": "Authentication required",
+						"status":  401,
+					},
+				})
+			}
+			var user models.User
+			if result := db.DB.Select("admin").First(&user, "id = ?", userID); result.Error != nil {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error": fiber.Map{
+						"code":    "UNAUTHORIZED",
+						"message": "User not found",
+						"status":  401,
+					},
+				})
+			}
+			if !user.Admin {
 				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 					"error": fiber.Map{
 						"code":    "FORBIDDEN",
-						"message": "Admin access requires enterprise tier",
+						"message": "Admin access required",
 						"status":  403,
 					},
 				})
