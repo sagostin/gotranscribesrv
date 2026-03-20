@@ -346,20 +346,14 @@ func (h *AdminHandler) RevokeUserKey(c *fiber.Ctx) error {
 // GlobalUsageSummary returns aggregated usage across all users (admin only).
 // GET /api/v1/admin/usage
 func (h *AdminHandler) GlobalUsageSummary(c *fiber.Ctx) error {
-	period := c.Query("period", "month")
-	var since time.Time
-	switch period {
-	case "day":
-		since = time.Now().AddDate(0, 0, -1)
-	case "week":
-		since = time.Now().AddDate(0, 0, -7)
-	default:
-		period = "month"
-		since = time.Now().AddDate(0, -1, 0)
-	}
+	p := parsePeriod(c)
 
 	var totalRequests int64
-	h.db.Model(&models.UsageLog{}).Where("created_at >= ?", since).Count(&totalRequests)
+	query := h.db.Model(&models.UsageLog{})
+	if !p.IsAll {
+		query = query.Where("created_at >= ? AND created_at <= ?", p.Since, p.Until)
+	}
+	query.Count(&totalRequests)
 
 	type UserStat struct {
 		UserID       uuid.UUID `json:"user_id"`
@@ -370,23 +364,38 @@ func (h *AdminHandler) GlobalUsageSummary(c *fiber.Ctx) error {
 
 	// Top users by request count
 	var topUsers []UserStat
-	h.db.Raw(`
-		SELECT u.id AS user_id, u.email,
-		       COUNT(ul.id) AS request_count,
-		       COALESCE(SUM(ul.audio_duration), 0) / 3600000.0 AS audio_hours
-		FROM users u
-		LEFT JOIN usage_logs ul ON ul.user_id = u.id AND ul.created_at >= ?
-		GROUP BY u.id, u.email
-		ORDER BY request_count DESC
-		LIMIT 20
-	`, since).Scan(&topUsers)
+	if p.IsAll {
+		h.db.Raw(`
+			SELECT u.id AS user_id, u.email,
+			       COUNT(ul.id) AS request_count,
+			       COALESCE(SUM(ul.audio_duration), 0) / 3600000.0 AS audio_hours
+			FROM users u
+			LEFT JOIN usage_logs ul ON ul.user_id = u.id
+			GROUP BY u.id, u.email
+			ORDER BY request_count DESC
+			LIMIT 20
+		`).Scan(&topUsers)
+	} else {
+		h.db.Raw(`
+			SELECT u.id AS user_id, u.email,
+			       COUNT(ul.id) AS request_count,
+			       COALESCE(SUM(ul.audio_duration), 0) / 3600000.0 AS audio_hours
+			FROM users u
+			LEFT JOIN usage_logs ul ON ul.user_id = u.id AND ul.created_at >= ? AND ul.created_at <= ?
+			GROUP BY u.id, u.email
+			ORDER BY request_count DESC
+			LIMIT 20
+		`, p.Since, p.Until).Scan(&topUsers)
+	}
 
 	// Total users
 	var totalUsers int64
 	h.db.Model(&models.User{}).Count(&totalUsers)
 
 	return c.JSON(fiber.Map{
-		"period":         period,
+		"period":         p.Period,
+		"from":           p.Since,
+		"to":             p.Until,
 		"total_requests": totalRequests,
 		"total_users":    totalUsers,
 		"top_users":      topUsers,

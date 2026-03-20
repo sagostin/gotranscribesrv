@@ -15,8 +15,9 @@ The Mac Mini approach offers **dramatically lower total cost** for GoTranscribeS
 
 ### Hardware Specs
 
-| Spec | Mac Mini M4 (24GB) | Mac Mini M4 Pro (48GB) | RTX 5080 | RTX 4090 | RTX 5090 |
+| Spec | Mac Mini M4 (24GB/512GB) | Mac Mini M4 Pro (48GB) | RTX 5080 | RTX 4090 | RTX 5090 |
 |------|-------------------|----------------------|----------|----------|----------|
+| **Price (CAD)** | $1,399 | ~$1,900 | ~$1,800 (GPU only) | ~$2,700 (GPU only) | ~$3,600 (GPU only) |
 | **VRAM / Memory** | 24 GB unified | 48 GB unified | 16 GB GDDR7 | 24 GB GDDR6X | 32 GB GDDR7 |
 | **AI TOPS (INT8)** | ~38 | ~67 | ~1,801 | ~1,321 | ~3,352 |
 | **TDP** | ~20W (whole system) | ~35W (whole system) | 250W (GPU only) | 450W (GPU only) | 575W (GPU only) |
@@ -75,9 +76,9 @@ An NVIDIA GPU can't run on its own — it needs a full host machine. Here are re
 
 | Setup | Avg. Power Draw | Monthly Power Cost* | Annual Power |
 |-------|----------------|--------------------:|-------------:|
-| 1× Mac Mini M4 (24GB) | ~20W | **$1.90** | $23 |
-| 3× Mac Mini M4 (24GB) | ~60W | **$5.70** | $68 |
-| 10× Mac Mini M4 (24GB) | ~200W | **$19** | $228 |
+| 1× Mac Mini M4 (24GB/512GB) | ~20W | **$1.90** | $23 |
+| 3× Mac Mini M4 (24GB/512GB) | ~60W | **$5.70** | $68 |
+| 10× Mac Mini M4 (24GB/512GB) | ~200W | **$19** | $228 |
 | 1× RTX 4090 system | ~550W | **$52** | $624 |
 | 1× RTX 5090 system | ~700W | **$66** | $792 |
 | 2× RTX 4090 system | ~1,100W | **$104** | $1,248 |
@@ -91,33 +92,33 @@ An NVIDIA GPU can't run on its own — it needs a full host machine. Here are re
 
 ### Scenario A: Small Deployment (5–8 concurrent streams)
 
-| | Mac Mini (1× M4 24GB) | NVIDIA (1× RTX 5080) | NVIDIA (1× RTX 4090) |
+| | Mac Mini (1× M4 24GB/512GB) | NVIDIA (1× RTX 5080) | NVIDIA (1× RTX 4090) |
 |-|----------------------|---------------------|---------------------|
-| Hardware | $950 | $3,550 | $4,470 |
+| Hardware | $1,399 | $3,550 | $4,470 |
 | Year 1 Power | $23 | $570 | $624 |
-| **Year 1 Total** | **$973** | **$4,120** | **$5,094** |
-| Year 2 cumulative | $996 | $4,690 | $5,718 |
+| **Year 1 Total** | **$1,422** | **$4,120** | **$5,094** |
+| Year 2 cumulative | $1,445 | $4,690 | $5,718 |
 | Throughput (file ASR) | ~5–6 req/s | ~15–20 req/s | ~25–35 req/s |
 
 ### Scenario B: Production (15–24 concurrent streams)
 
-| | Mac Mini (3× M4 24GB) | NVIDIA (1× RTX 5090) | NVIDIA (2× RTX 4090) |
+| | Mac Mini (3× M4 24GB/512GB) | NVIDIA (1× RTX 5090) | NVIDIA (2× RTX 4090) |
 |-|----------------------|---------------------|---------------------|
-| Hardware | $2,850 | $5,470 | $9,100 |
+| Hardware | $4,197 | $5,470 | $9,100 |
 | Year 1 Power | $68 | $792 | $1,248 |
-| **Year 1 Total** | **$2,918** | **$6,262** | **$10,348** |
-| Year 2 cumulative | $2,986 | $7,054 | $11,596 |
+| **Year 1 Total** | **$4,265** | **$6,262** | **$10,348** |
+| Year 2 cumulative | $4,333 | $7,054 | $11,596 |
 | Throughput (file ASR) | ~15–18 req/s | ~40–60 req/s | ~50–70 req/s |
 | Max audio hrs/month (24/7) | ~43,200 | ~86,000+ | ~100,000+ |
 
 ### Scenario C: High Scale (50+ concurrent streams)
 
-| | Mac Mini (10× M4 24GB) | NVIDIA (2× RTX 5090) | NVIDIA (4× RTX 4090) |
+| | Mac Mini (10× M4 24GB/512GB) | NVIDIA (2× RTX 5090) | NVIDIA (4× RTX 4090) |
 |-|------------------------|---------------------|---------------------|
-| Hardware | $9,500 | $11,050 | ~$18,500 |
+| Hardware | $13,990 | $11,050 | ~$18,500 |
 | Year 1 Power | $228 | $1,596 | $2,496 |
-| **Year 1 Total** | **$9,728** | **$12,646** | **~$20,996** |
-| Year 2 cumulative | $9,956 | $14,242 | ~$23,492 |
+| **Year 1 Total** | **$14,218** | **$12,646** | **~$20,996** |
+| Year 2 cumulative | $14,446 | $14,242 | ~$23,492 |
 | Throughput (file ASR) | ~50–60 req/s | ~80–120 req/s | ~100–140 req/s |
 
 ---
@@ -176,9 +177,9 @@ An NVIDIA GPU can't run on its own — it needs a full host machine. Here are re
 
 | Metric | Mac Mini (10-node) | NVIDIA (2× RTX 5090) |
 |--------|-------------------|---------------------|
-| Hardware Cost | $9,500 | $11,050 |
-| Year 1 Total | **$9,728** | **$12,646** |
-| Year 3 Total | **$10,184** | **$15,838** |
+| Hardware Cost | $13,990 | $11,050 |
+| Year 1 Total | **$14,218** | **$12,646** |
+| Year 3 Total | **$14,674** | **$15,838** |
 | Peak Throughput | ~50–60 req/s | ~80–120 req/s |
 | Power (monthly) | $19 | $133 |
 | Engineering Migration | $0 | 60–120 hrs |

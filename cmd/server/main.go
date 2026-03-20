@@ -16,6 +16,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/config"
 	"github.com/shaunagostinho/gotranscribesrv/internal/database"
 	"github.com/shaunagostinho/gotranscribesrv/internal/handlers"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -106,6 +107,13 @@ func main() {
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "Authorization,Content-Type,X-API-Key",
 	}))
+
+	// Prometheus metrics middleware (before auth so all requests are instrumented)
+	if cfg.MetricsEnabled {
+		app.Use(metrics.PrometheusMiddleware())
+		app.Get(cfg.MetricsPath, metrics.Handler())
+		slog.Info("prometheus metrics enabled", "path", cfg.MetricsPath)
+	}
 
 	// Auth config
 	authCfg := middleware.AuthConfig{

@@ -8,6 +8,7 @@ import (
 	ws "github.com/fasthttp/websocket"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
@@ -65,6 +66,8 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	defer sidecarConn.Close()
 
 	slog.Info("WebSocket ASR session started")
+	metrics.ActiveWebSocketConnections.WithLabelValues("native").Inc()
+	defer metrics.ActiveWebSocketConnections.WithLabelValues("native").Dec()
 
 	var totalAudioBytes int
 	var firstAudioAt time.Time

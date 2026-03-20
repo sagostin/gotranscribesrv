@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"gorm.io/gorm"
 )
@@ -233,6 +234,10 @@ func (ut *UsageTracker) processFailures() {
 func (ut *UsageTracker) flushUsage(batch []models.UsageLog) {
 	if len(batch) == 0 {
 		return
+	}
+	// Update Prometheus ASR metrics for each entry
+	for _, log := range batch {
+		metrics.RecordASRUsage(log.Endpoint, log.AudioDuration, log.ProcessTime, log.Diarized)
 	}
 	result := ut.db.Create(&batch)
 	if result.Error != nil {

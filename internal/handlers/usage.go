@@ -14,6 +14,63 @@ import (
 	"gorm.io/gorm"
 )
 
+// periodResult holds the resolved period parameters.
+type periodResult struct {
+	Period string
+	Since  time.Time
+	Until  time.Time
+	IsAll  bool
+}
+
+// parsePeriod extracts and resolves the ?period=, ?from=, and ?to= query parameters.
+// Supported periods: today, day, week, month (default), year, all, custom.
+func parsePeriod(c *fiber.Ctx) periodResult {
+	now := time.Now().UTC()
+	period := c.Query("period", "month")
+
+	r := periodResult{
+		Period: period,
+		Until:  now,
+	}
+
+	switch period {
+	case "today":
+		r.Since = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	case "day":
+		r.Since = now.AddDate(0, 0, -1)
+	case "week":
+		r.Since = now.AddDate(0, 0, -7)
+	case "year":
+		r.Since = now.AddDate(-1, 0, 0)
+	case "all":
+		r.IsAll = true
+		r.Since = time.Time{} // zero value
+	case "custom":
+		fromStr := c.Query("from")
+		toStr := c.Query("to")
+		if fromStr != "" {
+			if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+				r.Since = t
+			}
+		}
+		if toStr != "" {
+			if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+				r.Until = t
+			}
+		}
+		if r.Since.IsZero() {
+			// fallback to month if custom dates are missing/invalid
+			r.Period = "month"
+			r.Since = now.AddDate(0, -1, 0)
+		}
+	default:
+		r.Period = "month"
+		r.Since = now.AddDate(0, -1, 0)
+	}
+
+	return r
+}
+
 // UsageHandler handles usage tracking routes.
 type UsageHandler struct {
 	db *gorm.DB
@@ -33,20 +90,14 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 		return fiber.ErrUnauthorized
 	}
 
-	period := c.Query("period", "month")
-	var since time.Time
-	switch period {
-	case "day":
-		since = time.Now().AddDate(0, 0, -1)
-	case "week":
-		since = time.Now().AddDate(0, 0, -7)
-	default:
-		period = "month"
-		since = time.Now().AddDate(0, -1, 0)
-	}
+	p := parsePeriod(c)
 
 	var logs []models.UsageLog
-	h.db.Where("user_id = ? AND created_at >= ?", userID, since).Find(&logs)
+	query := h.db.Where("user_id = ?", userID)
+	if !p.IsAll {
+		query = query.Where("created_at >= ? AND created_at <= ?", p.Since, p.Until)
+	}
+	query.Find(&logs)
 
 	// Look up user's API keys for labels
 	var keys []models.APIKey
@@ -57,7 +108,9 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 	}
 
 	summary := models.UsageSummary{
-		Period:     period,
+		Period:     p.Period,
+		From:       p.Since,
+		To:         p.Until,
 		ByEndpoint: make(map[string]models.EndpointUsage),
 	}
 
@@ -192,20 +245,14 @@ func (h *UsageHandler) KeySummary(c *fiber.Ctx) error {
 		})
 	}
 
-	period := c.Query("period", "month")
-	var since time.Time
-	switch period {
-	case "day":
-		since = time.Now().AddDate(0, 0, -1)
-	case "week":
-		since = time.Now().AddDate(0, 0, -7)
-	default:
-		period = "month"
-		since = time.Now().AddDate(0, -1, 0)
-	}
+	p := parsePeriod(c)
 
 	var logs []models.UsageLog
-	h.db.Where("api_key_id = ? AND created_at >= ?", keyID, since).Find(&logs)
+	query := h.db.Where("api_key_id = ?", keyID)
+	if !p.IsAll {
+		query = query.Where("created_at >= ? AND created_at <= ?", p.Since, p.Until)
+	}
+	query.Find(&logs)
 
 	ks := models.KeyUsageSummary{
 		KeyID:      keyID,
@@ -225,7 +272,9 @@ func (h *UsageHandler) KeySummary(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"period": period,
+		"period": p.Period,
+		"from":   p.Since,
+		"to":     p.Until,
 		"key":    ks,
 	})
 }
@@ -269,20 +318,14 @@ func (h *UsageHandler) MyUsage(c *fiber.Ctx) error {
 		})
 	}
 
-	period := c.Query("period", "month")
-	var since time.Time
-	switch period {
-	case "day":
-		since = time.Now().AddDate(0, 0, -1)
-	case "week":
-		since = time.Now().AddDate(0, 0, -7)
-	default:
-		period = "month"
-		since = time.Now().AddDate(0, -1, 0)
-	}
+	p := parsePeriod(c)
 
 	var logs []models.UsageLog
-	h.db.Where("api_key_id = ? AND created_at >= ?", keyID, since).Find(&logs)
+	query := h.db.Where("api_key_id = ?", keyID)
+	if !p.IsAll {
+		query = query.Where("created_at >= ? AND created_at <= ?", p.Since, p.Until)
+	}
+	query.Find(&logs)
 
 	ks := models.KeyUsageSummary{
 		KeyID:      keyID,
@@ -302,7 +345,9 @@ func (h *UsageHandler) MyUsage(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"period": period,
+		"period": p.Period,
+		"from":   p.Since,
+		"to":     p.Until,
 		"key":    ks,
 	})
 }

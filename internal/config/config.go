@@ -43,6 +43,10 @@ type Config struct {
 
 	// Logging
 	LogLevel string
+
+	// Metrics
+	MetricsEnabled bool
+	MetricsPath    string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -75,6 +79,9 @@ func Load() *Config {
 		RegistrationEnabled: envOrDefault("REGISTRATION_ENABLED", "false") == "true",
 
 		LogLevel: envOrDefault("LOG_LEVEL", "info"),
+
+		MetricsEnabled: envOrDefault("METRICS_ENABLED", "true") == "true",
+		MetricsPath:    envOrDefault("METRICS_PATH", "/metrics"),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
@@ -160,6 +161,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	slog.Info("[DG] Deepgram-compat session started", "request_id", requestID,
 		"interim_results", interimResults)
+	metrics.ActiveWebSocketConnections.WithLabelValues("deepgram").Inc()
+	defer metrics.ActiveWebSocketConnections.WithLabelValues("deepgram").Dec()
 
 	var totalAudioBytes int
 	var firstAudioAt time.Time

@@ -14,20 +14,20 @@ GoTranscribeSrv runs entirely on-premise on Mac Mini hardware. There are no per-
 
 | Config | Chip | RAM | Storage | Est. Price (CAD) | Max Concurrent Streams | Best For |
 |--------|------|-----|---------|------------|----------------------|----------|
-| **Starter** | M4 | 16 GB | 256 GB | ~$700 | 3–5 | Dev/staging, 0.6B model |
-| **Standard** | M4 | 24 GB | 256 GB | ~$950 | 5–8 | ASR + TTS + diarization |
-| **Recommended** | M4 | 32 GB | 256 GB | ~$1,150 | 5–8 | Full stack incl. LLM processing |
+| **Starter** | M4 | 16 GB | 256 GB | ~$799 | 3–5 | Dev/staging, 0.6B model |
+| **Standard** | M4 | 24 GB | 512 GB | $1,399 | 5–8 | ASR + TTS + diarization |
+| **Recommended** | M4 | 32 GB | 512 GB | ~$1,599 | 5–8 | Full stack incl. LLM processing |
 | **Pro** | M4 Pro | 48 GB | 512 GB | ~$1,900 | 8–12 | Heavy concurrent LLM + ASR |
 
 ### Cluster Configurations
 
 | Deployment | Nodes | Hardware Cost (CAD) | Monthly Power | Concurrent Streams | Throughput (file) |
 |-----------|-------|-------------|---------------|-------------------|-------------------|
-| **Solo Dev** | 1× Standard | $950 | ~$7 | 5–8 | ~5–6 req/sec |
-| **Small Team** | 2× Recommended | $2,300 | ~$14 | 10–16 | ~10–12 req/sec |
-| **Production** | 3× Recommended + LB | $3,700 | ~$20 | 15–24 | ~15–18 req/sec |
-| **Growth** | 5× Recommended + LB + PG host | $6,700 | ~$35 | 25–40 | ~25–30 req/sec |
-| **Scale** | 10× Recommended + LB + PG host | $13,000 | ~$70 | 50–80 | ~50–60 req/sec |
+| **Solo Dev** | 1× Standard | $1,399 | ~$7 | 5–8 | ~5–6 req/sec |
+| **Small Team** | 2× Standard | $2,798 | ~$14 | 10–16 | ~10–12 req/sec |
+| **Production** | 3× Standard + LB | $4,197 | ~$20 | 15–24 | ~15–18 req/sec |
+| **Growth** | 5× Standard + LB + PG host | $6,995 | ~$35 | 25–40 | ~25–30 req/sec |
+| **Scale** | 10× Standard + LB + PG host | $13,990 | ~$70 | 50–80 | ~50–60 req/sec |
 
 > **Power costs** based on Mac Mini M4 ~20W average under ML load × 24/7 × $0.13/kWh (Canadian avg).
 
@@ -50,21 +50,21 @@ GoTranscribeSrv runs entirely on-premise on Mac Mini hardware. There are no per-
 
 | Monthly Volume | Cheapest Cloud (OpenAI) | Mid-Tier (Deepgram) | Premium (Google) | GoTranscribeSrv (3-node) |
 |---------------|------------------------|--------------------|--------------------|--------------------------| 
-| 100 hrs | $50 | $105 | $200 | $3,100 one-time + $20/mo |
+| 100 hrs | $50 | $105 | $200 | $4,197 one-time + $20/mo |
 | 500 hrs | $250 | $525 | $1,000 | same |
 | 1,000 hrs | $500 | $1,050 | $2,000 | same |
 | 5,000 hrs | $2,500 | $5,250 | $10,000 | same |
 | 10,000 hrs | $5,000 | $10,500 | $20,000 | same |
 
-**Breakeven points (3-node Standard cluster @ $3,100 CAD):**
+**Breakeven points (3-node Standard cluster @ $4,197 CAD):**
 
 | vs Provider | Monthly Volume for 6-Month Payback | Monthly Volume for 12-Month Payback |
 |------------|-----------------------------------|-------------------------------------|
-| Google ($2.00/hr) | ~260 hrs/mo | ~130 hrs/mo |
-| Deepgram ($1.05/hr) | ~500 hrs/mo | ~250 hrs/mo |
-| OpenAI ($0.50/hr) | ~1,050 hrs/mo | ~525 hrs/mo |
+| Google ($2.00/hr) | ~350 hrs/mo | ~175 hrs/mo |
+| Deepgram ($1.05/hr) | ~670 hrs/mo | ~335 hrs/mo |
+| OpenAI ($0.50/hr) | ~1,400 hrs/mo | ~700 hrs/mo |
 
-> A 3-node cluster can process **~43,200 hours of audio per month** continuously (24/7, ~70x real-time, 3 nodes). The hardware pays for itself rapidly at virtually any meaningful volume.
+> A 3-node cluster can process **~43,200 hours of audio per month** continuously (24/7, ~70× real-time, 3 nodes). The hardware pays for itself rapidly at virtually any meaningful volume.
 
 ---
 
@@ -74,19 +74,19 @@ GoTranscribeSrv runs entirely on-premise on Mac Mini hardware. There are no per-
 
 | Item | GoTranscribeSrv | Google Cloud | Deepgram |
 |------|----------------|-------------|----------|
-| Hardware (one-time) | $3,100 | $0 | $0 |
+| Hardware (one-time) | $4,197 | $0 | $0 |
 | Monthly compute | $20 (power) | $2,000 | $1,050 |
 | Annual compute | $240 | $24,000 | $12,600 |
-| **Year 1 total** | **$3,340** | **$24,000** | **$12,600** |
-| **Year 2 total** | **$3,580** | **$48,000** | **$25,200** |
+| **Year 1 total** | **$4,437** | **$24,000** | **$12,600** |
+| **Year 2 total** | **$4,677** | **$48,000** | **$25,200** |
 
 ### Scenario: 10,000 audio hours/month
 
 | Item | GoTranscribeSrv (10-node) | Google Cloud | Deepgram |
 |------|--------------------------|-------------|----------|
-| Hardware (one-time) | $11,000 | $0 | $0 |
+| Hardware (one-time) | $13,990 | $0 | $0 |
 | Annual compute | $840 (power) | $240,000 | $126,000 |
-| **Year 1 total** | **$11,840** | **$240,000** | **$126,000** |
+| **Year 1 total** | **$14,830** | **$240,000** | **$126,000** |
 
 ---
 
@@ -117,7 +117,7 @@ Audio hours per month:          ___
 
 Take the higher number. Add 1 for headroom.
 
-Hardware cost = nodes × $1,150 CAD (Recommended w/ LLM)
+Hardware cost = nodes × $1,399 CAD (Standard: M4, 24 GB, 512 GB)
 Monthly power = nodes × $7 CAD
 ```
 
@@ -127,5 +127,5 @@ Monthly power = nodes × $7 CAD
 >
 > Concurrent: 20 ÷ 6 = 4 nodes
 > Throughput: 8,000 ÷ 4,320 = 2 nodes
-> → **4 nodes + 1 headroom = 5× Recommended ($5,750 CAD)**
+> → **4 nodes + 1 headroom = 5× Standard ($6,995 CAD)**
 > Monthly power: ~$35

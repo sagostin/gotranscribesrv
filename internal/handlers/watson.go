@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
@@ -216,6 +217,8 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	slog.Info("[Watson] Watson-compat streaming session started", "request_id", requestID,
 		"interim_results", interimResults, "timestamps", timestamps)
+	metrics.ActiveWebSocketConnections.WithLabelValues("watson").Inc()
+	defer metrics.ActiveWebSocketConnections.WithLabelValues("watson").Dec()
 
 	// Send Watson "listening" state
 	_ = c.WriteJSON(fiber.Map{"state": "listening"})

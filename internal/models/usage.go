@@ -35,6 +35,8 @@ func (u *UsageLog) BeforeCreate(tx *gorm.DB) error {
 // UsageSummary is the aggregated usage response.
 type UsageSummary struct {
 	Period                string                   `json:"period"`
+	From                  time.Time                `json:"from"`
+	To                    time.Time                `json:"to"`
 	TotalRequests         int64                    `json:"total_requests"`
 	TotalAudioDurationSec float64                  `json:"total_audio_duration_sec"`
 	TotalProcessTimeSec   float64                  `json:"total_processing_time_sec"`
