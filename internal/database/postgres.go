@@ -49,6 +49,7 @@ func (db *DB) Migrate() error {
 		&models.APIKey{},
 		&models.UsageLog{},
 		&models.RequestLog{},
+		&models.TokenBlacklist{},
 	)
 }
 

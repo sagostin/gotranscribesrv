@@ -96,6 +96,9 @@ type sidecarStreamEvent struct {
 func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	defer c.Close()
 
+	// Limit incoming message size to 1MB to prevent memory exhaustion
+	c.SetReadLimit(1 * 1024 * 1024)
+
 	requestID := uuid.New().String()
 	interimResults := c.Query("interim_results", "true") == "true"
 

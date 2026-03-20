@@ -66,6 +66,9 @@ func main() {
 		return
 	}
 
+	// Start periodic cleanup of expired blacklisted tokens
+	go middleware.CleanupBlacklist(db.DB)
+
 	// Create dual-sidecar client:
 	// Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE) + Python sidecar (LLM — MLX)
 	sc := sidecar.NewClient(

@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"time"
+
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"golang.org/x/crypto/bcrypt"
@@ -157,8 +160,8 @@ func (h *AuthHandler) Refresh(c *fiber.Ctx) error {
 		})
 	}
 
-	// Parse and validate the refresh token
-	claims, err := middleware.ParseToken(req.RefreshToken, h.authCfg.Secret)
+	// Parse and validate the refresh token (with blacklist check)
+	claims, err := middleware.ParseToken(req.RefreshToken, h.authCfg.Secret, h.db)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -193,16 +196,49 @@ func (h *AuthHandler) Refresh(c *fiber.Ctx) error {
 		})
 	}
 
+	// Blacklist the old refresh token so it can't be reused
+	if tokenID, ok := claims["token_id"].(string); ok && tokenID != "" {
+		expFloat, _ := claims["exp"].(float64)
+		expiresAt := time.Unix(int64(expFloat), 0)
+		userID, _ := uuid.Parse(claims["sub"].(string))
+		_ = middleware.BlacklistToken(h.db, tokenID, userID, expiresAt)
+	}
+
 	return c.JSON(fiber.Map{
 		"access_token": tokens.AccessToken,
 		"expires_in":   tokens.ExpiresIn,
 	})
 }
 
-// Logout invalidates the current session.
+// Logout invalidates the current access token by adding it to the blacklist.
 // POST /api/v1/auth/logout
 func (h *AuthHandler) Logout(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"message": "logged out",
-	})
+	// Extract the access token from the Authorization header
+	authHeader := c.Get("Authorization")
+	tokenStr := ""
+	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+		tokenStr = authHeader[7:]
+	}
+
+	if tokenStr == "" {
+		return c.JSON(fiber.Map{"message": "logged out"})
+	}
+
+	// Parse the token to get its claims (without blacklist check — it's the
+	// token we're about to blacklist)
+	claims, err := middleware.ParseToken(tokenStr, h.authCfg.Secret)
+	if err != nil {
+		// Token is already invalid/expired — effectively logged out
+		return c.JSON(fiber.Map{"message": "logged out"})
+	}
+
+	// Blacklist the access token
+	if tokenID, ok := claims["token_id"].(string); ok && tokenID != "" {
+		expFloat, _ := claims["exp"].(float64)
+		expiresAt := time.Unix(int64(expFloat), 0)
+		userID, _ := uuid.Parse(claims["sub"].(string))
+		_ = middleware.BlacklistToken(h.db, tokenID, userID, expiresAt)
+	}
+
+	return c.JSON(fiber.Map{"message": "logged out"})
 }

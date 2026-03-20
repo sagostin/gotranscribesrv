@@ -141,8 +141,9 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		Diarize:  speakerLabels,
 	})
 	if err != nil {
+		slog.Error("Watson transcription failed", "error", err, "content_type", rawContentType)
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"error":            "transcription service unavailable: " + err.Error(),
+			"error":            "transcription service unavailable",
 			"code":             503,
 			"code_description": "Service Unavailable",
 		})
@@ -172,6 +173,9 @@ func (h *WatsonHandler) Upgrade() fiber.Handler {
 // the Swift sidecar's /stream endpoint, translating the event protocol.
 func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	defer c.Close()
+
+	// Limit incoming message size to 1MB to prevent memory exhaustion
+	c.SetReadLimit(1 * 1024 * 1024)
 
 	requestID := uuid.New().String()
 	timestamps := c.Query("timestamps", "false") == "true"

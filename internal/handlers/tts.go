@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"log/slog"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -62,10 +64,11 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 
 	audio, contentType, err := h.sidecar.Synthesize(req)
 	if err != nil {
+		slog.Error("TTS synthesis failed", "error", err)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
-				"message": "TTS service unavailable: " + err.Error(),
+				"message": "TTS service unavailable",
 				"status":  502,
 			},
 		})
@@ -88,10 +91,11 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 func (h *TTSHandler) ListVoices(c *fiber.Ctx) error {
 	voices, err := h.sidecar.ListVoices()
 	if err != nil {
+		slog.Error("TTS voices list failed", "error", err)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
-				"message": "TTS service unavailable: " + err.Error(),
+				"message": "TTS service unavailable",
 				"status":  502,
 			},
 		})

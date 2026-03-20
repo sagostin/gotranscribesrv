@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -81,7 +82,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 				return c.Next()
 			}
 			// Otherwise treat as JWT
-			claims, err := ParseToken(qToken, cfg.Secret)
+			claims, err := ParseToken(qToken, cfg.Secret, cfg.DB)
 			if err != nil {
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 					"error": fiber.Map{
@@ -127,6 +128,21 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 			SuccessHandler: func(c *fiber.Ctx) error {
 				token := c.Locals("user").(*jwt.Token)
 				claims := token.Claims.(jwt.MapClaims)
+
+				// Check token blacklist
+				if tokenID, ok := claims["token_id"].(string); ok && tokenID != "" {
+					var count int64
+					cfg.DB.Model(&models.TokenBlacklist{}).Where("token_id = ?", tokenID).Count(&count)
+					if count > 0 {
+						return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+							"error": fiber.Map{
+								"code":    "TOKEN_REVOKED",
+								"message": "Token has been revoked",
+								"status":  401,
+							},
+						})
+					}
+				}
 
 				c.Locals("user_id", claims["sub"])
 				c.Locals("email", claims["email"])
@@ -195,12 +211,14 @@ func GenerateTokens(cfg AuthConfig, user *models.User) (*models.AuthResponse, er
 	now := time.Now()
 
 	// Access token
+	accessTokenID := uuid.New().String()
 	accessClaims := jwt.MapClaims{
-		"sub":   user.ID.String(),
-		"email": user.Email,
-		"tier":  user.Tier,
-		"exp":   now.Add(cfg.AccessTTL).Unix(),
-		"iat":   now.Unix(),
+		"sub":      user.ID.String(),
+		"email":    user.Email,
+		"tier":     user.Tier,
+		"token_id": accessTokenID,
+		"exp":      now.Add(cfg.AccessTTL).Unix(),
+		"iat":      now.Unix(),
 	}
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
 	accessStr, err := accessToken.SignedString([]byte(cfg.Secret))
@@ -241,7 +259,8 @@ func ParseUserID(c *fiber.Ctx) (uuid.UUID, error) {
 }
 
 // ParseToken parses and validates a JWT token string.
-func ParseToken(tokenString, secret string) (jwt.MapClaims, error) {
+// If a DB is provided, it also checks the token blacklist.
+func ParseToken(tokenString, secret string, db ...*gorm.DB) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -255,5 +274,39 @@ func ParseToken(tokenString, secret string) (jwt.MapClaims, error) {
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid token")
 	}
+
+	// Check token blacklist if DB is available
+	if len(db) > 0 && db[0] != nil {
+		if tokenID, ok := claims["token_id"].(string); ok && tokenID != "" {
+			var count int64
+			db[0].Model(&models.TokenBlacklist{}).Where("token_id = ?", tokenID).Count(&count)
+			if count > 0 {
+				return nil, fmt.Errorf("token has been revoked")
+			}
+		}
+	}
+
 	return claims, nil
+}
+
+// BlacklistToken adds a token ID to the blacklist.
+func BlacklistToken(db *gorm.DB, tokenID string, userID uuid.UUID, expiresAt time.Time) error {
+	entry := models.TokenBlacklist{
+		TokenID:   tokenID,
+		UserID:    userID,
+		ExpiresAt: expiresAt,
+	}
+	return db.Create(&entry).Error
+}
+
+// CleanupBlacklist periodically removes expired entries from the token blacklist.
+func CleanupBlacklist(db *gorm.DB) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		result := db.Where("expires_at < ?", time.Now()).Delete(&models.TokenBlacklist{})
+		if result.RowsAffected > 0 {
+			slog.Info("cleaned up expired blacklist entries", "count", result.RowsAffected)
+		}
+	}
 }

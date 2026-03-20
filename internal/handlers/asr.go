@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"io"
+	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -76,10 +77,11 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		Diarize:  diarize,
 	})
 	if err != nil {
+		slog.Error("transcription failed", "error", err, "filename", file.Filename)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
-				"message": "Transcription service unavailable: " + err.Error(),
+				"message": "Transcription service unavailable",
 				"status":  502,
 			},
 		})

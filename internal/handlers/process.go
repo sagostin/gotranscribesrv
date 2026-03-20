@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"log/slog"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -74,10 +76,11 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 
 	result, err := h.sidecar.Process(req)
 	if err != nil {
+		slog.Error("LLM processing failed", "error", err, "task", req.Task)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
-				"message": "LLM processing service unavailable: " + err.Error(),
+				"message": "LLM processing service unavailable",
 				"status":  502,
 			},
 		})
@@ -97,10 +100,11 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 func (h *ProcessHandler) ListTasks(c *fiber.Ctx) error {
 	tasks, err := h.sidecar.ListTasks()
 	if err != nil {
+		slog.Error("LLM tasks list failed", "error", err)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
-				"message": "LLM processing service unavailable: " + err.Error(),
+				"message": "LLM processing service unavailable",
 				"status":  502,
 			},
 		})

@@ -33,6 +33,9 @@ func (h *WSHandler) Upgrade() fiber.Handler {
 func (h *WSHandler) handle(c *websocket.Conn) {
 	defer c.Close()
 
+	// Limit incoming message size to 1MB to prevent memory exhaustion
+	c.SetReadLimit(1 * 1024 * 1024)
+
 	// Parse sidecar WebSocket URL
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
