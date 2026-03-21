@@ -80,6 +80,9 @@ private func extractEmbedding(audioBytes: Data, engines: EngineManager) async th
     let samples = try await SidecarAudioConverter.toPCM16kMono(audioBytes)
     try writeWav(samples: samples, sampleRate: 16000, to: tempURL)
 
+    // Calculate actual audio duration from sample count (16kHz mono)
+    let audioDurationMs = Int(Double(samples.count) / 16000.0 * 1000.0)
+
     let embedding: Data
     do {
         embedding = try await engines.extractVoiceEmbedding(audioURL: tempURL)
@@ -91,6 +94,7 @@ private func extractEmbedding(audioBytes: Data, engines: EngineManager) async th
     var headers = HTTPHeaders()
     headers.add(name: .contentType, value: "application/octet-stream")
     headers.add(name: "Content-Length", value: "\(embedding.count)")
+    headers.add(name: "X-Audio-Duration-Ms", value: "\(audioDurationMs)")
     return Response(status: .ok, headers: headers, body: .init(data: embedding))
 }
 

@@ -120,7 +120,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	// Send to sidecar to extract voice embedding
 	cloneStart := time.Now()
-	embedding, err := h.sidecar.CloneVoice(audioBytes, file.Filename)
+	embedding, audioDurationMs, err := h.sidecar.CloneVoice(audioBytes, file.Filename)
 	cloneDuration := time.Since(cloneStart)
 	if err != nil {
 		slog.Error("voice cloning failed", "error", err, "user_id", userID)
@@ -166,6 +166,8 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		})
 	}
 
+	audioDurationSec := float64(audioDurationMs) / 1000.0
+
 	voice := models.Voice{
 		ID:          voiceID,
 		UserID:      userID,
@@ -173,6 +175,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		Description: description,
 		FilePath:    relPath,
 		SizeBytes:   int64(len(embedding)),
+		DurationSec: audioDurationSec,
 	}
 
 	if result := h.db.Create(&voice); result.Error != nil {
@@ -190,17 +193,18 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	slog.Info("voice cloned successfully",
 		"voice_id", voiceID, "user_id", userID, "name", name,
-		"embedding_size", len(embedding), "clone_time_ms", cloneDuration.Milliseconds())
+		"embedding_size", len(embedding), "clone_time_ms", cloneDuration.Milliseconds(),
+		"audio_duration_ms", audioDurationMs)
 
-	// Set audio_duration_ms for the usage middleware (uploaded audio size in bytes)
-	// Rough estimate: uploaded audio file size serves as the metering metric
-	c.Locals("audio_duration_ms", int(file.Size))
+	// Set audio_duration_ms for the usage middleware (actual audio duration)
+	c.Locals("audio_duration_ms", audioDurationMs)
 
 	c.Locals("usage_meta", map[string]interface{}{
-		"voice_name":     name,
-		"embedding_size": len(embedding),
-		"audio_size":     file.Size,
-		"clone_time_ms":  int(cloneDuration.Milliseconds()),
+		"voice_name":        name,
+		"embedding_size":    len(embedding),
+		"audio_size":        file.Size,
+		"clone_time_ms":     int(cloneDuration.Milliseconds()),
+		"audio_duration_ms": audioDurationMs,
 	})
 
 	return c.Status(fiber.StatusCreated).JSON(voice.ToResponse())

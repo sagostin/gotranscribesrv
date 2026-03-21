@@ -275,23 +275,23 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 }
 
 // CloneVoice sends audio to the Swift sidecar to extract a voice embedding.
-// Returns the raw embedding bytes that can be stored and reused.
-func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, error) {
+// Returns the raw embedding bytes and the audio duration in milliseconds.
+func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, int, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
 	part, err := writer.CreateFormFile("audio", filename)
 	if err != nil {
-		return nil, fmt.Errorf("create form file: %w", err)
+		return nil, 0, fmt.Errorf("create form file: %w", err)
 	}
 	if _, err := part.Write(audio); err != nil {
-		return nil, fmt.Errorf("write audio data: %w", err)
+		return nil, 0, fmt.Errorf("write audio data: %w", err)
 	}
 	writer.Close()
 
 	httpReq, err := http.NewRequest("POST", c.swiftURL+"/clone-voice", &buf)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, 0, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -300,21 +300,27 @@ func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, error) {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("sidecar clone-voice request failed: %w", err)
+		return nil, 0, fmt.Errorf("sidecar clone-voice request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar clone-voice returned %d: %s", resp.StatusCode, string(errBody))
+		return nil, 0, fmt.Errorf("sidecar clone-voice returned %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	embedding, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read embedding response: %w", err)
+		return nil, 0, fmt.Errorf("read embedding response: %w", err)
 	}
 
-	return embedding, nil
+	// Read actual audio duration from sidecar response header
+	audioDurationMs := 0
+	if durStr := resp.Header.Get("X-Audio-Duration-Ms"); durStr != "" {
+		fmt.Sscanf(durStr, "%d", &audioDurationMs)
+	}
+
+	return embedding, audioDurationMs, nil
 }
 
 // StreamURL returns the WebSocket URL for streaming ASR on the Swift sidecar.

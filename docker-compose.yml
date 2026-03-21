@@ -54,9 +54,14 @@ services:
       RATE_LIMIT_FREE: ${RATE_LIMIT_FREE:-20}
       RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
       RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
+      VOICES_DATA_DIR: ${VOICES_DATA_DIR:-/app/data/voices}
+    volumes:
+      - voicedata:/app/data/voices
     ports:
       - "${PORT:-3000}:3000"
 
 volumes:
   pgdata:
+    driver: local
+  voicedata:
     driver: local
