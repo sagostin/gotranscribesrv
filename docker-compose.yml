@@ -55,6 +55,8 @@ services:
       RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
       RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
       VOICES_DATA_DIR: ${VOICES_DATA_DIR:-/app/data/voices}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_PATH: ${METRICS_PATH:-/metrics}
     volumes:
       - voicedata:/app/data/voices
     ports:

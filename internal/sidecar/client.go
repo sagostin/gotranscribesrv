@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"time"
+
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 )
 
 // Client communicates with the inference sidecars.
@@ -179,7 +181,10 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	slog.Debug("sending transcription request to Swift sidecar",
 		"filename", req.Filename, "size", len(req.Audio), "diarize", req.Diarize)
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
+	durationMs := int(time.Since(start).Milliseconds())
+	metrics.RecordSidecarLatency("swift", "transcribe", durationMs, err)
 	if err != nil {
 		return nil, fmt.Errorf("Swift sidecar request failed: %w", err)
 	}
@@ -222,7 +227,10 @@ func (c *Client) VAD(audio []byte, filename string) (*VadResponse, error) {
 	slog.Debug("sending VAD request to Swift sidecar",
 		"filename", filename, "size", len(audio))
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
+	durationMs := int(time.Since(start).Milliseconds())
+	metrics.RecordSidecarLatency("swift", "vad", durationMs, err)
 	if err != nil {
 		return nil, fmt.Errorf("Swift sidecar VAD request failed: %w", err)
 	}
@@ -254,7 +262,10 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
+	durationMs := int(time.Since(start).Milliseconds())
+	metrics.RecordSidecarLatency("swift", "synthesize", durationMs, err)
 	if err != nil {
 		return nil, "", fmt.Errorf("sidecar request failed: %w", err)
 	}
@@ -298,7 +309,10 @@ func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, int, error) 
 	slog.Debug("sending clone-voice request to Swift sidecar",
 		"filename", filename, "size", len(audio))
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
+	durationMs := int(time.Since(start).Milliseconds())
+	metrics.RecordSidecarLatency("swift", "clone_voice", durationMs, err)
 	if err != nil {
 		return nil, 0, fmt.Errorf("sidecar clone-voice request failed: %w", err)
 	}
@@ -401,7 +415,10 @@ func (c *Client) Process(req ProcessRequest) (*ProcessResponse, error) {
 
 	slog.Debug("sending LLM process request to Python sidecar", "task", req.Task, "text_len", len(req.TranscriptText))
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
+	durationMs := int(time.Since(start).Milliseconds())
+	metrics.RecordSidecarLatency("python", "process", durationMs, err)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar request failed: %w", err)
 	}

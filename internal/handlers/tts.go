@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -139,6 +140,9 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 			},
 		})
 	}
+
+	// Record TTS metrics
+	metrics.RecordTTSUsage(req.Voice, int(synthDuration.Milliseconds()))
 
 	// Calculate output audio duration (WAV 24kHz 16-bit mono = 48000 bytes/sec)
 	// Subtract 44-byte WAV header

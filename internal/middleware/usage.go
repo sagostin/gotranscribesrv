@@ -82,6 +82,9 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 		userIDStr, _ := c.Locals("user_id").(string)
 		userID, parseErr := uuid.Parse(userIDStr)
 
+		// Track active user for the per-minute gauge
+		metrics.TrackUser(userIDStr)
+
 		// Extract API key ID if request was authenticated via API key
 		var apiKeyID *uuid.UUID
 		if akStr, ok := c.Locals("api_key_id").(string); ok {

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 )
 
 // RateLimiter implements a per-user in-memory sliding window rate limiter.
@@ -75,6 +76,7 @@ func (rl *RateLimiter) Middleware() fiber.Handler {
 		c.Set("X-RateLimit-Reset", itoa(int(now.Add(rl.interval).Unix())))
 
 		if count >= limit {
+			metrics.RecordRateLimitRejection(tier)
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 				"error": fiber.Map{
 					"code":    "RATE_LIMITED",

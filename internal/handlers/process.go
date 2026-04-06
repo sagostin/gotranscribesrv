@@ -4,6 +4,7 @@ import (
 	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -85,6 +86,10 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 			},
 		})
 	}
+
+	// Record LLM metrics
+	metrics.RecordLLMUsage(result.Task, result.TokensGenerated, result.ProcessTimeMs)
+
 	c.Locals("usage_meta", map[string]interface{}{
 		"input_length":     len(req.TranscriptText),
 		"task":             result.Task,

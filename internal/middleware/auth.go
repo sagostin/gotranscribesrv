@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"gorm.io/gorm"
 )
@@ -117,6 +118,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 		return jwtware.New(jwtware.Config{
 			SigningKey: jwtware.SigningKey{Key: []byte(cfg.Secret)},
 			ErrorHandler: func(c *fiber.Ctx, err error) error {
+				metrics.RecordAuthAttempt("jwt", "failure")
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 					"error": fiber.Map{
 						"code":    "UNAUTHORIZED",
@@ -134,6 +136,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 					var count int64
 					cfg.DB.Model(&models.TokenBlacklist{}).Where("token_id = ?", tokenID).Count(&count)
 					if count > 0 {
+						metrics.RecordAuthAttempt("jwt", "failure")
 						return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 							"error": fiber.Map{
 								"code":    "TOKEN_REVOKED",
@@ -144,6 +147,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 					}
 				}
 
+				metrics.RecordAuthAttempt("jwt", "success")
 				c.Locals("user_id", claims["sub"])
 				c.Locals("email", claims["email"])
 				c.Locals("tier", claims["tier"])
@@ -164,6 +168,7 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 		First(&apiKey)
 
 	if result.Error != nil {
+		metrics.RecordAuthAttempt("api_key", "failure")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "INVALID_API_KEY",
@@ -173,6 +178,7 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 		})
 	}
 
+	metrics.RecordAuthAttempt("api_key", "success")
 	c.Locals("user_id", apiKey.UserID.String())
 	c.Locals("api_key_id", apiKey.ID.String())
 	c.Locals("email", apiKey.User.Email)

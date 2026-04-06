@@ -44,6 +44,9 @@ func main() {
 		"port", cfg.Port,
 	)
 
+	// Initialize Prometheus metrics (no-op when METRICS_ENABLED=false)
+	metrics.Init(cfg.MetricsEnabled)
+
 	// Connect to database
 	db, err := database.Connect(cfg.DatabaseURL, cfg.IsProd())
 	if err != nil {
