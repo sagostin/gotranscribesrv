@@ -105,14 +105,14 @@ actor EngineManager {
         // Reset state for fresh processing
         diarizer.reset()
 
-        // Process complete audio file — returns SortformerTimeline
+        // Process complete audio file — returns DiarizerTimeline
         let timeline = try diarizer.processComplete(samples)
 
         // Flatten segments from all speakers into a single sorted array.
-        // timeline.segments is [[SortformerSegment]] — indexed by speaker slot (0-3).
+        // timeline.speakers is [speakerIndex: DiarizerSpeaker]
         var flatSegments: [(speakerIndex: Int, startTime: Float, endTime: Float)] = []
-        for (speakerIdx, speakerSegments) in timeline.segments.enumerated() {
-            for seg in speakerSegments {
+        for (speakerIdx, speaker) in timeline.speakers {
+            for seg in speaker.finalizedSegments {
                 flatSegments.append((
                     speakerIndex: speakerIdx,
                     startTime: seg.startTime,
