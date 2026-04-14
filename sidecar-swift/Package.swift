@@ -8,7 +8,7 @@ let package = Package(
     ],
     dependencies: [
         // FluidAudio — CoreML-optimized ASR, VAD, Diarization, TTS
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.12.6"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.13.6"),
         // Vapor — HTTP server with WebSocket, multipart, JSON support
         .package(url: "https://github.com/vapor/vapor.git", from: "4.99.0"),
     ],
