@@ -245,25 +245,48 @@ JSON Response
     }
 ```
 
+### Model Memory Layout (16 GB M4 Mac Mini)
+
+```
+┌─────────────────────────────────────────────────┐
+│  Unified Memory — 16 GB                         │
+│                                                 │
+│  macOS + system              ~3.5 GB           │
+│  Parakeet TDT v3 (ASR)       ~1.2 GB           │
+│  PocketTTS (TTS)              ~0.5 GB           │
+│  Sortformer (diarization)     ~0.2 GB           │
+│  Silero VAD                   ~0.05 GB          │
+│  Swift runtime               ~0.2 GB           │
+│  Go runtime                   ~0.1 GB           │
+│  Audio buffers               ~0.3 GB           │
+│  ─────────────────────────────────              │
+│  Free (16GB, no LLM)          ~9.95 GB         │
+│  Free (16GB, with LLM)        ~5.45 GB *       │
+└─────────────────────────────────────────────────┘
+* LLM (Llama 8B Q4) ≈ 4.5 GB — causes OOM on 16 GB with full stack
+```
+
+**Note:** PostgreSQL co-located adds ~1 GB. For 16 GB with all features, host PostgreSQL externally.
+
 ### Model Memory Layout (24 GB M4 Mac Mini)
 
 ```
 ┌───────────────────────────────────────────────┐
 │  Unified Memory — 24 GB                       │
 │                                               │
-│  ┌────────────┐  macOS + system    ~3.5 GB    │
-│  ├────────────┤  Parakeet TDT v3   ~1.2 GB    │
-│  ├────────────┤  PocketTTS         ~0.5 GB    │
-│  ├────────────┤  Sortformer        ~0.2 GB    │
-│  ├────────────┤  Silero VAD        ~0.05 GB   │
-│  ├────────────┤  LLM (Llama 8B Q4) ~4.5 GB *  │
-│  ├────────────┤  Swift runtime     ~0.2 GB    │
-│  ├────────────┤  Go runtime        ~0.1 GB    │
-│  ├────────────┤  Audio buffers     ~0.3 GB    │
-│  ├────────────┤  PostgreSQL**      ~1.0 GB    │
-│  ├────────────┤  ── Free (24GB) ── ~12.5 GB   │
-│  ├────────────┤  ── Free (32GB) ── ~20.5 GB   │
-│  └────────────┘                               │
+│  macOS + system    ~3.5 GB                    │
+│  Parakeet TDT v3   ~1.2 GB                    │
+│  PocketTTS         ~0.5 GB                    │
+│  Sortformer        ~0.2 GB                    │
+│  Silero VAD        ~0.05 GB                   │
+│  LLM (Llama 8B Q4) ~4.5 GB *                  │
+│  Swift runtime     ~0.2 GB                    │
+│  Go runtime        ~0.1 GB                    │
+│  Audio buffers     ~0.3 GB                    │
+│  PostgreSQL**      ~1.0 GB                    │
+│  ── Free (24GB) ── ~12.5 GB                   │
+│  ── Free (32GB) ── ~20.5 GB                   │
+│                                               │
 │  *  Only if ENABLE_LLM=true (Python sidecar)  │
 │  ** Only if DB is colocated on this node       │
 └───────────────────────────────────────────────┘
