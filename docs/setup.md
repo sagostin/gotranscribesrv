@@ -35,7 +35,7 @@ This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar run
 | Swift | 6.0+ | Xcode 16+ (for FluidAudio / CoreML) |
 | Python | 3.11+ | Only needed for LLM processing |
 | PostgreSQL | 15+ | Local or remote |
-| RAM | 16 GB min | 24 GB recommended for full stack |
+| RAM | 16 GB min | 24 GB recommended for full stack; see [16GB Mac Mini considerations](#16gb-mac-mini-considerations) |
 
 ---
 
@@ -392,10 +392,96 @@ tidy:             # go mod tidy
 
 ---
 
+## 16GB Mac Mini M4 Considerations
+
+A single 16 GB Mac Mini M4 can run GoTranscribeSrv, but with important constraints. This section outlines the trade-offs, pitfalls, and acceptable criteria for deploying on 16 GB.
+
+### Memory Layout (16 GB M4)
+
+```
+┌─────────────────────────────────────────────────┐
+│  Unified Memory — 16 GB                         │
+│                                                 │
+│  macOS + system              ~3.5 GB           │
+│  Parakeet TDT v3 (ASR)       ~1.2 GB           │
+│  PocketTTS (TTS)              ~0.5 GB           │
+│  Sortformer (diarization)     ~0.2 GB           │
+│  Silero VAD                   ~0.05 GB          │
+│  Swift runtime               ~0.2 GB           │
+│  Go runtime                   ~0.1 GB           │
+│  Audio buffers               ~0.3 GB           │
+│  ─────────────────────────────────              │
+│  Free (16GB, no LLM)          ~9.95 GB         │
+│  Free (16GB, with LLM)        ~5.45 GB         │
+└─────────────────────────────────────────────────┘
+```
+
+### What Works on 16 GB
+
+| Configuration | Status | Notes |
+|---------------|--------|-------|
+| ASR only (0.6B Parakeet) | ✅ Works | 3–5 concurrent streams |
+| ASR + VAD + Diarization | ✅ Works | 3–5 concurrent streams |
+| ASR + TTS + Diarization | ✅ Works | Performance may degrade with TTS under load |
+| PostgreSQL co-located | ✅ Works | Only if LLM is disabled |
+| LLM (Llama 8B Q4) | ❌ OOM | Requires ~4.5 GB — too much for 16 GB with other services |
+
+### Critical Constraints
+
+1. **LLM must be disabled** (`ENABLE_LLM=false`). The Llama 8B Q4 model alone requires ~4.5 GB, which is incompatible with 16 GB when running the full stack.
+2. **No co-located PostgreSQL in production** — offload the database to an external PostgreSQL host (RDS, Supabase, or a dedicated $5/mo VPS) to conserve ~1 GB.
+3. **Reduce concurrent streams** — expect 3–5 concurrent streams instead of 5–8. Monitor the node; if `process_time / audio_duration` exceeds 0.5, the node is saturated.
+4. **No headroom for spikes** — 16 GB has minimal free memory (~10 GB). A memory spike (e.g., multiple large audio files queued) can trigger OOM kills. Add a swap file as a safety net:
+
+   ```bash
+   # Create a 4 GB swap file (macOS)
+   sudo hdiutil attach -shadow /private/var/vm/swapfile -stdinpass 4096
+   ```
+
+### Acceptable Criteria for 16 GB Deployment
+
+A 16 GB Mac Mini M4 is acceptable if:
+
+- [ ] `ENABLE_LLM=false` (LLM sidecar not running)
+- [ ] PostgreSQL is hosted externally (not co-located)
+- [ ] Expected concurrent load is ≤5 streams
+- [ ] Audio file sizes are modest (<30 min per file; streaming is fine)
+- [ ] You accept that TTS under concurrent load may degrade performance
+- [ ] A swap file is configured as a safety net for memory spikes
+
+### Recommended `.env` for 16 GB
+
+```bash
+# Disable LLM — critical for 16 GB
+ENABLE_LLM=false
+
+# External PostgreSQL (not on this node)
+DATABASE_URL=postgres://user:pass@your-external-pg-host:5432/transcribesrv?sslmode=disable
+
+# Optional: Reduce model memory footprint
+ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3  # default, already smallest
+ENABLE_TTS=true   # TTS works but monitor under concurrent load
+ENABLE_DIARIZATION=true
+```
+
+### When to Choose 16 GB vs 24 GB
+
+| Scenario | Recommended Config |
+|----------|-------------------|
+| Dev/staging, solo | 16 GB — cost-effective |
+| Production, ASR + TTS only | 16 GB — acceptable with external DB |
+| Production, any LLM features | 24 GB minimum |
+| Production, full stack | 32 GB |
+| 5+ concurrent streams expected | 24 GB minimum |
+
+> **TL;DR:** A single 16 GB Mac Mini M4 works for ASR + TTS + diarization with an external database. It does NOT work with LLM. If you need LLM features now or soon, order the 24 GB — the ~$200 premium is worth the headroom and avoids a second deployment cycle.
+
+---
+
 ## Troubleshooting
 
 | Issue | Solution |
-|-------|----------|
+|-------|---------|
 | Swift build fails | Ensure Xcode 16+ and Swift 6.0+ (`swift --version`) |
 | `CUDA not available` | Expected — we use CoreML/ANE, not CUDA |
 | Swift model download slow | Models download from HuggingFace on first run (~2 GB). Set `HF_HUB_CACHE` to a fast SSD |
