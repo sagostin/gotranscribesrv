@@ -13,13 +13,26 @@ let package = Package(
         .package(url: "https://github.com/vapor/vapor.git", from: "4.99.0"),
     ],
     targets: [
+        // ITN library — pure-Swift inverse text normalization.
+        // Exposed as a library target so it can be unit-tested in isolation
+        // and (optionally) consumed by other targets.
+        .target(
+            name: "ITN",
+            path: "Sources/ITN"
+        ),
         .executableTarget(
             name: "Server",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Vapor", package: "vapor"),
+                "ITN",
             ],
             path: "Sources/Server"
+        ),
+        .testTarget(
+            name: "ITNTests",
+            dependencies: ["ITN"],
+            path: "Tests/ITNTests"
         ),
     ]
 )

@@ -33,6 +33,10 @@ type Config struct {
 	EnableTTS         bool
 	EnableLLM         bool
 
+	// ITN (Inverse Text Normalization) — spoken-form ASR -> written form
+	// ("one two five O" -> "1250"). Applied in the Swift sidecar. Default on.
+	EnableITN bool
+
 	// Rate Limits
 	RateLimitFree       int
 	RateLimitPro        int
@@ -74,6 +78,7 @@ func Load() *Config {
 		EnableDiarization: envOrDefault("ENABLE_DIARIZATION", "true") == "true",
 		EnableTTS:         envOrDefault("ENABLE_TTS", "true") == "true",
 		EnableLLM:         envOrDefault("ENABLE_LLM", "false") == "true",
+		EnableITN:         envOrDefault("ENABLE_ITN", "true") == "true",
 
 		RateLimitFree:       envOrDefaultInt("RATE_LIMIT_FREE", 20),
 		RateLimitPro:        envOrDefaultInt("RATE_LIMIT_PRO", 120),

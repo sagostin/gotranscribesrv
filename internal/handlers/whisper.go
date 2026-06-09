@@ -17,12 +17,13 @@ import (
 
 // WhisperHandler handles the OpenAI Whisper-compatible endpoint.
 type WhisperHandler struct {
-	sidecar *sidecar.Client
+	sidecar    *sidecar.Client
+	defaultITN bool
 }
 
 // NewWhisperHandler creates a new WhisperHandler.
-func NewWhisperHandler(sc *sidecar.Client) *WhisperHandler {
-	return &WhisperHandler{sidecar: sc}
+func NewWhisperHandler(sc *sidecar.Client, defaultITN bool) *WhisperHandler {
+	return &WhisperHandler{sidecar: sc, defaultITN: defaultITN}
 }
 
 // Transcriptions handles the Whisper-compatible endpoint.
@@ -122,6 +123,13 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	wantDiarize := responseFormat == "diarized_json" ||
 		strings.Contains(strings.ToLower(model), "diarize")
 
+	// ITN: respect the per-request "itn" form field if present, otherwise
+	// fall back to the server-wide default (cfg.EnableITN).
+	itnVal := h.defaultITN
+	if v := c.FormValue("itn"); v != "" {
+		itnVal = v != "false"
+	}
+
 	// ── Verbose request logging ──────────────────────────────────────
 	slog.Info("[whisper] incoming request",
 		"file", fmt.Sprintf("%s (%d bytes)", file.Filename, file.Size),
@@ -155,6 +163,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 			Filename: file.Filename,
 			Language: language,
 			Diarize:  wantDiarize,
+			ITN:      &itnVal,
 		})
 	}()
 
