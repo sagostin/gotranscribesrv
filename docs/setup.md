@@ -88,6 +88,11 @@ LLM_SIDECAR_URL=http://localhost:8100
 ENABLE_DIARIZATION=true
 ENABLE_TTS=true
 
+# Inverse Text Normalization (ITN) — converts spoken ASR output to
+# written form (e.g. "one two five O" -> "1250"). On by default.
+# Per-request opt-out: pass ?itn=false (stream) or form itn=false.
+ENABLE_ITN=true
+
 # LLM Processing (opt-in, requires ~4.5 GB extra RAM + Python sidecar)
 ENABLE_LLM=false
 LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
@@ -130,6 +135,27 @@ curl http://localhost:8101/health
 **First build note:** The initial `swift build` may take a few minutes to compile Vapor and FluidAudio dependencies. Subsequent builds are fast (incremental).
 
 **Model auto-download:** FluidAudio downloads CoreML models from HuggingFace on first launch (~2 GB total). Models are cached in `~/.cache/huggingface` and persist across restarts.
+
+#### Optional: enable full NeMo ITN (spoken → written form)
+
+By default, the Swift sidecar logs `📝 ITN: Swift fallback (libnemo_text_processing not linked — passthrough)`. Without the optional native library, ITN is a no-op — spoken numbers like "twelve dollars" pass through unchanged. To enable real NeMo ITN (98.6% compatibility with NVIDIA's NeMo test suite, 7 languages):
+
+```bash
+# One-time setup: builds a ~10 MB static lib from the Rust port of NeMo.
+# Requires the Rust toolchain (brew install rust on macOS).
+make itn-build    # ~5s incremental, ~30s cold
+make swift-build  # relink the sidecar to pick up the lib
+make swift-test   # 12 tests, including a real-NeMo smoke test
+```
+
+Verify the link took effect:
+
+```bash
+make swift-sidecar
+# 📝 ITN: NeMo library loaded (version=text-processing-rs-0.2.2)
+```
+
+The link is **optional and graceful**: removing the `.a` file reverts the sidecar to passthrough mode without any code changes. Per-request opt-out is also available via `?itn=false` on the WS endpoints or `itn=false` form field on the REST endpoints.
 
 ---
 

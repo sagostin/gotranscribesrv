@@ -10,12 +10,13 @@ import (
 
 // ASRHandler handles speech-to-text routes.
 type ASRHandler struct {
-	sidecar *sidecar.Client
+	sidecar    *sidecar.Client
+	defaultITN bool
 }
 
 // NewASRHandler creates a new ASRHandler.
-func NewASRHandler(sc *sidecar.Client) *ASRHandler {
-	return &ASRHandler{sidecar: sc}
+func NewASRHandler(sc *sidecar.Client, defaultITN bool) *ASRHandler {
+	return &ASRHandler{sidecar: sc, defaultITN: defaultITN}
 }
 
 // TranscribeFile handles multipart audio file upload for transcription.
@@ -70,11 +71,19 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	diarize := c.FormValue("diarize") == "true"
 	language := c.FormValue("language", "en")
 
+	// ITN: respect the per-request "itn" form field if present, otherwise
+	// fall back to the server-wide default (cfg.EnableITN).
+	itnVal := h.defaultITN
+	if v := c.FormValue("itn"); v != "" {
+		itnVal = v != "false"
+	}
+
 	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: file.Filename,
 		Language: language,
 		Diarize:  diarize,
+		ITN:      &itnVal,
 	})
 	if err != nil {
 		slog.Error("transcription failed", "error", err, "filename", file.Filename)

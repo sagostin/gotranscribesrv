@@ -1,3 +1,4 @@
+import FluidAudio
 import Vapor
 
 /// GoTranscribeSrv — Swift Inference Sidecar
@@ -30,6 +31,17 @@ await engines.initialize()
 let status = await engines.healthStatus()
 let loaded = status.filter { $0.value == "loaded" }.map { $0.key }
 print("✅ Startup complete — loaded engines: \(loaded)")
+
+// ITN status (FluidAudio TextNormalizer)
+// - With libnemo_text_processing linked: full NeMo ITN (spoken → written form)
+// - Without: Swift passthrough (normalize() returns input unchanged)
+// Either way, ITN is safe to enable by default.
+let itn = TextNormalizer.shared
+if itn.isNativeAvailable {
+    print("📝 ITN: NeMo library loaded (version=\(itn.version ?? "unknown"))")
+} else {
+    print("📝 ITN: Swift fallback (libnemo_text_processing not linked — passthrough)")
+}
 
 // Register routes
 healthRoutes(app, engines: engines)

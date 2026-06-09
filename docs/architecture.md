@@ -233,15 +233,22 @@ Parakeet TDT v3 (CoreML/ANE)
     │  Maps words to speakers via overlap analysis
     │  → speaker labels per segment
     ▼
+Inverse Text Normalization (TextNormalizer, FluidAudio)
+    │  Spoken → written form. "one two five O" → "1250",
+    │  "five dollars and fifty cents" → "$5.50", etc.
+    │  ON BY DEFAULT (ENABLE_ITN=true). No-op when the optional
+    │  libnemo_text_processing dylib isn't linked.
+    ▼
 JSON Response
     {
-      "text": "full transcript",
+      "text": "full transcript (written form)",
       "segments": [
         {"speaker": "SPEAKER_00", "start": 0.0, "end": 2.1, "text": "Hello..."},
         {"speaker": "SPEAKER_01", "start": 2.3, "end": 4.5, "text": "Hi there..."}
       ],
       "duration": 60.0,
-      "processing_time_ms": 52
+      "processing_time_ms": 52,
+      "itn_applied": true
     }
 ```
 

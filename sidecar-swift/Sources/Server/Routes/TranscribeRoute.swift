@@ -96,6 +96,30 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     // Build sentence-level segments by grouping tokens with gaps < 0.8s
     let segments = buildSegmentsFromWords(words)
 
+    // ITN: per-request opt-out via form field `itn=false`. Default is on
+    // (matches the server-wide ENABLE_ITN default in the Go server).
+    // TextNormalizer is a no-op when the native libnemo_text_processing
+    // dylib is not linked (returns input unchanged), so this is safe.
+    let itnEnabled = (audio.itn ?? "true").lowercased() != "false"
+    let itn = TextNormalizer.shared
+    let normalizedText = itnEnabled ? itn.normalizeSentence(result.text) : result.text
+    let normalizedSegments = itnEnabled ? segments.map { seg in
+        TranscribeSegment(
+            speaker: seg.speaker,
+            start: seg.start,
+            end: seg.end,
+            text: itn.normalizeSentence(seg.text)
+        )
+    } : segments
+    let normalizedWords = itnEnabled ? words.map { w in
+        TranscribeWord(
+            word: itn.normalize(w.word),
+            start: w.start,
+            end: w.end,
+            speaker: w.speaker
+        )
+    } : words
+
     // FluidAudio's result.duration may be 0 for some models — fall back to sample count
     let audioDuration: Double
     if result.duration > 0 {
@@ -107,15 +131,16 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     let diarize = (audio.diarize ?? "").lowercased() == "true"
 
     var response = TranscribeResponse(
-        text: result.text,
-        segments: segments,
-        words: words,
+        text: normalizedText,
+        segments: normalizedSegments,
+        words: normalizedWords,
         duration: audioDuration,
         processing_time_ms: processingTimeMs,
         model: "parakeet-tdt-v3-coreml",
         diarized: false,
         num_speakers: nil,
-        speakers: nil
+        speakers: nil,
+        itn_applied: itnEnabled
     )
 
     // Run diarization if requested (Sortformer — end-to-end neural, 4 speakers)
@@ -218,7 +243,8 @@ private func enrichTranscript(
         return TranscribeResponse(
             text: response.text, segments: [], words: enrichedWords,
             duration: response.duration, processing_time_ms: processingTimeMs,
-            model: response.model, diarized: true, num_speakers: 0, speakers: [:]
+            model: response.model, diarized: true, num_speakers: 0, speakers: [:],
+            itn_applied: response.itn_applied
         )
     }
 
@@ -271,7 +297,8 @@ private func enrichTranscript(
         model: response.model,
         diarized: true,
         num_speakers: speakerSummary.count,
-        speakers: speakerSummary
+        speakers: speakerSummary,
+        itn_applied: response.itn_applied
     )
 }
 
@@ -331,6 +358,7 @@ struct AudioUpload: Content {
     var audio: File
     var language: String?
     var diarize: String?  // Multipart form fields are always strings
+    var itn: String?      // "false" disables inverse text normalization for this request
 }
 
 struct TranscribeResponse: Content {
@@ -343,6 +371,7 @@ struct TranscribeResponse: Content {
     var diarized: Bool
     var num_speakers: Int?
     var speakers: [String: SpeakerSummary]?
+    var itn_applied: Bool
 }
 
 struct TranscribeSegment: Content {

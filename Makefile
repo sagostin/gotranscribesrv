@@ -1,10 +1,25 @@
-.PHONY: run build test migrate lint sidecar swift-sidecar clean setup-models setup-voices venv \
-       up down logs rebuild
+.PHONY: run build test migrate lint sidecar swift-sidecar swift-test swift-build \
+        itn-build itn-vendor itn-clean clean setup-models setup-voices venv \
+        up down logs rebuild
 
 # ---------- Config ----------
 VENV_DIR  := sidecar/.venv
 VENV_PY   := $(VENV_DIR)/bin/python3
 VENV_PIP  := $(VENV_DIR)/bin/pip
+
+# Rust host target for vendored text-processing-rs (used by `make itn-build`).
+# Override with `make itn-build RUST_TARGET=x86_64-apple-darwin` on Intel Macs.
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),arm64)
+  RUST_TARGET ?= aarch64-apple-darwin
+else
+  RUST_TARGET ?= x86_64-apple-darwin
+endif
+
+ITN_VENDOR_DIR := sidecar-swift/Vendor/text-processing-rs
+ITN_VERSION    := v0.2.2
+ITN_RELEASE    := $(ITN_VENDOR_DIR)/target/$(RUST_TARGET)/release/libtext_processing_rs.a
+ITN_TEST_FILTER := TextNormalizerTests
 
 # ---------- Go backend ----------
 run:
@@ -33,6 +48,46 @@ swift-sidecar:
 
 swift-build:
 	cd sidecar-swift && swift build -c release
+
+swift-test:
+	@echo ""
+	@echo "  🧪 Running Swift sidecar tests (ITN, ...)"
+	@echo ""
+	cd sidecar-swift && swift test --filter $(ITN_TEST_FILTER)
+
+# ---------- ITN (Inverse Text Normalization) — NeMo via text-processing-rs ----------
+# Optional: builds the Rust static lib that FluidAudio's TextNormalizer dlsym()s
+# at runtime. Without this build step, ITN is a no-op passthrough. With it, the
+# sidecar gets full NeMo ITN/TN (EN, DE, ES, FR, HI, JA, ZH).
+#
+# Requires Rust toolchain (cargo). Install: `brew install rust` (Apple Silicon) or
+# `rustup target add $(RUST_TARGET)` if using rustup.
+
+itn-vendor:
+	@if [ ! -d "$(ITN_VENDOR_DIR)" ]; then \
+		echo "📥 Cloning text-processing-rs $(ITN_VERSION)..."; \
+		mkdir -p sidecar-swift/Vendor; \
+		git clone --depth 1 --branch $(ITN_VERSION) https://github.com/FluidInference/text-processing-rs.git $(ITN_VENDOR_DIR); \
+	else \
+		echo "✅ text-processing-rs already vendored at $(ITN_VENDOR_DIR)"; \
+	fi
+
+itn-build: itn-vendor
+	@echo ""
+	@echo "  🔨 Building text-processing-rs static lib for $(RUST_TARGET)"
+	@echo "  ℹ  Output: $(ITN_RELEASE)"
+	@echo ""
+	cd $(ITN_VENDOR_DIR) && \
+		MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release --features ffi --target $(RUST_TARGET)
+	@echo ""
+	@echo "  ✅ Static lib built. Rebuild the swift sidecar to link it:"
+	@echo "      make swift-build"
+	@echo "  Run tests to verify:"
+	@echo "      make swift-test"
+	@echo ""
+
+itn-clean:
+	rm -rf $(ITN_VENDOR_DIR)/target
 
 # ---------- Python venv ----------
 venv: $(VENV_PY)

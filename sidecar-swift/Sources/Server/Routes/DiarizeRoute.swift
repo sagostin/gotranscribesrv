@@ -80,7 +80,8 @@ private func handleDiarize(req: Request, engines: EngineManager) async throws ->
         model: transcript.model,
         diarized: true,
         num_speakers: speakerStats.count,
-        speakers: speakerStats
+        speakers: speakerStats,
+        itn_applied: transcript.itn_applied
     )
 }
 
