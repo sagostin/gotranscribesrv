@@ -1,5 +1,4 @@
 import FluidAudio
-import ITN
 import Vapor
 
 /// Real-time streaming ASR route — WS /stream
@@ -35,17 +34,15 @@ private enum AudioEncoding: String {
 private final class StreamState: @unchecked Sendable {
     let encoding: AudioEncoding
     let inputSampleRate: Int
-    let itnEnabled: Bool
 
     private let lock = NSLock()
     private var _pcmBuffer: [Float] = []   // Decoded + resampled to 16kHz Float32
     private var _lastTranscribedCount = 0
     private var _sessionClosed = false
 
-    init(encoding: AudioEncoding, inputSampleRate: Int, itnEnabled: Bool = true) {
+    init(encoding: AudioEncoding, inputSampleRate: Int) {
         self.encoding = encoding
         self.inputSampleRate = inputSampleRate
-        self.itnEnabled = itnEnabled
     }
 
     var pcmBuffer: [Float] {
@@ -98,12 +95,9 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
     let encoding = AudioEncoding(rawValue: encodingStr) ?? .linear16
     let inputSampleRate = Int(sampleRateStr) ?? 16000
 
-    // ITN: "false" disables inverse text normalization for this session.
-    let itnEnabled = (req.query[String.self, at: "itn"] ?? "true").lowercased() != "false"
+    req.logger.info("[STREAM] Session started — encoding=\(encoding.rawValue), sample_rate=\(inputSampleRate)")
 
-    req.logger.info("[STREAM] Session started — encoding=\(encoding.rawValue), sample_rate=\(inputSampleRate), itn=\(itnEnabled)")
-
-    let state = StreamState(encoding: encoding, inputSampleRate: inputSampleRate, itnEnabled: itnEnabled)
+    let state = StreamState(encoding: encoding, inputSampleRate: inputSampleRate)
 
     // Send ready event
     try? await ws.send(#"{"type":"ready"}"#)
@@ -182,8 +176,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                 let result = try await engines.transcribe(floatSamples)
                 req.logger.info("[STREAM] ASR result: \"\(result.text.prefix(200))\", length=\(result.text.count)")
                 if !result.text.isEmpty {
-                    let outText = state.itnEnabled ? ITN.normalize(result.text) : result.text
-                    let partial = streamEventJSON(type: "partial", text: outText, isFinal: false)
+                    let partial = streamEventJSON(type: "partial", text: result.text, isFinal: false)
                     try? await ws.send(partial)
                 }
             } catch {
@@ -244,9 +237,7 @@ private func finalizeStream(
         let result = try await engines.transcribe(floatSamples)
         logger.info("[STREAM] Final ASR: \"\(result.text.prefix(200))\"")
 
-        // Build words array from token timings (per-word ITN applies to the
-        // surface text; cross-word digit grouping is applied to the joined
-        // text + final result.text below).
+        // Build words array from token timings
         var words: [[String: Any]] = []
         if let timings = result.tokenTimings {
             var currentWord = ""
@@ -266,10 +257,8 @@ private func finalizeStream(
                 }
                 guard !cleaned.isEmpty else { continue }
 
-                let surface = state.itnEnabled ? ITN.normalizeToken(cleaned) : cleaned
-
                 if isWordStart && !currentWord.isEmpty {
-                    words.append(["word": surface, "start": wordStart, "end": wordEnd])
+                    words.append(["word": currentWord, "start": wordStart, "end": wordEnd])
                     currentWord = cleaned
                     wordStart = t.startTime
                     wordEnd = t.endTime
@@ -283,16 +272,13 @@ private func finalizeStream(
                 }
             }
             if !currentWord.isEmpty {
-                let surface = state.itnEnabled ? ITN.normalizeToken(currentWord) : currentWord
-                words.append(["word": surface, "start": wordStart, "end": wordEnd])
+                words.append(["word": currentWord, "start": wordStart, "end": wordEnd])
             }
         }
 
-        let finalText = state.itnEnabled ? ITN.normalize(result.text) : result.text
-
         let finalEvent: [String: Any] = [
             "type": "final",
-            "text": finalText,
+            "text": result.text,
             "start": 0.0,
             "end": audioDuration,
             "words": words,

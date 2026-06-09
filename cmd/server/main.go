@@ -42,7 +42,6 @@ func main() {
 	slog.Info("starting GoTranscribeSrv",
 		"environment", cfg.Environment,
 		"port", cfg.Port,
-		"itn", cfg.EnableITN,
 	)
 
 	// Initialize Prometheus metrics (no-op when METRICS_ENABLED=false)
@@ -133,14 +132,14 @@ func main() {
 
 	// Create handlers
 	authHandler := handlers.NewAuthHandler(db.DB, authCfg, cfg.RegistrationEnabled)
-	asrHandler := handlers.NewASRHandler(sc, cfg.EnableITN)
-	whisperHandler := handlers.NewWhisperHandler(sc, cfg.EnableITN)
+	asrHandler := handlers.NewASRHandler(sc)
+	whisperHandler := handlers.NewWhisperHandler(sc)
 	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir)
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	processHandler := handlers.NewProcessHandler(sc)
-	watsonHandler := handlers.NewWatsonHandler(sc, db.DB, cfg.EnableITN)
+	watsonHandler := handlers.NewWatsonHandler(sc, db.DB)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {

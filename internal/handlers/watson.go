@@ -22,14 +22,13 @@ import (
 
 // WatsonHandler handles IBM Watson Speech-to-Text compatible endpoints.
 type WatsonHandler struct {
-	sidecar    *sidecar.Client
-	db         *gorm.DB
-	defaultITN bool
+	sidecar *sidecar.Client
+	db      *gorm.DB
 }
 
 // NewWatsonHandler creates a new WatsonHandler.
-func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool) *WatsonHandler {
-	return &WatsonHandler{sidecar: sc, db: db, defaultITN: defaultITN}
+func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB) *WatsonHandler {
+	return &WatsonHandler{sidecar: sc, db: db}
 }
 
 // --- Watson Response Types ---
@@ -136,19 +135,11 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 	// model, max_alternatives, profanity_filter, smart_formatting, inactivity_timeout
 	// are accepted for compatibility but ignored
 
-	// ITN: respect the per-request "itn" query param if present, otherwise
-	// fall back to the server-wide default (cfg.EnableITN).
-	itnVal := h.defaultITN
-	if v := c.Query("itn"); v != "" {
-		itnVal = v != "false"
-	}
-
 	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: filename,
 		Language: c.Query("language", "en"),
 		Diarize:  speakerLabels,
-		ITN:      &itnVal,
 	})
 	if err != nil {
 		slog.Error("Watson transcription failed", "error", err, "content_type", rawContentType)
@@ -204,7 +195,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	// Forward relevant query params to sidecar
 	q := u.Query()
-	for _, param := range []string{"language", "diarize", "encoding", "sample_rate", "itn"} {
+	for _, param := range []string{"language", "diarize", "encoding", "sample_rate"} {
 		if v := c.Query(param); v != "" {
 			q.Set(param, v)
 		}

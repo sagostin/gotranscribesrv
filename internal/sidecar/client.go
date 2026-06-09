@@ -43,9 +43,6 @@ type TranscribeRequest struct {
 	Filename string `json:"filename"`
 	Language string `json:"language"`
 	Diarize  bool   `json:"diarize"`
-	// ITN enables inverse text normalization in the Swift sidecar.
-	// nil = use server default (currently on), true = force on, false = force off.
-	ITN *bool `json:"-"`
 }
 
 // TranscribeResponse is the JSON transcript from the sidecar.
@@ -172,13 +169,6 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	_ = writer.WriteField("language", req.Language)
 	if req.Diarize {
 		_ = writer.WriteField("diarize", "true")
-	}
-	if req.ITN != nil {
-		if *req.ITN {
-			_ = writer.WriteField("itn", "true")
-		} else {
-			_ = writer.WriteField("itn", "false")
-		}
 	}
 	writer.Close()
 

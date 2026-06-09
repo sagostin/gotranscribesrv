@@ -138,7 +138,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	// Forward query params to sidecar
 	q := u.Query()
-	for _, param := range []string{"language", "diarize", "encoding", "sample_rate", "itn"} {
+	for _, param := range []string{"language", "diarize", "encoding", "sample_rate"} {
 		if v := c.Query(param); v != "" {
 			q.Set(param, v)
 		}

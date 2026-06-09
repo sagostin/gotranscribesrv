@@ -1,5 +1,5 @@
 .PHONY: run build test migrate lint sidecar swift-sidecar clean setup-models setup-voices venv \
-        up down logs rebuild swift-test
+       up down logs rebuild
 
 # ---------- Config ----------
 VENV_DIR  := sidecar/.venv
@@ -33,12 +33,6 @@ swift-sidecar:
 
 swift-build:
 	cd sidecar-swift && swift build -c release
-
-swift-test:
-	@echo ""
-	@echo "  🧪 Running Swift sidecar tests (ITN, ...)"
-	@echo ""
-	cd sidecar-swift && swift test
 
 # ---------- Python venv ----------
 venv: $(VENV_PY)

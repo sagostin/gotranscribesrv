@@ -46,16 +46,13 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 		return
 	}
 
-	// Add query params from client (language, diarize, itn, etc.)
+	// Add query params from client (language, diarize, etc.)
 	q := u.Query()
 	if lang := c.Query("language"); lang != "" {
 		q.Set("language", lang)
 	}
 	if diarize := c.Query("diarize"); diarize != "" {
 		q.Set("diarize", diarize)
-	}
-	if itn := c.Query("itn"); itn != "" {
-		q.Set("itn", itn)
 	}
 	u.RawQuery = q.Encode()
 

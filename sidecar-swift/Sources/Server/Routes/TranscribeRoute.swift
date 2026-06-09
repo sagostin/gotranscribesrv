@@ -1,5 +1,4 @@
 import FluidAudio
-import ITN
 import Vapor
 
 /// ASR transcription route — POST /transcribe
@@ -97,28 +96,6 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     // Build sentence-level segments by grouping tokens with gaps < 0.8s
     let segments = buildSegmentsFromWords(words)
 
-    // Apply ITN to per-word text (handles "one" -> "1" and "O" -> "0" inside
-    // an otherwise normal word) and to the full response text / per-segment
-    // text (handles cross-word digit grouping like "one two five O" -> "1250"
-    // and money / dates / times).
-    let normalizedText = ITN.normalize(result.text)
-    let normalizedSegments = segments.map { seg in
-        TranscribeSegment(
-            speaker: seg.speaker,
-            start: seg.start,
-            end: seg.end,
-            text: ITN.normalize(seg.text)
-        )
-    }
-    let normalizedWords = words.map { w in
-        TranscribeWord(
-            word: ITN.normalizeToken(w.word),
-            start: w.start,
-            end: w.end,
-            speaker: w.speaker
-        )
-    }
-
     // FluidAudio's result.duration may be 0 for some models — fall back to sample count
     let audioDuration: Double
     if result.duration > 0 {
@@ -128,12 +105,11 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     }
 
     let diarize = (audio.diarize ?? "").lowercased() == "true"
-    let itnEnabled = (audio.itn ?? "true").lowercased() != "false"
 
     var response = TranscribeResponse(
-        text: itnEnabled ? normalizedText : result.text,
-        segments: itnEnabled ? normalizedSegments : segments,
-        words: itnEnabled ? normalizedWords : words,
+        text: result.text,
+        segments: segments,
+        words: words,
         duration: audioDuration,
         processing_time_ms: processingTimeMs,
         model: "parakeet-tdt-v3-coreml",
@@ -355,7 +331,6 @@ struct AudioUpload: Content {
     var audio: File
     var language: String?
     var diarize: String?  // Multipart form fields are always strings
-    var itn: String?      // "false" to disable inverse text normalization
 }
 
 struct TranscribeResponse: Content {
