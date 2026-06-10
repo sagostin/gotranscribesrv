@@ -64,15 +64,21 @@ swift-test:
 # `rustup target add $(RUST_TARGET)` if using rustup.
 
 itn-vendor:
-	@if [ ! -d "$(ITN_VENDOR_DIR)" ]; then \
+	@if [ ! -f "$(ITN_VENDOR_DIR)/Cargo.toml" ]; then \
 		echo "📥 Cloning text-processing-rs $(ITN_VERSION)..."; \
+		rm -rf $(ITN_VENDOR_DIR); \
 		mkdir -p sidecar-swift/Vendor; \
 		git clone --depth 1 --branch $(ITN_VERSION) https://github.com/FluidInference/text-processing-rs.git $(ITN_VENDOR_DIR); \
 	else \
 		echo "✅ text-processing-rs already vendored at $(ITN_VENDOR_DIR)"; \
 	fi
 
-itn-build: itn-vendor
+itn-build:
+	@if [ ! -f "$(ITN_VENDOR_DIR)/Cargo.toml" ]; then \
+		echo "❌ text-processing-rs not vendored at $(ITN_VENDOR_DIR)"; \
+		echo "   Run: make itn-vendor"; \
+		exit 1; \
+	fi
 	@echo ""
 	@echo "  🔨 Building text-processing-rs static lib for $(RUST_TARGET)"
 	@echo "  ℹ  Output: $(ITN_RELEASE)"

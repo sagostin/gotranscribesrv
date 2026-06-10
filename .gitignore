@@ -33,6 +33,7 @@ sample_test.mp3
 .DS_Store
 Thumbs.db
 /sidecar-swift/.build/
+/sidecar-swift/Vendor/text-processing-rs/
 /sidecar-swift/Vendor/text-processing-rs/target/
 /docs/cost-benefit-analysis.md
 /docs/email-cost-benefit-draft.md
