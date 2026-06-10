@@ -16,13 +16,14 @@ import (
 
 // WSHandler handles WebSocket ASR streaming by proxying to the Python sidecar.
 type WSHandler struct {
-	sidecar *sidecar.Client
-	db      *gorm.DB
+	sidecar    *sidecar.Client
+	db         *gorm.DB
+	defaultITN bool
 }
 
 // NewWSHandler creates a new WSHandler.
-func NewWSHandler(sc *sidecar.Client, db *gorm.DB) *WSHandler {
-	return &WSHandler{sidecar: sc, db: db}
+func NewWSHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool) *WSHandler {
+	return &WSHandler{sidecar: sc, db: db, defaultITN: defaultITN}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -54,8 +55,13 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	if diarize := c.Query("diarize"); diarize != "" {
 		q.Set("diarize", diarize)
 	}
+	// ITN: forward the client's ?itn= override if present; otherwise inject
+	// the server-wide default (cfg.EnableITN) so ENABLE_ITN=false in .env
+	// actually disables ITN for WS clients that don't specify it.
 	if itn := c.Query("itn"); itn != "" {
 		q.Set("itn", itn)
+	} else if !h.defaultITN {
+		q.Set("itn", "false")
 	}
 	u.RawQuery = q.Encode()
 

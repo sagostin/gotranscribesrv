@@ -20,13 +20,14 @@ import (
 // WS /v1/listen — proxies to the Swift sidecar's /stream WebSocket,
 // translating between Deepgram's protocol and the internal protocol.
 type DeepgramHandler struct {
-	sidecar *sidecar.Client
-	db      *gorm.DB
+	sidecar    *sidecar.Client
+	db         *gorm.DB
+	defaultITN bool
 }
 
 // NewDeepgramHandler creates a new DeepgramHandler.
-func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB) *DeepgramHandler {
-	return &DeepgramHandler{sidecar: sc, db: db}
+func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool) *DeepgramHandler {
+	return &DeepgramHandler{sidecar: sc, db: db, defaultITN: defaultITN}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -142,6 +143,12 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		if v := c.Query(param); v != "" {
 			q.Set(param, v)
 		}
+	}
+	// ITN: if the client didn't pass ?itn= and the server-wide default is
+	// off, inject it so ENABLE_ITN=false in .env actually disables ITN
+	// for Deepgram-compat clients.
+	if c.Query("itn") == "" && !h.defaultITN {
+		q.Set("itn", "false")
 	}
 	u.RawQuery = q.Encode()
 

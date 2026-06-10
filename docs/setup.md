@@ -90,7 +90,9 @@ ENABLE_TTS=true
 
 # Inverse Text Normalization (ITN) — converts spoken ASR output to
 # written form (e.g. "one two five O" -> "1250"). On by default.
-# Per-request opt-out: pass ?itn=false (stream) or form itn=false.
+# Set to false to disable ITN across ALL ingress paths (REST + WS) for
+# every request that doesn't pass an explicit per-request override.
+# Per-request opt-out: pass ?itn=false (WS) or form itn=false (REST).
 ENABLE_ITN=true
 
 # LLM Processing (opt-in, requires ~4.5 GB extra RAM + Python sidecar)
@@ -156,6 +158,27 @@ make swift-sidecar
 ```
 
 The link is **optional and graceful**: removing the `.a` file reverts the sidecar to passthrough mode without any code changes. Per-request opt-out is also available via `?itn=false` on the WS endpoints or `itn=false` form field on the REST endpoints.
+
+#### Toggling ITN off globally
+
+Set `ENABLE_ITN=false` in `.env` and restart the Go server. This propagates to **all five STT ingress paths** (REST + WS, all protocols) — for any request that doesn't pass an explicit `itn=true` override, ITN is bypassed end-to-end. Per-request `itn=true` still wins if a client wants to force it on for one request.
+
+#### Debug logs
+
+Every transcription (REST + WS final) logs the original ASR text and the ITN-converted text side by side, so you can verify what's happening:
+
+```
+ITN [ne] text: "one two five O" -> "1250"
+ITN [ne] words (2): 'one'->'1', 'O'->'0'
+ITN [ne] final: "I paid five dollars for twenty three items" -> "I paid $5 for 23 items"
+```
+
+The tag in brackets shows which engine ran:
+- `ne` — NeMo via libnemo_text_processing (after `make itn-build`)
+- `swift-passthrough` — Swift fallback (lib not linked; output == input)
+- `ITN: disabled for this request/session` — ITN was turned off via env or per-request override
+
+WS partials log at debug level (they fire every ~3s); REST + WS final events log at info level. Set `LOG_LEVEL=debug` in `.env` to see the partials.
 
 ---
 

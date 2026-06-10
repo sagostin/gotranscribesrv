@@ -120,6 +120,41 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
         )
     } : words
 
+    // ITN debug logs — surface original → converted text on every
+    // transcription so it's easy to verify the NeMo lib is doing what
+    // we expect (or to confirm ENABLE_ITN=false is bypassing it).
+    if itnEnabled {
+        let nativeLoaded = itn.isNativeAvailable ? "ne" : "swift-passthrough"
+        // Always print the before/after pair to stdout, in addition to
+        // the structured logger, so it's easy to spot in sidecar logs
+        // and `make swift-sidecar` output.
+        print("─[ITN \(nativeLoaded)]────────────────────────────")
+        print("  before: \"\(result.text)\"")
+        print("  after : \"\(normalizedText)\"")
+        print("─────────────────────────────────────────────────")
+        if normalizedText != result.text {
+            req.logger.info("ITN [\(nativeLoaded)] text: \"\(result.text)\" -> \"\(normalizedText)\"")
+        } else {
+            req.logger.debug("ITN [\(nativeLoaded)] text: unchanged (\"\(result.text)\")")
+        }
+        // Per-word: log only the words that actually changed (avoid spam)
+        let changedWords = zip(words, normalizedWords).compactMap { orig, norm -> (String, String)? in
+            orig.word != norm.word ? (orig.word, norm.word) : nil
+        }
+        if !changedWords.isEmpty {
+            let preview = changedWords.prefix(5).map { "'\($0.0)'->'\($0.1)'" }.joined(separator: ", ")
+            let more = changedWords.count > 5 ? " +\(changedWords.count - 5) more" : ""
+            req.logger.info("ITN [\(nativeLoaded)] words (\(changedWords.count)): \(preview)\(more)")
+        }
+    } else {
+        print("─[ITN]──────────────────────────────────────────")
+        print("  disabled for this request (itn=false)")
+        print("  before: \"\(result.text)\"")
+        print("  after : \"\(result.text)\"  (unchanged)")
+        print("─────────────────────────────────────────────────")
+        req.logger.info("ITN: disabled for this request (itn=false)")
+    }
+
     // FluidAudio's result.duration may be 0 for some models — fall back to sample count
     let audioDuration: Double
     if result.duration > 0 {

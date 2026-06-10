@@ -184,6 +184,18 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                     let outText = state.itnEnabled
                         ? TextNormalizer.shared.normalizeSentence(result.text)
                         : result.text
+                    // ITN debug — always print to stdout for live transcript
+                    // visibility, plus a debug log line when the text changed.
+                    if state.itnEnabled {
+                        let native = TextNormalizer.shared.isNativeAvailable ? "ne" : "swift-passthrough"
+                        if outText != result.text {
+                            print("─[ITN \(native) partial]─────────────────────")
+                            print("  before: \"\(result.text)\"")
+                            print("  after : \"\(outText)\"")
+                            print("─────────────────────────────────────────────")
+                            req.logger.debug("ITN [\(native)] partial: \"\(result.text)\" -> \"\(outText)\"")
+                        }
+                    }
                     let partial = streamEventJSON(type: "partial", text: outText, isFinal: false)
                     try? await ws.send(partial)
                 }
@@ -291,6 +303,28 @@ private func finalizeStream(
         }
 
         let finalText = itnEnabled ? itn.normalizeSentence(result.text) : result.text
+
+        // ITN debug — final event is rare, log at info even when unchanged
+        // so operators can see the lib status on every session.
+        if itnEnabled {
+            let nativeLoaded = itn.isNativeAvailable ? "ne" : "swift-passthrough"
+            print("─[ITN \(nativeLoaded) final]────────────────────────")
+            print("  before: \"\(result.text)\"")
+            print("  after : \"\(finalText)\"")
+            print("─────────────────────────────────────────────────")
+            if finalText != result.text {
+                logger.info("ITN [\(nativeLoaded)] final: \"\(result.text)\" -> \"\(finalText)\"")
+            } else {
+                logger.info("ITN [\(nativeLoaded)] final: unchanged (\"\(result.text)\")")
+            }
+        } else {
+            print("─[ITN]──────────────────────────────────────────")
+            print("  disabled for this session (?itn=false)")
+            print("  before: \"\(result.text)\"")
+            print("  after : \"\(result.text)\"  (unchanged)")
+            print("─────────────────────────────────────────────────")
+            logger.info("ITN: disabled for this session (?itn=false)")
+        }
 
         let finalEvent: [String: Any] = [
             "type": "final",

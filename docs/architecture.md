@@ -236,8 +236,10 @@ Parakeet TDT v3 (CoreML/ANE)
 Inverse Text Normalization (TextNormalizer, FluidAudio)
     │  Spoken → written form. "one two five O" → "1250",
     │  "five dollars and fifty cents" → "$5.50", etc.
-    │  ON BY DEFAULT (ENABLE_ITN=true). No-op when the optional
-    │  libnemo_text_processing dylib isn't linked.
+    │  ON BY DEFAULT (ENABLE_ITN=true in .env). Per-request override:
+    │  ?itn=false (WS) or itn=false (REST). No-op when the optional
+    │  libnemo_text_processing dylib isn't linked (passthrough).
+    │  Debug logs surface original → converted text on every call.
     ▼
 JSON Response
     {

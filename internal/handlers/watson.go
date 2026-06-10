@@ -209,6 +209,12 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 			q.Set(param, v)
 		}
 	}
+	// ITN: if the client didn't pass ?itn= and the server-wide default is
+	// off, inject it so ENABLE_ITN=false in .env actually disables ITN
+	// for Watson-compat clients.
+	if c.Query("itn") == "" && !h.defaultITN {
+		q.Set("itn", "false")
+	}
 	if speakerLabels {
 		q.Set("diarize", "true")
 	}

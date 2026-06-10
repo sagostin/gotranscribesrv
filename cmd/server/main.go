@@ -171,7 +171,7 @@ func main() {
 	// which has an empty prefix and would intercept upgrade requests) ===
 
 	// WebSocket ASR (streaming — native protocol)
-	wsHandler := handlers.NewWSHandler(sc, db.DB)
+	wsHandler := handlers.NewWSHandler(sc, db.DB, cfg.EnableITN)
 	app.Use("/ws/asr", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.Info("WebSocket upgrade request", "path", "/ws/asr", "remote", c.IP())
@@ -184,7 +184,7 @@ func main() {
 	app.Get("/ws/asr", wsHandler.Upgrade())
 
 	// Deepgram-compatible streaming
-	dgHandler := handlers.NewDeepgramHandler(sc, db.DB)
+	dgHandler := handlers.NewDeepgramHandler(sc, db.DB, cfg.EnableITN)
 	app.Use("/v1/listen", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.Info("Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())
