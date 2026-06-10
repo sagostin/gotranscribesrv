@@ -87,11 +87,24 @@ let package = Package(
         .package(url: "https://github.com/vapor/vapor.git", from: "4.99.0"),
     ],
     targets: [
+        .target(
+            // Shared library: pure-Swift ITN helpers (e.g. ITNPreprocessor)
+            // consumed by both the executable Server and the test target.
+            // Kept separate from Server so the test target can import the
+            // symbols without depending on the executable target's
+            // dynamic-linking setup.
+            name: "ITNHelpers",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Sources/ITNHelpers"
+        ),
         .executableTarget(
             name: "Server",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Vapor", package: "vapor"),
+                "ITNHelpers",
             ],
             path: "Sources/Server",
             swiftSettings: itnLinkerFlags.isEmpty ? [] : [
@@ -105,6 +118,7 @@ let package = Package(
             name: "TextNormalizerTests",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                "ITNHelpers",
             ],
             path: "Tests/TextNormalizerTests",
             // The Server target's linkerSettings aren't applied to test

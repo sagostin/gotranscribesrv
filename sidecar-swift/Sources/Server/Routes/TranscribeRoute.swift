@@ -1,4 +1,5 @@
 import FluidAudio
+import ITNHelpers
 import Vapor
 
 /// ASR transcription route — POST /transcribe
@@ -102,13 +103,21 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
     // dylib is not linked (returns input unchanged), so this is safe.
     let itnEnabled = (audio.itn ?? "true").lowercased() != "false"
     let itn = TextNormalizer.shared
-    let normalizedText = itnEnabled ? itn.normalizeSentence(result.text) : result.text
+    // Preprocess: route 3+ digit-word runs (typically phone numbers) through
+    // `normalize()` (single-expression mode), which includes the telephone
+    // tagger. The NeMo sentence-mode tagger list excludes telephone because
+    // it over-fires on natural language, so without this step a spoken
+    // 10-digit phone number gets mangled into something like
+    // "2508 5915 1 ... 02:05". See ITNPreprocessor for the algorithm.
+    let phonePreprocessed = itnEnabled ? ITNPreprocessor.preprocessPhoneNumbers(result.text, normalizer: itn) : result.text
+    let normalizedText = itnEnabled ? itn.normalizeSentence(phonePreprocessed) : result.text
     let normalizedSegments = itnEnabled ? segments.map { seg in
-        TranscribeSegment(
+        let segPre = ITNPreprocessor.preprocessPhoneNumbers(seg.text, normalizer: itn)
+        return TranscribeSegment(
             speaker: seg.speaker,
             start: seg.start,
             end: seg.end,
-            text: itn.normalizeSentence(seg.text)
+            text: itn.normalizeSentence(segPre)
         )
     } : segments
     let normalizedWords = itnEnabled ? words.map { w in

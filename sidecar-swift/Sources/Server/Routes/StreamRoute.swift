@@ -1,4 +1,5 @@
 import FluidAudio
+import ITNHelpers
 import Vapor
 
 /// Real-time streaming ASR route — WS /stream
@@ -181,9 +182,17 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                 let result = try await engines.transcribe(floatSamples)
                 req.logger.info("[STREAM] ASR result: \"\(result.text.prefix(200))\", length=\(result.text.count)")
                 if !result.text.isEmpty {
-                    let outText = state.itnEnabled
-                        ? TextNormalizer.shared.normalizeSentence(result.text)
-                        : result.text
+                    let itn = TextNormalizer.shared
+                    let outText: String
+                    if state.itnEnabled {
+                        // Phone-number pre-pass routes digit runs through
+                        // single-expression `normalize()` (telephone tagger).
+                        // See ITNPreprocessor for the why.
+                        let pre = ITNPreprocessor.preprocessPhoneNumbers(result.text, normalizer: itn)
+                        outText = itn.normalizeSentence(pre)
+                    } else {
+                        outText = result.text
+                    }
                     // ITN debug — always print to stdout for live transcript
                     // visibility, plus a debug log line when the text changed.
                     if state.itnEnabled {
@@ -302,7 +311,13 @@ private func finalizeStream(
             }
         }
 
-        let finalText = itnEnabled ? itn.normalizeSentence(result.text) : result.text
+        let finalText: String
+        if itnEnabled {
+            let pre = ITNPreprocessor.preprocessPhoneNumbers(result.text, normalizer: itn)
+            finalText = itn.normalizeSentence(pre)
+        } else {
+            finalText = result.text
+        }
 
         // ITN debug — final event is rare, log at info even when unchanged
         // so operators can see the lib status on every session.
