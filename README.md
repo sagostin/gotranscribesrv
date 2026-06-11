@@ -17,7 +17,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS with per-user stored voice cloning + 17 built-in system voices, 24 kHz output |
-| **LLM Transcript Processing** | On-device summarization, action items, translation, Q&A via Llama 3.1 8B (optional) |
+| **LLM Transcript Processing** | *Opt-in, ~4.5 GB RAM overhead* — summarization, action items, translation, Q&A via Llama 3.1 8B. Most deployments leave this off. |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
 | **Rate Limiting** | Per-user, in-memory sliding window |
@@ -53,7 +53,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 Each node runs:
 - **Go (Fiber)** — API gateway, auth, WebSocket handling, usage tracking
 - **Swift (Vapor + FluidAudio)** — Audio AI inference: ASR (Parakeet TDT v3), VAD (Silero), speaker diarization (Sortformer), TTS (PocketTTS) — all via CoreML/ANE
-- **Python (FastAPI)** *(optional)* — LLM transcript processing (Llama 3.1 8B via mlx-lm)
+- **Python (FastAPI)** *(optional, off by default)* — LLM transcript processing (Llama 3.1 8B via mlx-lm). Off in most deployments.
 - Communication: HTTP/WebSocket on localhost between all components
 
 **Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` / `LLM_SIDECAR_URL` env vars — no code changes needed.
@@ -77,12 +77,15 @@ cp .env.example .env
 # Terminal 1 — Postgres + Go API
 make up
 
-# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS)
+# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS) — required
 make swift-sidecar       # Builds & serves on :8101
 
-# Terminal 3 — Python sidecar (LLM only, optional)
+# Terminal 3 — Python sidecar (LLM only) — OPTIONAL, skip for pure ASR/TTS
+#   See "Optional Components" below. Adds ~4.5 GB RAM.
 make sidecar             # Serves on :8100
 ```
+
+> **Want ITN (spoken→written form conversion, on by default)?** You must build the Rust static lib and rebuild the Swift sidecar **before** `make swift-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default) for the 3-step sequence.
 
 On first boot, an admin user is automatically created with a **random password** and API key printed to the console:
 ```
@@ -104,13 +107,15 @@ cp .env.example .env     # Edit DB credentials, JWT secret
 # Start Swift sidecar (downloads models on first run)
 make swift-sidecar &     # Loads CoreML models, serves on :8101
 
-# Optional: Start Python sidecar for LLM processing
-make setup               # Downloads LLM models
+# OPTIONAL: Python sidecar for LLM transcript processing (skip for pure ASR/TTS)
+make setup               # Downloads LLM models (~5 GB)
 make sidecar &           # Serves on :8100
 
 # Start Go backend
 make run                 # Starts Go backend, runs migrations, seeds admin (:3000)
 ```
+
+> **For ITN (on by default):** Run `make itn-vendor && make itn-build && make swift-build` **before** `make swift-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default).
 
 ### Test It
 
@@ -137,6 +142,89 @@ curl -X POST http://localhost:3000/api/v1/tts \
   -d '{"text": "Hello from GoTranscribeSrv", "voice": "default"}' \
   --output speech.wav
 ```
+
+---
+
+## Optional Components
+
+The core stack — ASR, VAD, diarization, TTS, auth, usage tracking — runs out of the box. Two optional components add capability at the cost of extra build steps and/or memory:
+
+- **ITN** — spoken→written form conversion. *On by default* in `.env`, but requires a one-time Rust build before the Swift sidecar will link it. Skip the build and the sidecar still runs; ITN is just a no-op.
+- **LLM** — transcript post-processing (summarize, action items, Q&A). *Off by default*; opt-in via `ENABLE_LLM=true` + Python sidecar. Adds ~4.5 GB RAM. Most deployments leave this off.
+
+### Inverse Text Normalization (ITN) — *on by default*
+
+The Swift sidecar post-processes ASR output to convert spoken-form into written form:
+
+| Spoken (ASR raw) | Written (ITN output) |
+|---|---|
+| "one two five O" | `1250` |
+| "five dollars and fifty cents" | `$5.50` |
+| "january fifth twenty twenty five" | `January 5, 2025` |
+
+**Enable / disable:**
+- **Globally** in `.env`: `ENABLE_ITN=true` (default) or `ENABLE_ITN=false`
+- **Per request** (overrides global):
+  - REST: `itn=false` form field
+  - WebSocket: `?itn=false` query param
+
+**Build prerequisite — must run *before* `make swift-sidecar`:**
+
+ITN links a Rust static library (`libtext_processing_rs.a`) into the Swift sidecar at compile time. If you skip this and start the sidecar anyway, ITN is a no-op passthrough and ASR will return spoken-form output.
+
+```bash
+# 1. Vendor text-processing-rs (clones from GitHub if not present; no-op if already vendored)
+make itn-vendor
+
+# 2. Build the Rust static lib (requires Rust toolchain — `brew install rust` on Apple Silicon)
+make itn-build
+
+# 3. Rebuild the Swift sidecar to link the static lib
+make swift-build
+
+# 4. (Optional) Verify the ITN tests pass
+make swift-test
+
+# 5. Now start the sidecar with ITN linked
+make swift-sidecar
+```
+
+> **Why this is a separate step:** The Rust toolchain (`cargo`) is a hard build-time dependency for ITN. By making it opt-in, users who only need raw ASR don't need to install Rust. The Makefile targets auto-detect Apple Silicon vs Intel (`RUST_TARGET`) and clone the correct repo (`v0.2.2`).
+
+> **If `make itn-build` fails or you skip it:** The Swift sidecar still builds and runs, but ITN is silently disabled — `ENABLE_ITN=true` becomes a no-op. The sidecar logs a warning at startup.
+
+### LLM Transcript Processing — *opt-in, adds ~4.5 GB RAM*
+
+Powers `POST /api/v1/process` (summarize, action items, translation, Q&A, custom prompts) via Llama 3.1 8B (4-bit) on MLX.
+
+> **Most deployments do not need this.** It exists for transcript post-processing. If your use case is pure ASR/TTS, **leave `ENABLE_LLM=false` and skip the Python sidecar entirely** — that saves ~4.5 GB of unified memory on a 16 GB Mac Mini and avoids the ~5 GB model download.
+
+**To enable:**
+```bash
+# 1. Edit .env:
+ENABLE_LLM=true
+LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+
+# 2. Download the model (~5 GB, one-time):
+make setup
+
+# 3. Start the Python sidecar:
+make sidecar        # Serves on :8100
+
+# 4. Verify the /api/v1/process/tasks endpoint returns the task list
+curl -H "X-API-Key: gtx_live_..." http://localhost:3000/api/v1/process/tasks
+```
+
+**Memory impact:**
+
+| Node RAM | With LLM enabled | Recommended config |
+|---|---|---|
+| 16 GB | Tight (~5 GB free with full stack); OOM risk under load | 16 GB nodes should keep `ENABLE_LLM=false` |
+| 24 GB | Comfortable (~12 GB free) | Default for `ENABLE_LLM=true` |
+| 32 GB+ | Plenty of headroom | Run LLM + ASR + TTS + diarization concurrently |
+
+**Tasks exposed** (see [docs/api.md](docs/api.md#llm-transcript-processing)):
+`summarize` · `action_items` · `translate` · `qa` · `custom`
 
 ---
 
