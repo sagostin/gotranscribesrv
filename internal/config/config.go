@@ -54,6 +54,16 @@ type Config struct {
 	// Metrics
 	MetricsEnabled bool
 	MetricsPath    string
+
+	// Loki (optional Grafana Loki structured-log shipping).
+	// When LokiEnabled is false the LogManager is created with a nil
+	// LokiClient and the consumer goroutine short-circuits, so the
+	// cost is one idle goroutine + a 512-buffered channel.
+	LokiEnabled  bool
+	LokiPushURL  string
+	LokiUsername string
+	LokiPassword string
+	LokiJob      string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -92,6 +102,12 @@ func Load() *Config {
 
 		MetricsEnabled: envOrDefault("METRICS_ENABLED", "true") == "true",
 		MetricsPath:    envOrDefault("METRICS_PATH", "/metrics"),
+
+		LokiEnabled:  envOrDefault("LOKI_ENABLED", "false") == "true",
+		LokiPushURL:  envOrDefault("LOKI_PUSH_URL", "http://loki:3100"),
+		LokiUsername: envOrDefault("LOKI_USERNAME", ""),
+		LokiPassword: envOrDefault("LOKI_PASSWORD", ""),
+		LokiJob:      envOrDefault("LOKI_JOB", "gotranscribesrv"),
 	}
 }
 

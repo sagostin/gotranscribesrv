@@ -10,6 +10,7 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -23,11 +24,12 @@ type DeepgramHandler struct {
 	sidecar    *sidecar.Client
 	db         *gorm.DB
 	defaultITN bool
+	lm         *logging.LogManager
 }
 
 // NewDeepgramHandler creates a new DeepgramHandler.
-func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool) *DeepgramHandler {
-	return &DeepgramHandler{sidecar: sc, db: db, defaultITN: defaultITN}
+func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *DeepgramHandler {
+	return &DeepgramHandler{sidecar: sc, db: db, defaultITN: defaultITN, lm: lm}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -160,6 +162,11 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		slog.Error("failed to connect to sidecar /stream WebSocket", "error", err)
+		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_CONNECT_FAILED", "DeepgramConnectFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/v1/listen",
+			"request_id": requestID,
+			"url":        u.String(),
+		}, err))
 		_ = c.WriteJSON(fiber.Map{"type": "Error", "message": "transcription service unavailable"})
 		return
 	}
@@ -170,6 +177,17 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"interim_results", interimResults)
 	metrics.ActiveWebSocketConnections.WithLabelValues("deepgram").Inc()
 	defer metrics.ActiveWebSocketConnections.WithLabelValues("deepgram").Dec()
+
+	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_STARTED", "DeepgramSessionStarted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":        "/v1/listen",
+		"request_id":      requestID,
+		"interim_results": interimResults,
+		"language":        c.Query("language", "en"),
+		"sample_rate":     c.Query("sample_rate", "16000"),
+		"encoding":        c.Query("encoding", "linear16"),
+		"diarize":         c.Query("diarize", "false") == "true",
+		"itn":             itnEnabled(c, h.defaultITN),
+	}))
 
 	var totalAudioBytes int
 	var firstAudioAt time.Time
@@ -283,6 +301,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 			case "error":
 				slog.Error("[DG] Sidecar error", "message", evt.Message, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ERROR", "DeepgramSessionError", slog.LevelError, map[string]interface{}{
+					"endpoint":   "/v1/listen",
+					"request_id": requestID,
+				}, evt.Message))
 				_ = c.WriteJSON(fiber.Map{"type": "Error", "message": evt.Message})
 				errCh <- nil
 				return
@@ -321,6 +343,33 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
 		"process_ms", processTimeMs)
+
+	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ENDED", "DeepgramSessionEnded", slog.LevelInfo, map[string]interface{}{
+		"endpoint":          "/v1/listen",
+		"request_id":        requestID,
+		"audio_bytes":       totalAudioBytes,
+		"audio_duration_ms": audioDurationMs,
+		"process_ms":        processTimeMs,
+		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
+	}))
+}
+
+// itnEnabled returns whether ITN is on for this WS request, factoring
+// in both the client's ?itn= override and the server-wide default.
+func itnEnabled(c *websocket.Conn, defaultITN bool) bool {
+	if v := c.Query("itn"); v != "" {
+		return v != "false"
+	}
+	return defaultITN
+}
+
+// realtimeFactor returns audio_ms / process_ms (a 1-hour file processed
+// in 60s yields 60x). Returns 0 when either input is zero.
+func realtimeFactor(audioMs, processMs int) float64 {
+	if processMs <= 0 || audioMs <= 0 {
+		return 0
+	}
+	return float64(audioMs) / float64(processMs)
 }
 
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.

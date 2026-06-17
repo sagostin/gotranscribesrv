@@ -3,8 +3,10 @@ package handlers
 import (
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -12,11 +14,12 @@ import (
 type ASRHandler struct {
 	sidecar    *sidecar.Client
 	defaultITN bool
+	lm         *logging.LogManager
 }
 
 // NewASRHandler creates a new ASRHandler.
-func NewASRHandler(sc *sidecar.Client, defaultITN bool) *ASRHandler {
-	return &ASRHandler{sidecar: sc, defaultITN: defaultITN}
+func NewASRHandler(sc *sidecar.Client, defaultITN bool, lm *logging.LogManager) *ASRHandler {
+	return &ASRHandler{sidecar: sc, defaultITN: defaultITN, lm: lm}
 }
 
 // TranscribeFile handles multipart audio file upload for transcription.
@@ -24,6 +27,11 @@ func NewASRHandler(sc *sidecar.Client, defaultITN bool) *ASRHandler {
 func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	file, err := c.FormFile("audio")
 	if err != nil {
+		h.lm.SendLog(h.lm.BuildLog("ASR_MISSING_AUDIO", "ASRMissingAudio", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/asr",
+			"ip":         c.IP(),
+			"user_agent": c.Get("User-Agent"),
+		}))
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "MISSING_AUDIO",
@@ -35,6 +43,12 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 
 	// Check file size (100MB max)
 	if file.Size > 100*1024*1024 {
+		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_TOO_LARGE", "ASRFileTooLarge", slog.LevelWarn, map[string]interface{}{
+			"endpoint":      "/api/v1/asr",
+			"file_size":     file.Size,
+			"filename":      file.Filename,
+			"size_limit_mb": 100,
+		}))
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "FILE_TOO_LARGE",
@@ -47,6 +61,10 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	// Read file
 	f, err := file.Open()
 	if err != nil {
+		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
+			"endpoint": "/api/v1/asr",
+			"filename": file.Filename,
+		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "FILE_READ_ERROR",
@@ -59,6 +77,10 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 
 	audioBytes, err := io.ReadAll(f)
 	if err != nil {
+		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
+			"endpoint": "/api/v1/asr",
+			"filename": file.Filename,
+		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "FILE_READ_ERROR",
@@ -78,6 +100,19 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		itnVal = v != "false"
 	}
 
+	// Emit "received" event up front so the request flow is visible
+	// in Loki even when the sidecar call hangs or times out.
+	h.lm.SendLog(h.lm.BuildLog("ASR_REQUEST_RECEIVED", "ASRRequestReceived", slog.LevelInfo, map[string]interface{}{
+		"endpoint":  "/api/v1/asr",
+		"filename":  file.Filename,
+		"file_size": file.Size,
+		"language":  language,
+		"diarize":   diarize,
+		"itn":       itnVal,
+		"ip":        c.IP(),
+	}))
+
+	start := time.Now()
 	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: file.Filename,
@@ -85,8 +120,15 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		Diarize:  diarize,
 		ITN:      &itnVal,
 	})
+	sidecarMs := int(time.Since(start).Milliseconds())
 	if err != nil {
 		slog.Error("transcription failed", "error", err, "filename", file.Filename)
+		h.lm.SendLog(h.lm.BuildLog("ASR_FAILED", "ASRFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/asr",
+			"filename":   file.Filename,
+			"file_size":  file.Size,
+			"sidecar_ms": sidecarMs,
+		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
@@ -95,6 +137,31 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 			},
 		})
 	}
+
+	// Full transcript + audio meta + sidecar timings ship to Loki.
+	// This is the highest-value event for debugging — you can grep
+	// transcripts in Grafana by content/filename/duration/etc.
+	completedFields := map[string]interface{}{
+		"endpoint":       "/api/v1/asr",
+		"filename":       file.Filename,
+		"file_size":      file.Size,
+		"audio_ms":       int(result.Duration * 1000),
+		"audio_duration": result.Duration,
+		"sidecar_ms":     sidecarMs,
+		"asr_ms":         result.ProcessTimeMs,
+		"model":          result.Model,
+		"language":       language,
+		"diarized":       result.Diarized,
+		"num_speakers":   result.NumSpeakers,
+		"itn_applied":    result.ITNApplied,
+		"word_count":     len(result.Words),
+		"segment_count":  len(result.Segments),
+		"transcript":     result.Text,
+	}
+	if result.NumSpeakers > 0 {
+		completedFields["speakers"] = result.Speakers
+	}
+	h.lm.SendLog(h.lm.BuildLog("ASR_COMPLETED", "ASRCompleted", slog.LevelInfo, completedFields))
 
 	// Store metadata for usage tracking middleware
 	c.Locals("audio_duration_ms", int(result.Duration*1000))

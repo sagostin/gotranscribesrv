@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -19,11 +20,12 @@ import (
 type WhisperHandler struct {
 	sidecar    *sidecar.Client
 	defaultITN bool
+	lm         *logging.LogManager
 }
 
 // NewWhisperHandler creates a new WhisperHandler.
-func NewWhisperHandler(sc *sidecar.Client, defaultITN bool) *WhisperHandler {
-	return &WhisperHandler{sidecar: sc, defaultITN: defaultITN}
+func NewWhisperHandler(sc *sidecar.Client, defaultITN bool, lm *logging.LogManager) *WhisperHandler {
+	return &WhisperHandler{sidecar: sc, defaultITN: defaultITN, lm: lm}
 }
 
 // Transcriptions handles the Whisper-compatible endpoint.
@@ -144,6 +146,20 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"ip", c.IP(),
 	)
 
+	h.lm.SendLog(h.lm.BuildLog("WHISPER_REQUEST_RECEIVED", "WhisperRequestReceived", slog.LevelInfo, map[string]interface{}{
+		"endpoint":        "/v1/audio/transcriptions",
+		"filename":        file.Filename,
+		"file_size":       file.Size,
+		"model":           model,
+		"language":        language,
+		"response_format": responseFormat,
+		"stream":          stream,
+		"diarize":         wantDiarize,
+		"itn":             itnVal,
+		"ip":              c.IP(),
+		"user_agent":      c.Get("User-Agent"),
+	}))
+
 	// ── Send transcription + optional VAD in parallel ────────────────
 	var (
 		result    *sidecar.TranscribeResponse
@@ -182,6 +198,12 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	wg.Wait()
 
 	if asrErr != nil {
+		h.lm.SendLog(h.lm.BuildLog("WHISPER_FAILED", "WhisperFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":  "/v1/audio/transcriptions",
+			"filename":  file.Filename,
+			"file_size": file.Size,
+			"model":     model,
+		}, asrErr))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
@@ -228,6 +250,24 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"speakers", result.NumSpeakers,
 		"asr_ms", result.ProcessTimeMs,
 	)
+
+	h.lm.SendLog(h.lm.BuildLog("WHISPER_COMPLETED", "WhisperCompleted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":        "/v1/audio/transcriptions",
+		"filename":        file.Filename,
+		"file_size":       file.Size,
+		"model":           model,
+		"language":        language,
+		"response_format": responseFormat,
+		"stream":          stream,
+		"audio_ms":        int(result.Duration * 1000),
+		"asr_ms":          result.ProcessTimeMs,
+		"diarized":        result.Diarized,
+		"num_speakers":    result.NumSpeakers,
+		"word_count":      len(result.Words),
+		"segment_count":   len(result.Segments),
+		"itn_applied":     result.ITNApplied,
+		"transcript":      result.Text,
+	}))
 
 	// SSE streaming mode (OpenAI-compatible)
 	if stream {

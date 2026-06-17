@@ -16,6 +16,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/config"
 	"github.com/shaunagostinho/gotranscribesrv/internal/database"
 	"github.com/shaunagostinho/gotranscribesrv/internal/handlers"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
@@ -44,6 +45,18 @@ func main() {
 		"port", cfg.Port,
 		"itn", cfg.EnableITN,
 	)
+
+	// Build the LogManager. When LOKI_ENABLED=false, a nil LokiClient
+	// is passed and the consumer goroutine short-circuits — only the
+	// local slog emit in SendLog runs. CloseLogManager drains the
+	// channel on shutdown regardless.
+	var lokiClient *logging.LokiClient
+	if cfg.LokiEnabled {
+		lokiClient = logging.NewLokiClient(cfg.LokiPushURL, cfg.LokiUsername, cfg.LokiPassword)
+		slog.Info("loki logging enabled", "url", cfg.LokiPushURL, "job", cfg.LokiJob)
+	}
+	logManager := logging.NewLogManager(lokiClient, cfg.LokiEnabled)
+	defer logManager.CloseLogManager()
 
 	// Initialize Prometheus metrics (no-op when METRICS_ENABLED=false)
 	metrics.Init(cfg.MetricsEnabled)
@@ -129,18 +142,18 @@ func main() {
 
 	// Create middleware
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimitFree, cfg.RateLimitPro, cfg.RateLimitEnterprise)
-	usageTracker := middleware.NewUsageTracker(db.DB, 1000)
+	usageTracker := middleware.NewUsageTracker(db.DB, 1000, logManager)
 
 	// Create handlers
 	authHandler := handlers.NewAuthHandler(db.DB, authCfg, cfg.RegistrationEnabled)
-	asrHandler := handlers.NewASRHandler(sc, cfg.EnableITN)
-	whisperHandler := handlers.NewWhisperHandler(sc, cfg.EnableITN)
-	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir)
-	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler)
+	asrHandler := handlers.NewASRHandler(sc, cfg.EnableITN, logManager)
+	whisperHandler := handlers.NewWhisperHandler(sc, cfg.EnableITN, logManager)
+	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir, logManager)
+	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
-	processHandler := handlers.NewProcessHandler(sc)
-	watsonHandler := handlers.NewWatsonHandler(sc, db.DB, cfg.EnableITN)
+	processHandler := handlers.NewProcessHandler(sc, logManager)
+	watsonHandler := handlers.NewWatsonHandler(sc, db.DB, cfg.EnableITN, logManager)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -171,7 +184,7 @@ func main() {
 	// which has an empty prefix and would intercept upgrade requests) ===
 
 	// WebSocket ASR (streaming — native protocol)
-	wsHandler := handlers.NewWSHandler(sc, db.DB, cfg.EnableITN)
+	wsHandler := handlers.NewWSHandler(sc, db.DB, cfg.EnableITN, logManager)
 	app.Use("/ws/asr", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.Info("WebSocket upgrade request", "path", "/ws/asr", "remote", c.IP())
@@ -184,7 +197,7 @@ func main() {
 	app.Get("/ws/asr", wsHandler.Upgrade())
 
 	// Deepgram-compatible streaming
-	dgHandler := handlers.NewDeepgramHandler(sc, db.DB, cfg.EnableITN)
+	dgHandler := handlers.NewDeepgramHandler(sc, db.DB, cfg.EnableITN, logManager)
 	app.Use("/v1/listen", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.Info("Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())

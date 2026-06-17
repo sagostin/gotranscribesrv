@@ -4,6 +4,7 @@ import (
 	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -11,11 +12,12 @@ import (
 // ProcessHandler handles LLM transcript processing routes.
 type ProcessHandler struct {
 	sidecar *sidecar.Client
+	lm      *logging.LogManager
 }
 
 // NewProcessHandler creates a new ProcessHandler.
-func NewProcessHandler(sc *sidecar.Client) *ProcessHandler {
-	return &ProcessHandler{sidecar: sc}
+func NewProcessHandler(sc *sidecar.Client, lm *logging.LogManager) *ProcessHandler {
+	return &ProcessHandler{sidecar: sc, lm: lm}
 }
 
 // Process runs LLM processing on transcript text.
@@ -75,9 +77,23 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 		req.Temperature = 0.3
 	}
 
+	h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_STARTED", "LLMProcessStarted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":     "/api/v1/process",
+		"task":         req.Task,
+		"input_length": len(req.TranscriptText),
+		"max_tokens":   req.MaxTokens,
+		"temperature":  req.Temperature,
+		"language":     req.Language,
+	}))
+
 	result, err := h.sidecar.Process(req)
 	if err != nil {
 		slog.Error("LLM processing failed", "error", err, "task", req.Task)
+		h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_FAILED", "LLMProcessFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":     "/api/v1/process",
+			"task":         req.Task,
+			"input_length": len(req.TranscriptText),
+		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
@@ -89,6 +105,17 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 
 	// Record LLM metrics
 	metrics.RecordLLMUsage(result.Task, result.TokensGenerated, result.ProcessTimeMs)
+
+	h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_COMPLETED", "LLMProcessCompleted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":         "/api/v1/process",
+		"task":             result.Task,
+		"model":            result.Model,
+		"input_length":     len(req.TranscriptText),
+		"output_length":    len(result.Result),
+		"tokens_generated": result.TokensGenerated,
+		"process_time_ms":  result.ProcessTimeMs,
+		"result":           result.Result,
+	}))
 
 	c.Locals("usage_meta", map[string]interface{}{
 		"input_length":     len(req.TranscriptText),
@@ -106,6 +133,9 @@ func (h *ProcessHandler) ListTasks(c *fiber.Ctx) error {
 	tasks, err := h.sidecar.ListTasks()
 	if err != nil {
 		slog.Error("LLM tasks list failed", "error", err)
+		h.lm.SendLog(h.lm.BuildLog("LLM_TASKS_LIST_FAILED", "LLMTasksListFailed", slog.LevelError, map[string]interface{}{
+			"endpoint": "/api/v1/process/tasks",
+		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",

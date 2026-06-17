@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"gorm.io/gorm"
@@ -50,14 +51,16 @@ type UsageTracker struct {
 	db     *gorm.DB
 	logCh  chan models.UsageLog
 	failCh chan models.RequestLog
+	lm     *logging.LogManager
 }
 
 // NewUsageTracker creates a new usage tracking middleware with buffered channels.
-func NewUsageTracker(db *gorm.DB, bufferSize int) *UsageTracker {
+func NewUsageTracker(db *gorm.DB, bufferSize int, lm *logging.LogManager) *UsageTracker {
 	ut := &UsageTracker{
 		db:     db,
 		logCh:  make(chan models.UsageLog, bufferSize),
 		failCh: make(chan models.RequestLog, bufferSize),
+		lm:     lm,
 	}
 	go ut.processLogs()
 	go ut.processFailures()
@@ -125,6 +128,16 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 			} else {
 				slog.Warn("request failed", logArgs...)
 			}
+
+			// Mirror to Loki (non-blocking) with a stable type for
+			// Grafana filtering. Reshape the slog args slice into a
+			// map for the LogManager API.
+			failLevel := slog.LevelWarn
+			if status >= 500 {
+				failLevel = slog.LevelError
+			}
+			failFields := slogArgsToMap(logArgs)
+			ut.lm.SendLog(ut.lm.BuildLog("REQUEST_FAILED", "AggregatedRequestFailed", failLevel, failFields))
 
 			// Rough info to DB (only if user is authenticated)
 			if parseErr == nil {
@@ -276,6 +289,23 @@ func extractErrorCode(body []byte) string {
 		return resp.Error.Code
 	}
 	return ""
+}
+
+// slogArgsToMap converts a slog-style []any key-value list into a
+// map[string]interface{} so it can be passed to logging.LogManager.BuildLog
+// as the fields parameter. Non-string keys are silently dropped (they
+// wouldn't work in slog either). An odd-length slice loses the trailing
+// unpaired value, matching slog's own behavior.
+func slogArgsToMap(args []any) map[string]interface{} {
+	m := make(map[string]interface{}, len(args)/2)
+	for i := 0; i+1 < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok {
+			continue
+		}
+		m[key] = args[i+1]
+	}
+	return m
 }
 
 func classifyEndpoint(c *fiber.Ctx) string {

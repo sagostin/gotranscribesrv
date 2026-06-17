@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -22,15 +23,16 @@ type VoiceHandler struct {
 	db        *gorm.DB
 	sidecar   *sidecar.Client
 	voicesDir string // Base directory for voice embedding files
+	lm        *logging.LogManager
 }
 
 // NewVoiceHandler creates a new VoiceHandler.
-func NewVoiceHandler(db *gorm.DB, sc *sidecar.Client, voicesDir string) *VoiceHandler {
+func NewVoiceHandler(db *gorm.DB, sc *sidecar.Client, voicesDir string, lm *logging.LogManager) *VoiceHandler {
 	// Ensure the voices directory exists
 	if err := os.MkdirAll(voicesDir, 0755); err != nil {
 		slog.Error("failed to create voices directory", "path", voicesDir, "error", err)
 	}
-	return &VoiceHandler{db: db, sidecar: sc, voicesDir: voicesDir}
+	return &VoiceHandler{db: db, sidecar: sc, voicesDir: voicesDir, lm: lm}
 }
 
 // Clone uploads audio and extracts a voice embedding for reuse.
@@ -118,6 +120,13 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		})
 	}
 
+	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_STARTED", "VoiceCloneStarted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":  "/api/v1/voices/clone",
+		"user_id":   userID.String(),
+		"name":      name,
+		"file_size": file.Size,
+	}))
+
 	// Send to sidecar to extract voice embedding
 	cloneStart := time.Now()
 	embedding, audioDurationMs, err := h.sidecar.CloneVoice(audioBytes, file.Filename)
@@ -125,6 +134,13 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	if err != nil {
 		slog.Error("voice cloning failed", "error", err, "user_id", userID)
 		errMsg := err.Error()
+		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_FAILED", "VoiceCloneFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":      "/api/v1/voices/clone",
+			"user_id":       userID.String(),
+			"name":          name,
+			"file_size":     file.Size,
+			"clone_time_ms": int(cloneDuration.Milliseconds()),
+		}, err))
 		// If the sidecar returned a specific error (e.g. audio too long/short),
 		// forward the actual message to the client
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
@@ -195,6 +211,16 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		"voice_id", voiceID, "user_id", userID, "name", name,
 		"embedding_size", len(embedding), "clone_time_ms", cloneDuration.Milliseconds(),
 		"audio_duration_ms", audioDurationMs)
+
+	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_COMPLETED", "VoiceCloneCompleted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":          "/api/v1/voices/clone",
+		"user_id":           userID.String(),
+		"voice_id":          voiceID.String(),
+		"name":              name,
+		"embedding_bytes":   len(embedding),
+		"clone_time_ms":     int(cloneDuration.Milliseconds()),
+		"audio_duration_ms": audioDurationMs,
+	}))
 
 	// Set audio_duration_ms for the usage middleware (actual audio duration)
 	c.Locals("audio_duration_ms", audioDurationMs)

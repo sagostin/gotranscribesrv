@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -25,11 +26,12 @@ type WatsonHandler struct {
 	sidecar    *sidecar.Client
 	db         *gorm.DB
 	defaultITN bool
+	lm         *logging.LogManager
 }
 
 // NewWatsonHandler creates a new WatsonHandler.
-func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool) *WatsonHandler {
-	return &WatsonHandler{sidecar: sc, db: db, defaultITN: defaultITN}
+func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *WatsonHandler {
+	return &WatsonHandler{sidecar: sc, db: db, defaultITN: defaultITN, lm: lm}
 }
 
 // --- Watson Response Types ---
@@ -143,6 +145,19 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		itnVal = v != "false"
 	}
 
+	h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_RECEIVED", "WatsonRecognizeReceived", slog.LevelInfo, map[string]interface{}{
+		"endpoint":        "/v1/recognize",
+		"content_type":    rawContentType,
+		"body_size":       len(audioBytes),
+		"resolved_file":   filename,
+		"timestamps":      timestamps,
+		"speaker_labels":  speakerLabels,
+		"word_confidence": wordConfidence,
+		"language":        c.Query("language", "en"),
+		"itn":             itnVal,
+		"ip":              c.IP(),
+	}))
+
 	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: filename,
@@ -152,12 +167,30 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		slog.Error("Watson transcription failed", "error", err, "content_type", rawContentType)
+		h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_FAILED", "WatsonRecognizeFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":     "/v1/recognize",
+			"content_type": rawContentType,
+			"body_size":    len(audioBytes),
+		}, err))
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error":            "transcription service unavailable",
 			"code":             503,
 			"code_description": "Service Unavailable",
 		})
 	}
+
+	h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_COMPLETED", "WatsonRecognizeCompleted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":      "/v1/recognize",
+		"content_type":  rawContentType,
+		"audio_ms":      int(result.Duration * 1000),
+		"asr_ms":        result.ProcessTimeMs,
+		"word_count":    len(result.Words),
+		"segment_count": len(result.Segments),
+		"diarized":      result.Diarized,
+		"num_speakers":  result.NumSpeakers,
+		"itn_applied":   result.ITNApplied,
+		"transcript":    result.Text,
+	}))
 
 	// Store metadata for usage tracking
 	c.Locals("audio_duration_ms", int(result.Duration*1000))
@@ -225,6 +258,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		slog.Error("[Watson] failed to connect to sidecar /stream WebSocket", "error", err)
+		h.lm.SendLog(h.lm.BuildLog("WATSON_CONNECT_FAILED", "WatsonConnectFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/v1/recognize",
+			"request_id": requestID,
+		}, err))
 		_ = c.WriteJSON(fiber.Map{"error": "transcription service unavailable"})
 		return
 	}
@@ -234,6 +271,15 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 		"interim_results", interimResults, "timestamps", timestamps)
 	metrics.ActiveWebSocketConnections.WithLabelValues("watson").Inc()
 	defer metrics.ActiveWebSocketConnections.WithLabelValues("watson").Dec()
+
+	h.lm.SendLog(h.lm.BuildLog("WATSON_SESSION_STARTED", "WatsonSessionStarted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":        "/v1/recognize",
+		"request_id":      requestID,
+		"interim_results": interimResults,
+		"timestamps":      timestamps,
+		"speaker_labels":  speakerLabels,
+		"word_confidence": wordConfidence,
+	}))
 
 	// Send Watson "listening" state
 	_ = c.WriteJSON(fiber.Map{"state": "listening"})
@@ -305,6 +351,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 			if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
 				slog.Error("[Watson] Failed to forward audio to sidecar", "error", err, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("WATSON_FORWARD_FAILED", "WatsonForwardFailed", slog.LevelError, map[string]interface{}{
+					"endpoint":   "/v1/recognize",
+					"request_id": requestID,
+				}, err))
 				errCh <- err
 				return
 			}
@@ -361,6 +411,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 			case "error":
 				slog.Error("[Watson] Sidecar error", "message", evt.Message, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("WATSON_SIDECAR_ERROR", "WatsonSidecarError", slog.LevelError, map[string]interface{}{
+					"endpoint":   "/v1/recognize",
+					"request_id": requestID,
+				}, evt.Message))
 				_ = c.WriteJSON(fiber.Map{"error": evt.Message})
 				errCh <- nil
 				return
@@ -401,6 +455,16 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	slog.Info("[Watson] Watson-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
 		"process_ms", processTimeMs)
+
+	h.lm.SendLog(h.lm.BuildLog("WATSON_SESSION_ENDED", "WatsonSessionEnded", slog.LevelInfo, map[string]interface{}{
+		"endpoint":          "/v1/recognize",
+		"request_id":        requestID,
+		"audio_bytes":       totalAudioBytes,
+		"audio_duration_ms": audioDurationMs,
+		"process_ms":        processTimeMs,
+		"speaker_labels":    speakerLabels,
+		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
+	}))
 }
 
 // --- Helper Functions ---
