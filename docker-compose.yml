@@ -11,6 +11,17 @@
 #   make sidecar         # Start native Python sidecar (separate terminal)
 # ============================================================
 
+# ── Logging defaults ──────────────────────────────────────
+# Cap per-service logs at 3 × 10 MB (~30 MB max per container)
+# so a runaway logging loop can't fill the host disk. Set
+# LOG_MAX_SIZE / LOG_MAX_FILE in .env to override. See:
+#   https://docs.docker.com/config/containers/logging/json-file/
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
 services:
   # ── PostgreSQL ────────────────────────────────────────────
   db:
@@ -29,6 +40,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    logging: *logging
 
   # ── Go API Server ────────────────────────────────────────
   server:
@@ -71,6 +83,7 @@ services:
       - voicedata:/app/data/voices
     ports:
       - "${PORT:-3000}:3000"
+    logging: *logging
 
 volumes:
   pgdata:
