@@ -57,6 +57,16 @@ services:
       VOICES_DATA_DIR: ${VOICES_DATA_DIR:-/app/data/voices}
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_PATH: ${METRICS_PATH:-/metrics}
+      # Loki logging (optional). Disabled by default — see docs/loki.md.
+      # LOKI_PUSH_URL must be reachable from the server container; for a
+      # Loki stack started by another docker-compose file on the same
+      # network, use the service name (e.g. http://loki:3100).
+      LOKI_ENABLED: ${LOKI_ENABLED:-false}
+      LOKI_PUSH_URL: ${LOKI_PUSH_URL:-http://loki:3100}
+      LOKI_USERNAME: ${LOKI_USERNAME:-}
+      LOKI_PASSWORD: ${LOKI_PASSWORD:-}
+      LOKI_JOB: ${LOKI_JOB:-gotranscribesrv}
+      SERVER_ID: ${SERVER_ID:-}
     volumes:
       - voicedata:/app/data/voices
     ports:
