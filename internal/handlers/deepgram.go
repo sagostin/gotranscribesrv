@@ -104,6 +104,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	c.SetReadLimit(1 * 1024 * 1024)
 
 	requestID := uuid.New().String()
+	c.Locals(middleware.RequestIDLocalKey, requestID)
 	interimResults := c.Query("interim_results", "true") == "true"
 
 	modelMeta := dgModelMeta{
@@ -188,7 +189,6 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"diarize":         c.Query("diarize", "false") == "true",
 		"itn":             itnEnabled(c, h.defaultITN),
 	}))
-
 	var totalAudioBytes int
 	var firstAudioAt time.Time
 	var lastResultAt time.Time

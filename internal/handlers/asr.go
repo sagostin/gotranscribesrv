@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -31,6 +32,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 			"endpoint":   "/api/v1/asr",
 			"ip":         c.IP(),
 			"user_agent": c.Get("User-Agent"),
+			"request_id": middleware.RequestIDFromCtx(c),
 		}))
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -48,6 +50,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 			"file_size":     file.Size,
 			"filename":      file.Filename,
 			"size_limit_mb": 100,
+			"request_id":    middleware.RequestIDFromCtx(c),
 		}))
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -62,8 +65,9 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	f, err := file.Open()
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
-			"endpoint": "/api/v1/asr",
-			"filename": file.Filename,
+			"endpoint":   "/api/v1/asr",
+			"filename":   file.Filename,
+			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -78,8 +82,9 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	audioBytes, err := io.ReadAll(f)
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
-			"endpoint": "/api/v1/asr",
-			"filename": file.Filename,
+			"endpoint":   "/api/v1/asr",
+			"filename":   file.Filename,
+			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -103,13 +108,14 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	// Emit "received" event up front so the request flow is visible
 	// in Loki even when the sidecar call hangs or times out.
 	h.lm.SendLog(h.lm.BuildLog("ASR_REQUEST_RECEIVED", "ASRRequestReceived", slog.LevelInfo, map[string]interface{}{
-		"endpoint":  "/api/v1/asr",
-		"filename":  file.Filename,
-		"file_size": file.Size,
-		"language":  language,
-		"diarize":   diarize,
-		"itn":       itnVal,
-		"ip":        c.IP(),
+		"endpoint":   "/api/v1/asr",
+		"filename":   file.Filename,
+		"file_size":  file.Size,
+		"language":   language,
+		"diarize":    diarize,
+		"itn":        itnVal,
+		"ip":         c.IP(),
+		"request_id": middleware.RequestIDFromCtx(c),
 	}))
 
 	start := time.Now()
@@ -122,12 +128,13 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	})
 	sidecarMs := int(time.Since(start).Milliseconds())
 	if err != nil {
-		slog.Error("transcription failed", "error", err, "filename", file.Filename)
+		slog.ErrorContext(c.UserContext(), "transcription failed", "error", err, "filename", file.Filename)
 		h.lm.SendLog(h.lm.BuildLog("ASR_FAILED", "ASRFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/asr",
 			"filename":   file.Filename,
 			"file_size":  file.Size,
 			"sidecar_ms": sidecarMs,
+			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -157,6 +164,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		"word_count":     len(result.Words),
 		"segment_count":  len(result.Segments),
 		"transcript":     result.Text,
+		"request_id":     middleware.RequestIDFromCtx(c),
 	}
 	if result.NumSpeakers > 0 {
 		completedFields["speakers"] = result.Speakers

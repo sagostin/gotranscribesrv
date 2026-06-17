@@ -114,10 +114,11 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 
 		voiceData, err := h.voiceHandler.LoadVoiceData(voiceUUID, userID)
 		if err != nil {
-			slog.Warn("failed to load stored voice", "voice_id", body.VoiceID, "error", err)
+			slog.WarnContext(c.UserContext(), "failed to load stored voice", "voice_id", body.VoiceID, "error", err)
 			h.lm.SendLog(h.lm.BuildLog("TTS_VOICE_LOAD_FAILED", "TTSVoiceLoadFailed", slog.LevelWarn, map[string]interface{}{
-				"endpoint": "/api/v1/tts",
-				"voice_id": body.VoiceID,
+				"endpoint":   "/api/v1/tts",
+				"voice_id":   body.VoiceID,
+				"request_id": middleware.RequestIDFromCtx(c),
 			}, err))
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 				"error": fiber.Map{
@@ -141,19 +142,21 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 		"speed":       req.Speed,
 		"text_length": len(body.Text),
 		"ip":          c.IP(),
+		"request_id":  middleware.RequestIDFromCtx(c),
 	}))
 
 	synthStart := time.Now()
 	audio, contentType, err := h.sidecar.Synthesize(req)
 	synthDuration := time.Since(synthStart)
 	if err != nil {
-		slog.Error("TTS synthesis failed", "error", err)
+		slog.ErrorContext(c.UserContext(), "TTS synthesis failed", "error", err)
 		h.lm.SendLog(h.lm.BuildLog("TTS_FAILED", "TTSFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/api/v1/tts",
 			"voice":         req.Voice,
 			"voice_id":      body.VoiceID,
 			"text_length":   len(body.Text),
 			"synth_time_ms": int(synthDuration.Milliseconds()),
+			"request_id":    middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -183,6 +186,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 		"output_bytes":       len(audio),
 		"output_duration_ms": outputDurationMs,
 		"synth_time_ms":      int(synthDuration.Milliseconds()),
+		"request_id":         middleware.RequestIDFromCtx(c),
 	}))
 
 	// Set audio_duration_ms for the usage middleware

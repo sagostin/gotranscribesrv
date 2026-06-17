@@ -121,10 +121,11 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	}
 
 	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_STARTED", "VoiceCloneStarted", slog.LevelInfo, map[string]interface{}{
-		"endpoint":  "/api/v1/voices/clone",
-		"user_id":   userID.String(),
-		"name":      name,
-		"file_size": file.Size,
+		"endpoint":   "/api/v1/voices/clone",
+		"user_id":    userID.String(),
+		"name":       name,
+		"file_size":  file.Size,
+		"request_id": middleware.RequestIDFromCtx(c),
 	}))
 
 	// Send to sidecar to extract voice embedding
@@ -140,6 +141,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 			"name":          name,
 			"file_size":     file.Size,
 			"clone_time_ms": int(cloneDuration.Milliseconds()),
+			"request_id":    middleware.RequestIDFromCtx(c),
 		}, err))
 		// If the sidecar returned a specific error (e.g. audio too long/short),
 		// forward the actual message to the client
@@ -197,7 +199,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	if result := h.db.Create(&voice); result.Error != nil {
 		// Clean up the file if DB insert fails
 		_ = os.Remove(absPath)
-		slog.Error("failed to create voice record", "error", result.Error)
+		slog.ErrorContext(c.UserContext(), "failed to create voice record", "error", result.Error)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "DB_ERROR",
@@ -207,7 +209,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		})
 	}
 
-	slog.Info("voice cloned successfully",
+	slog.InfoContext(c.UserContext(), "voice cloned successfully",
 		"voice_id", voiceID, "user_id", userID, "name", name,
 		"embedding_size", len(embedding), "clone_time_ms", cloneDuration.Milliseconds(),
 		"audio_duration_ms", audioDurationMs)
@@ -220,6 +222,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		"embedding_bytes":   len(embedding),
 		"clone_time_ms":     int(cloneDuration.Milliseconds()),
 		"audio_duration_ms": audioDurationMs,
+		"request_id":        middleware.RequestIDFromCtx(c),
 	}))
 
 	// Set audio_duration_ms for the usage middleware (actual audio duration)
@@ -383,7 +386,7 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 		})
 	}
 
-	slog.Info("voice deleted", "voice_id", voiceID, "user_id", userID, "name", voice.Name)
+	slog.InfoContext(c.UserContext(), "voice deleted", "voice_id", voiceID, "user_id", userID, "name", voice.Name)
 
 	return c.JSON(fiber.Map{
 		"message": "Voice deleted",

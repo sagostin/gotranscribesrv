@@ -6,6 +6,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -84,15 +85,17 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 		"max_tokens":   req.MaxTokens,
 		"temperature":  req.Temperature,
 		"language":     req.Language,
+		"request_id":   middleware.RequestIDFromCtx(c),
 	}))
 
 	result, err := h.sidecar.Process(req)
 	if err != nil {
-		slog.Error("LLM processing failed", "error", err, "task", req.Task)
+		slog.ErrorContext(c.UserContext(), "LLM processing failed", "error", err, "task", req.Task)
 		h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_FAILED", "LLMProcessFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":     "/api/v1/process",
 			"task":         req.Task,
 			"input_length": len(req.TranscriptText),
+			"request_id":   middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -115,6 +118,7 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 		"tokens_generated": result.TokensGenerated,
 		"process_time_ms":  result.ProcessTimeMs,
 		"result":           result.Result,
+		"request_id":       middleware.RequestIDFromCtx(c),
 	}))
 
 	c.Locals("usage_meta", map[string]interface{}{
@@ -132,9 +136,10 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 func (h *ProcessHandler) ListTasks(c *fiber.Ctx) error {
 	tasks, err := h.sidecar.ListTasks()
 	if err != nil {
-		slog.Error("LLM tasks list failed", "error", err)
+		slog.ErrorContext(c.UserContext(), "LLM tasks list failed", "error", err)
 		h.lm.SendLog(h.lm.BuildLog("LLM_TASKS_LIST_FAILED", "LLMTasksListFailed", slog.LevelError, map[string]interface{}{
-			"endpoint": "/api/v1/process/tasks",
+			"endpoint":   "/api/v1/process/tasks",
+			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{

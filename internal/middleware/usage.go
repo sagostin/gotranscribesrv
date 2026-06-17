@@ -124,9 +124,9 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 			}
 
 			if status >= 500 {
-				slog.Error("request failed", logArgs...)
+				slog.ErrorContext(c.UserContext(), "request failed", logArgs...)
 			} else {
-				slog.Warn("request failed", logArgs...)
+				slog.WarnContext(c.UserContext(), "request failed", logArgs...)
 			}
 
 			// Mirror to Loki (non-blocking) with a stable type for
@@ -137,6 +137,7 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 				failLevel = slog.LevelError
 			}
 			failFields := slogArgsToMap(logArgs)
+			failFields["request_id"] = RequestIDFromCtx(c)
 			ut.lm.SendLog(ut.lm.BuildLog("REQUEST_FAILED", "AggregatedRequestFailed", failLevel, failFields))
 
 			// Rough info to DB (only if user is authenticated)
@@ -154,7 +155,7 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 				select {
 				case ut.failCh <- reqLog:
 				default:
-					slog.Warn("request log channel full, dropping entry")
+					slog.WarnContext(c.UserContext(), "request log channel full, dropping entry")
 				}
 			}
 
@@ -194,7 +195,7 @@ func (ut *UsageTracker) Middleware() fiber.Handler {
 		select {
 		case ut.logCh <- log:
 		default:
-			slog.Warn("usage log channel full, dropping entry")
+			slog.WarnContext(c.UserContext(), "usage log channel full, dropping entry")
 		}
 
 		return err

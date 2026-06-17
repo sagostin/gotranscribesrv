@@ -37,6 +37,7 @@ type LoggingFormat struct {
 	Message        string                 `json:"message,omitempty"`
 	Type           string                 `json:"type,omitempty"`
 	Level          slog.Level             `json:"level,omitempty"`
+	RequestID      string                 `json:"request_id,omitempty"`
 	AdditionalData map[string]interface{} `json:"additional_data,omitempty"`
 	Timestamp      time.Time              `json:"timestamp,omitempty"`
 }
@@ -73,12 +74,27 @@ func (lm *LogManager) AddTemplate(name, template string) {
 // are passed to fmt.Sprintf. fields is the structured metadata that
 // will land in AdditionalData and become Loki label dimensions
 // (e.g. "endpoint" → label, others → JSON fields).
+//
+// The well-known keys "request_id" and "endpoint" are promoted from
+// the fields map to dedicated slots on LoggingFormat — request_id
+// to the top-level JSON field (and a slog attr in Print), endpoint
+// to a Loki stream label. All other fields stay in AdditionalData.
 func (lm *LogManager) BuildLog(logType string, templateName string, level slog.Level, fields map[string]interface{}, args ...interface{}) *LoggingFormat {
 	message := lm.formatTemplate(templateName, args...)
+
+	var requestID string
+	if fields != nil {
+		if v, ok := fields["request_id"].(string); ok {
+			requestID = v
+			delete(fields, "request_id")
+		}
+	}
+
 	return &LoggingFormat{
 		Message:        message,
 		Type:           strings.ToUpper(logType),
 		Level:          level,
+		RequestID:      requestID,
 		AdditionalData: fields,
 		Timestamp:      time.Now(),
 	}
@@ -162,11 +178,15 @@ func (lm *LogManager) processLogChannel() {
 // by SendLog; callers that want to emit-without-shipping should call
 // it directly.
 func (lf *LoggingFormat) Print() {
-	logEntry := slog.Default().With(
+	attrs := []any{
 		slog.String("type", lf.Type),
 		slog.String("level", lf.Level.String()),
 		slog.String("time", lf.Timestamp.Format(time.RFC3339)),
-	)
+	}
+	if lf.RequestID != "" {
+		attrs = append(attrs, slog.String("request_id", lf.RequestID))
+	}
+	logEntry := slog.Default().With(attrs...)
 	for key, value := range lf.AdditionalData {
 		logEntry = logEntry.With(slog.Any(key, value))
 	}

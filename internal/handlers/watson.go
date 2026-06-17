@@ -127,7 +127,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		}
 	}
 
-	slog.Info("[Watson] POST /v1/recognize",
+	slog.InfoContext(c.UserContext(), "[Watson] POST /v1/recognize",
 		"content_type", rawContentType,
 		"body_size", len(audioBytes),
 		"resolved_filename", filename,
@@ -156,6 +156,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		"language":        c.Query("language", "en"),
 		"itn":             itnVal,
 		"ip":              c.IP(),
+		"request_id":      middleware.RequestIDFromCtx(c),
 	}))
 
 	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
@@ -166,11 +167,12 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		ITN:      &itnVal,
 	})
 	if err != nil {
-		slog.Error("Watson transcription failed", "error", err, "content_type", rawContentType)
+		slog.ErrorContext(c.UserContext(), "Watson transcription failed", "error", err, "content_type", rawContentType)
 		h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_FAILED", "WatsonRecognizeFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":     "/v1/recognize",
 			"content_type": rawContentType,
 			"body_size":    len(audioBytes),
+			"request_id":   middleware.RequestIDFromCtx(c),
 		}, err))
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error":            "transcription service unavailable",
@@ -190,6 +192,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		"num_speakers":  result.NumSpeakers,
 		"itn_applied":   result.ITNApplied,
 		"transcript":    result.Text,
+		"request_id":    middleware.RequestIDFromCtx(c),
 	}))
 
 	// Store metadata for usage tracking
@@ -221,6 +224,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	c.SetReadLimit(1 * 1024 * 1024)
 
 	requestID := uuid.New().String()
+	c.Locals(middleware.RequestIDLocalKey, requestID)
 	timestamps := c.Query("timestamps", "false") == "true"
 	wordConfidence := c.Query("word_confidence", "false") == "true"
 	speakerLabels := c.Query("speaker_labels", "false") == "true"

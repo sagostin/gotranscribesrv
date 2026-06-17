@@ -8,6 +8,7 @@ import (
 	ws "github.com/fasthttp/websocket"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
@@ -39,6 +40,12 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 
 	// Limit incoming message size to 1MB to prevent memory exhaustion
 	c.SetReadLimit(1 * 1024 * 1024)
+
+	// Per-session request id — used as the correlation id for every
+	// log event in this WS session. WS slog calls below pass this
+	// explicitly as the "request_id" attr.
+	requestID := uuid.New().String()
+	c.Locals(middleware.RequestIDLocalKey, requestID)
 
 	// Parse sidecar WebSocket URL
 	sidecarURL := h.sidecar.StreamURL()
@@ -72,7 +79,8 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	if err != nil {
 		slog.Error("failed to connect to sidecar WebSocket", "error", err)
 		h.lm.SendLog(h.lm.BuildLog("WS_ASR_CONNECT_FAILED", "WSASRConnectFailed", slog.LevelError, map[string]interface{}{
-			"endpoint": "/ws/asr",
+			"endpoint":   "/ws/asr",
+			"request_id": requestID,
 		}, err))
 		_ = c.WriteJSON(fiber.Map{"type": "error", "message": "transcription service unavailable"})
 		return
@@ -84,10 +92,11 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	defer metrics.ActiveWebSocketConnections.WithLabelValues("native").Dec()
 
 	h.lm.SendLog(h.lm.BuildLog("WS_ASR_SESSION_STARTED", "WSASRSessionStarted", slog.LevelInfo, map[string]interface{}{
-		"endpoint": "/ws/asr",
-		"language": c.Query("language", "en"),
-		"diarize":  c.Query("diarize", "false") == "true",
-		"itn":      itnEnabled(c, h.defaultITN),
+		"endpoint":   "/ws/asr",
+		"language":   c.Query("language", "en"),
+		"diarize":    c.Query("diarize", "false") == "true",
+		"itn":        itnEnabled(c, h.defaultITN),
+		"request_id": requestID,
 	}))
 
 	var totalAudioBytes int
@@ -152,6 +161,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 		audioDurationMs, processTimeMs, false)
 
 	slog.Info("WebSocket ASR session ended",
+		"request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
 		"process_ms", processTimeMs)
 
@@ -161,5 +171,6 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 		"audio_duration_ms": audioDurationMs,
 		"process_ms":        processTimeMs,
 		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
+		"request_id":        requestID,
 	}))
 }

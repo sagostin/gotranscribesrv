@@ -33,12 +33,17 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	// Setup structured logging
+	// Setup structured logging. The base handler prints to stdout in
+	// text format; the ContextHandler wrapper additionally pulls
+	// request_id off context.Context and attaches it as a slog attr
+	// to every record — so slog.InfoContext(c.UserContext(), ...)
+	// calls in handlers automatically get correlated.
 	logLevel := slog.LevelInfo
 	if cfg.Environment == "development" {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(logging.NewContextHandler(baseHandler)))
 
 	slog.Info("starting GoTranscribeSrv",
 		"environment", cfg.Environment,
@@ -115,6 +120,7 @@ func main() {
 	})
 
 	// Global middleware
+	app.Use(middleware.RequestID())
 	app.Use(recover.New())
 	app.Use(fiberlogger.New(fiberlogger.Config{
 		Format: "${time} | ${status} | ${latency} | ${method} ${path}\n",

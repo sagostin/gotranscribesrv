@@ -115,6 +115,57 @@ func TestLoggingFormatJSON(t *testing.T) {
 	}
 }
 
+// TestBuildLogPromotesRequestID verifies that the "request_id" key
+// in the fields map is hoisted to the top-level RequestID field
+// (and removed from AdditionalData so it doesn't duplicate).
+func TestBuildLogPromotesRequestID(t *testing.T) {
+	lm := NewLogManager(nil, false)
+	defer lm.CloseLogManager()
+
+	log := lm.BuildLog("ASR_COMPLETED", "ASRCompleted", slog.LevelInfo, map[string]interface{}{
+		"transcript": "hi",
+		"request_id": "abc-123",
+	})
+
+	if log.RequestID != "abc-123" {
+		t.Errorf("RequestID not promoted: got %q", log.RequestID)
+	}
+
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(log.String()), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["request_id"] != "abc-123" {
+		t.Errorf("top-level request_id missing in JSON: %v", out)
+	}
+	ad := out["additional_data"].(map[string]interface{})
+	if _, dup := ad["request_id"]; dup {
+		t.Errorf("request_id should not also be in additional_data: %v", ad)
+	}
+	if ad["transcript"] != "hi" {
+		t.Errorf("other fields lost during promotion: %v", ad)
+	}
+}
+
+// TestBuildLogWithoutRequestIDWorks verifies that the promotion
+// doesn't break the common case where request_id is absent.
+func TestBuildLogWithoutRequestIDWorks(t *testing.T) {
+	lm := NewLogManager(nil, false)
+	defer lm.CloseLogManager()
+
+	log := lm.BuildLog("X", "GenericError", slog.LevelInfo, map[string]interface{}{"k": "v"})
+	if log.RequestID != "" {
+		t.Errorf("RequestID should be empty, got %q", log.RequestID)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(log.String()), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := out["request_id"]; present {
+		t.Errorf("request_id should be omitted from JSON when empty: %v", out)
+	}
+}
+
 // TestSendLogNonBlockingWhenDisabled verifies the consumer goroutine
 // does not deadlock and SendLog returns immediately when Loki is off.
 func TestSendLogNonBlockingWhenDisabled(t *testing.T) {

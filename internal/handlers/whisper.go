@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -133,7 +134,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	}
 
 	// ── Verbose request logging ──────────────────────────────────────
-	slog.Info("[whisper] incoming request",
+	slog.InfoContext(c.UserContext(), "[whisper] incoming request",
 		"file", fmt.Sprintf("%s (%d bytes)", file.Filename, file.Size),
 		"model", model,
 		"lang", language,
@@ -158,6 +159,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"itn":             itnVal,
 		"ip":              c.IP(),
 		"user_agent":      c.Get("User-Agent"),
+		"request_id":      middleware.RequestIDFromCtx(c),
 	}))
 
 	// ── Send transcription + optional VAD in parallel ────────────────
@@ -199,10 +201,11 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 
 	if asrErr != nil {
 		h.lm.SendLog(h.lm.BuildLog("WHISPER_FAILED", "WhisperFailed", slog.LevelError, map[string]interface{}{
-			"endpoint":  "/v1/audio/transcriptions",
-			"filename":  file.Filename,
-			"file_size": file.Size,
-			"model":     model,
+			"endpoint":   "/v1/audio/transcriptions",
+			"filename":   file.Filename,
+			"file_size":  file.Size,
+			"model":      model,
+			"request_id": middleware.RequestIDFromCtx(c),
 		}, asrErr))
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -242,7 +245,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	}
 
 	// Concise completion summary
-	slog.Info("[whisper] transcription complete",
+	slog.InfoContext(c.UserContext(), "[whisper] transcription complete",
 		"duration_s", fmt.Sprintf("%.2f", result.Duration),
 		"segments", len(result.Segments),
 		"words", len(result.Words),
@@ -267,6 +270,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"segment_count":   len(result.Segments),
 		"itn_applied":     result.ITNApplied,
 		"transcript":      result.Text,
+		"request_id":      middleware.RequestIDFromCtx(c),
 	}))
 
 	// SSE streaming mode (OpenAI-compatible)
