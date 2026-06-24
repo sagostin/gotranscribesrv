@@ -172,10 +172,11 @@ presidio-up: presidio-pull
 	@echo "  🚀 Starting Presidio analyzer (PII redaction)"
 	@echo "  ℹ  Listening on http://localhost:$(PRESIDIO_PORT) → container :3000"
 	@echo "  ℹ  Set PRESIDIO_ANALYZER_URL=http://localhost:$(PRESIDIO_PORT) in .env"
+	@echo "  ℹ  Host port is bound to 127.0.0.1 only — LAN-reachable via docker-compose service name"
 	@echo ""
 	docker run -d --rm \
 		--name $(PRESIDIO_NAME) \
-		-p $(PRESIDIO_PORT):3000 \
+		-p 127.0.0.1:$(PRESIDIO_PORT):3000 \
 		$(PRESIDIO_IMAGE)
 
 presidio-down:

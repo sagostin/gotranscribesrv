@@ -98,12 +98,22 @@ services:
   # Microsoft's official Presidio analyzer image. Returns entity
   # spans via POST /analyze; we do the <TYPE> replacement in Go.
   # Docs: https://microsoft.github.io/presidio/
+  #
+  # Networking: the Go server in `server` reaches Presidio via the
+  # compose service name `presidio-analyzer:3000` (Docker-internal DNS).
+  # The host-published port `127.0.0.1:5002:3000` is bound to localhost
+  # ONLY — bind on all interfaces (0.0.0.0) would expose the analyzer's
+  # HTTP API on the LAN, which we don't want. For ad-hoc debugging:
+  #   curl http://localhost:5002/health
+  #   docker logs -f gotranscribesrv-presidio
   presidio-analyzer:
     image: mcr.microsoft.com/presidio-analyzer:latest
     container_name: gotranscribesrv-presidio
     restart: unless-stopped
     ports:
-      - "5002:3000"
+      # localhost-only — see comment above. The Go server does NOT use
+      # this port; it talks to the analyzer via the service name.
+      - "127.0.0.1:5002:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s

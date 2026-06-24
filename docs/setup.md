@@ -104,7 +104,11 @@ LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 # Requires the presidio-analyzer container (started automatically by `make up`).
 # Adds ~700 MB RAM for spaCy en_core_web_lg. Disable with ENABLE_PII=false.
 ENABLE_PII=true
-PRESIDIO_ANALYZER_URL=http://localhost:5002    # If using docker-compose; see below for native setup
+# Default targets the docker-compose service name. For native / non-compose
+# setups (running the Go server directly via `go run`), start Presidio with
+# `make presidio-up` and change this to:
+#   PRESIDIO_ANALYZER_URL=http://localhost:5002
+PRESIDIO_ANALYZER_URL=http://presidio-analyzer:3000
 PRESIDIO_TIMEOUT_MS=3000
 PII_ENTITIES=                                  # empty = use built-in default set
 PII_SCORE_THRESHOLD=0.6
@@ -121,7 +125,7 @@ LOG_LEVEL=info
 ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 ```
 
-> **Note on `PRESIDIO_ANALYZER_URL`:** When using `make up` (Docker Compose for Postgres + Go), the URL is `http://presidio-analyzer:3000` (the docker-compose service name). For manual / native setups, point to wherever you've started the Presidio container — typically `http://localhost:5002` (port mapping in our compose file).
+> **Note on `PRESIDIO_ANALYZER_URL`:** When using `make up` (Docker Compose for Postgres + Go), the default `http://presidio-analyzer:3000` works as-is — that's the Docker-internal DNS name for the `presidio-analyzer` service. For manual / native setups, run `make presidio-up` to start the container standalone and override to `http://localhost:5002` (the host-side port mapped to the container's `:3000`).
 
 ---
 
@@ -245,6 +249,79 @@ curl http://localhost:3000/health
 
 ---
 
+### 5b. Presidio (PII Redaction) {#presidio-setup}
+
+The PII redactor runs as a separate container. There are two setup paths; pick the one that matches how you're running the Go backend.
+
+#### Path A — Docker Compose (`make up`) — recommended
+
+`docker-compose.yml` already declares the `presidio-analyzer` service. No extra steps:
+
+```bash
+docker compose up -d --build
+docker compose ps                # Both 'server' and 'presidio-analyzer' should be running
+docker compose logs -f presidio-analyzer
+# ...wait for "Application startup complete."
+```
+
+Confirm the analyzer is healthy:
+
+```bash
+curl http://localhost:5002/health
+# {"status":"ok"}
+
+# Smoke-test the /analyze endpoint with a PII-bearing string:
+curl -X POST http://localhost:5002/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Call John Smith at 212-555-1234 or email john@example.com", "language": "en"}'
+# Should return a JSON array with PERSON, PHONE_NUMBER, EMAIL_ADDRESS spans.
+```
+
+> **Why `localhost:5002` works:** The host port is bound to `127.0.0.1` only in `docker-compose.yml` — see the comment there. The Go server in `server` reaches the analyzer via the Docker-internal DNS name `http://presidio-analyzer:3000` (NOT the host port). The host-published port exists only for ad-hoc debugging from the host.
+
+#### Path B — Native (Go server running directly, not in compose)
+
+Run Presidio as a standalone container, then point the Go server at it:
+
+```bash
+make presidio-up       # Pulls and starts the container on 127.0.0.1:5002
+docker ps --filter name=gotranscribesrv-presidio
+curl http://localhost:5002/health
+```
+
+Override the URL in `.env`:
+
+```bash
+PRESIDIO_ANALYZER_URL=http://localhost:5002
+```
+
+Then start (or restart) the Go server as in section 5.
+
+#### Disabling PII redaction
+
+Set `ENABLE_PII=false` in `.env` and restart the server. Useful for local debugging when you want to see raw transcript text in the logs. Response bodies are unchanged either way.
+
+#### Disabling PII redaction when Presidio is unreachable (fail-closed behavior)
+
+The redactor is **fail-closed by design**: if Presidio is unreachable, returns an error, or times out (default 3s), the affected log field is replaced with the literal string `<REDACTED-ERROR>` and a separate `PII_REDACTOR_ERROR` warning event is emitted. The HTTP response body is **never** affected — clients always get the raw transcript. You'll see this reflected in Prometheus as `gotranscribesrv_pii_errors_total{reason="analyzer_error"}` incrementing.
+
+**Practical implications:**
+- A down Presidio adds ~3s of latency per ASR request (the timeout). Consider raising `PRESIDIO_TIMEOUT_MS` only if your deployment tolerates this.
+- No request is rejected — the only externally visible effect is slower responses and a sentinel in the log.
+- Search Loki for `transcript="<REDACTED-ERROR>"` to find requests whose logs were affected.
+
+#### Multi-node / centralized Presidio
+
+For HA or to share one Presidio across multiple Go servers, override `PRESIDIO_ANALYZER_URL` to point at an external endpoint:
+
+```bash
+PRESIDIO_ANALYZER_URL=https://presidio.internal.company.com
+```
+
+Then remove the local `presidio-analyzer` service from your compose file (or simply don't `make presidio-up` on the nodes). See [docs/api.md → PII Redaction](api.md#pii-redaction) for the privacy tradeoff of centralization.
+
+---
+
 ### 6. Quick Test
 
 ```bash
@@ -252,6 +329,10 @@ curl http://localhost:3000/health
 curl -X POST http://localhost:3000/api/v1/asr \
   -H "X-API-Key: gtx_live_..." \
   -F "audio=@test.wav" | jq
+
+# Confirm the log field was PII-redacted (transcript contains <PERSON>, <PHONE_NUMBER>, etc.)
+#   tail /var/log/gotranscribesrv/server.log | grep ASR_COMPLETED | jq '.additional_data.transcript'
+# Should NOT contain raw names, phone numbers, emails, etc.
 
 # Create a customer (admin only)
 curl -X POST http://localhost:3000/api/v1/admin/users \
