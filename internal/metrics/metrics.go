@@ -93,6 +93,16 @@ var (
 	buildInfo        *prometheus.GaugeVec
 )
 
+// ──────────────────────────────────────────────────────────────
+// PII redaction metrics
+// ──────────────────────────────────────────────────────────────
+
+var (
+	piiRedactionsTotal *prometheus.CounterVec
+	piiDuration        *prometheus.HistogramVec
+	piiErrorsTotal     *prometheus.CounterVec
+)
+
 // per-minute ticker state — uses atomic counter so the ticker goroutine
 // can compute request-per-minute deltas without reading Prometheus internals.
 var (
@@ -227,6 +237,23 @@ func Init(metricsEnabled bool) {
 		Help: "Static build metadata.",
 	}, []string{"version", "go_version"})
 
+	// ── PII redaction ────────────────────────────────────
+	piiRedactionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gotranscribesrv_pii_redactions_total",
+		Help: "Total PII entities replaced in log fields by entity type.",
+	}, []string{"entity_type"})
+
+	piiDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gotranscribesrv_pii_duration_seconds",
+		Help:    "Wall-clock latency of Presidio /analyze calls (Go-side replace excluded).",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+	}, []string{"result"})
+
+	piiErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gotranscribesrv_pii_errors_total",
+		Help: "PII redactor errors by reason (analyzer_error, timeout, etc).",
+	}, []string{"reason"})
+
 	// ── Register all ──────────────────────────────────────
 	prometheus.MustRegister(
 		httpRequestsTotal,
@@ -249,6 +276,9 @@ func Init(metricsEnabled bool) {
 		rateLimitRejectionsTotal,
 		activeUsersGauge,
 		buildInfo,
+		piiRedactionsTotal,
+		piiDuration,
+		piiErrorsTotal,
 	)
 
 	// Set build info (constant gauge = 1)
@@ -378,6 +408,38 @@ func RecordSidecarLatency(sidecar, operation string, durationMs int, err error) 
 	if err != nil {
 		sidecarErrorsTotal.WithLabelValues(sidecar, operation).Inc()
 	}
+}
+
+// RecordPIIRedaction increments the per-entity-type redaction counter.
+// Called once per entity replaced in a log field.
+func RecordPIIRedaction(entityType string) {
+	if !enabled {
+		return
+	}
+	piiRedactionsTotal.WithLabelValues(entityType).Inc()
+}
+
+// RecordPIILatency observes the wall-clock time of a Presidio /analyze call.
+// success=false labels the observation with result="error" so operators can
+// distinguish the latency distribution of healthy calls from errored ones.
+func RecordPIILatency(d time.Duration, success bool) {
+	if !enabled {
+		return
+	}
+	result := "success"
+	if !success {
+		result = "error"
+	}
+	piiDuration.WithLabelValues(result).Observe(d.Seconds())
+}
+
+// RecordPIIError increments the PII error counter for the given reason
+// (e.g. "analyzer_error", "timeout").
+func RecordPIIError(reason string) {
+	if !enabled {
+		return
+	}
+	piiErrorsTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordAuthAttempt records an authentication attempt.

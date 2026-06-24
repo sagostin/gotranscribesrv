@@ -33,7 +33,8 @@ This keeps each component in the language where it's strongest: Go for API infra
 │  │  • Deepgram-compat API   │  │  • WS   /stream                │ │
 │  │  • Watson-compat API     │  │  • POST /synthesize             │ │
 │  │  • WebSocket ASR Proxy   │  │  • POST /diarize                │ │
-│  │  • Sidecar HTTP Client   │──│  • POST /vad                     │ │
+│  │  • PII Redactor (Presidio)│ │  • POST /vad                     │ │
+│  │  • Sidecar HTTP Client   │──│                                  │ │
 │  └──────────┬───────────────┘  └──────────────────────────────────┘ │
 │             │                                                       │
 │             │                  ┌──────────────────────────────────┐ │
@@ -44,6 +45,14 @@ This keeps each component in the language where it's strongest: Go for API infra
 │             └─────────────────→│  • POST /process                │ │
 │                                │  • GET  /process/tasks          │ │
 │                                └──────────────────────────────────┘ │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Presidio Analyzer (:3000 internal / :5002 host)               │ │
+│  │  • spaCy en_core_web_lg + Presidio analyzers                   │ │
+│  │  • POST /analyze → entity spans; replacement is done in Go    │ │
+│  │  • Replaces PII in log fields only; never touches responses    │ │
+│  │  • Fail-closed: on error, log field becomes <REDACTED-ERROR>  │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
 │                                                                     │
 └─────────────┬───────────────────────────────────────────────────────┘
               ▼
@@ -86,19 +95,26 @@ This keeps each component in the language where it's strongest: Go for API infra
 The Go API gateway and the inference sidecars don't need to run on the same machine. Since the sidecars are accessed via environment variables (`SWIFT_SIDECAR_URL`, `SWIFT_SIDECAR_WS_URL`, `LLM_SIDECAR_URL`), you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
 
 ```
-                    ┌──────────────────────────────┐
-                    │  Standard Server / VPS / K8s  │
-                    │                               │
-                    │  Go API (:3000)               │
-                    │  Auth, Usage, Rate Limiting   │
-                    │  PostgreSQL (or external)     │
-                    └──────────┬────────────────────┘
+                    ┌──────────────────────────────────────┐
+                    │  Standard Server / VPS / K8s          │
+                    │                                       │
+                    │  Go API (:3000)                       │
+                    │  Auth, Usage, Rate Limiting           │
+                    │  PII Redactor (calls Presidio)        │
+                    │  PostgreSQL (or external)             │
+                    │                                       │
+                    │  ┌─────────────────────────────────┐  │
+                    │  │ Presidio Analyzer (:3000)       │  │
+                    │  │ spaCy en_core_web_lg            │  │
+                    │  │ POST /analyze (log redaction)   │  │
+                    │  └─────────────────────────────────┘  │
+                    └──────────┬────────────────────────────┘
                                │
-                    ┌──────────▼────────────────────┐
-                    │  Caddy Reverse Proxy           │
-                    │  Load-balance + health check   │
-                    │  across Mac Mini sidecar pool  │
-                    └──────────┬────────────────────┘
+                    ┌──────────▼────────────────────────────┐
+                    │  Caddy Reverse Proxy                   │
+                    │  Load-balance + health check           │
+                    │  across Mac Mini sidecar pool          │
+                    └──────────┬────────────────────────────┘
                  ┌─────────────┼─────────────┐
                  ▼             ▼             ▼
            ┌──────────┐ ┌──────────┐ ┌──────────┐
@@ -108,6 +124,8 @@ The Go API gateway and the inference sidecars don't need to run on the same mach
            │(+Py 8100)│ │(+Py 8100)│ │(+Py 8100)│
            └──────────┘ └──────────┘ └──────────┘
 ```
+
+> **Where does Presidio live?** By default it runs on the API server (in `docker-compose.yml` next to the Go server). PII-bearing transcript text never leaves the API server. For multi-node deployments that want to share one Presidio, see [Centralized Presidio in docs/api.md](api.md#pii-redaction).
 
 **Why split?**
 - Macs become pure inference appliances — only run `make swift-sidecar` (and optionally `make sidecar`), no Go, no Postgres

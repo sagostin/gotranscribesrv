@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
@@ -20,6 +22,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
@@ -99,6 +102,24 @@ func main() {
 		cfg.LLMSidecarURL,
 	)
 
+	// PII redactor — wraps the Presidio analyzer service and applies
+	// <TYPE> placeholders to log fields. Always constructed (even when
+	// disabled) so handlers can call RedactText unconditionally.
+	var entities []string
+	if cfg.PIIEntities != "" {
+		entities = strings.Split(cfg.PIIEntities, ",")
+		for i := range entities {
+			entities[i] = strings.TrimSpace(entities[i])
+		}
+	}
+	presidio := sidecar.NewPresidioClient(cfg.PresidioURL, time.Duration(cfg.PresidioTimeoutMs)*time.Millisecond)
+	redactor := pii.NewRedactor(presidio, cfg.EnablePII, entities, cfg.PIIScoreThreshold)
+	if cfg.EnablePII {
+		slog.Info("PII redaction enabled", "presidio_url", cfg.PresidioURL, "entities", redactor.Entities())
+	} else {
+		slog.Info("PII redaction DISABLED — logs will contain raw transcript text")
+	}
+
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
 		AppName:     "GoTranscribeSrv",
@@ -144,6 +165,7 @@ func main() {
 		AccessTTL:  cfg.JWTAccessTTL,
 		RefreshTTL: cfg.JWTRefreshTTL,
 		DB:         db.DB,
+		LogManager: logManager,
 	}
 
 	// Create middleware
@@ -152,14 +174,14 @@ func main() {
 
 	// Create handlers
 	authHandler := handlers.NewAuthHandler(db.DB, authCfg, cfg.RegistrationEnabled)
-	asrHandler := handlers.NewASRHandler(sc, cfg.EnableITN, logManager)
-	whisperHandler := handlers.NewWhisperHandler(sc, cfg.EnableITN, logManager)
+	asrHandler := handlers.NewASRHandler(sc, redactor, cfg.EnableITN, logManager)
+	whisperHandler := handlers.NewWhisperHandler(sc, redactor, cfg.EnableITN, logManager)
 	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir, logManager)
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
-	processHandler := handlers.NewProcessHandler(sc, logManager)
-	watsonHandler := handlers.NewWatsonHandler(sc, db.DB, cfg.EnableITN, logManager)
+	processHandler := handlers.NewProcessHandler(sc, redactor, logManager)
+	watsonHandler := handlers.NewWatsonHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -203,7 +225,7 @@ func main() {
 	app.Get("/ws/asr", wsHandler.Upgrade())
 
 	// Deepgram-compatible streaming
-	dgHandler := handlers.NewDeepgramHandler(sc, db.DB, cfg.EnableITN, logManager)
+	dgHandler := handlers.NewDeepgramHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
 	app.Use("/v1/listen", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.Info("Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())

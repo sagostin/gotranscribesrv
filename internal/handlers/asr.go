@@ -8,19 +8,21 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
 // ASRHandler handles speech-to-text routes.
 type ASRHandler struct {
 	sidecar    *sidecar.Client
+	redactor   *pii.Redactor
 	defaultITN bool
 	lm         *logging.LogManager
 }
 
 // NewASRHandler creates a new ASRHandler.
-func NewASRHandler(sc *sidecar.Client, defaultITN bool, lm *logging.LogManager) *ASRHandler {
-	return &ASRHandler{sidecar: sc, defaultITN: defaultITN, lm: lm}
+func NewASRHandler(sc *sidecar.Client, redactor *pii.Redactor, defaultITN bool, lm *logging.LogManager) *ASRHandler {
+	return &ASRHandler{sidecar: sc, redactor: redactor, defaultITN: defaultITN, lm: lm}
 }
 
 // TranscribeFile handles multipart audio file upload for transcription.
@@ -148,6 +150,18 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	// Full transcript + audio meta + sidecar timings ship to Loki.
 	// This is the highest-value event for debugging — you can grep
 	// transcripts in Grafana by content/filename/duration/etc.
+	//
+	// The transcript text is run through the PII redactor before
+	// being placed into AdditionalData. The redactor is fail-closed:
+	// on analyzer error the field becomes "<REDACTED-ERROR>".
+	redactedText, piiItems, piiErr := h.redactor.RedactText(c.UserContext(), result.Text)
+	if piiErr != nil {
+		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/asr",
+			"text_len":   len(result.Text),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, piiErr))
+	}
 	completedFields := map[string]interface{}{
 		"endpoint":       "/api/v1/asr",
 		"filename":       file.Filename,
@@ -163,8 +177,12 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		"itn_applied":    result.ITNApplied,
 		"word_count":     len(result.Words),
 		"segment_count":  len(result.Segments),
-		"transcript":     result.Text,
+		"transcript":     redactedText,
+		"pii_redacted":   len(piiItems),
 		"request_id":     middleware.RequestIDFromCtx(c),
+	}
+	if len(piiItems) > 0 {
+		completedFields["pii_entity_types"] = piiEntityTypes(piiItems)
 	}
 	if result.NumSpeakers > 0 {
 		completedFields["speakers"] = result.Speakers

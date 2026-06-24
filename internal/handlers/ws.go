@@ -17,6 +17,12 @@ import (
 )
 
 // WSHandler handles WebSocket ASR streaming by proxying to the Python sidecar.
+//
+// NOTE: Session-end logs currently do NOT include transcript text
+// (only audio bytes / duration / process time). If transcript text is
+// added to SESSION_ENDED in the future, it MUST be run through the
+// PII redactor before being added to BuildLog's AdditionalData — see
+// internal/handlers/{asr,whisper,watson}.go for the pattern.
 type WSHandler struct {
 	sidecar    *sidecar.Client
 	db         *gorm.DB

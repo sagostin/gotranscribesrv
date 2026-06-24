@@ -7,18 +7,20 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
 // ProcessHandler handles LLM transcript processing routes.
 type ProcessHandler struct {
-	sidecar *sidecar.Client
-	lm      *logging.LogManager
+	sidecar  *sidecar.Client
+	redactor *pii.Redactor
+	lm       *logging.LogManager
 }
 
 // NewProcessHandler creates a new ProcessHandler.
-func NewProcessHandler(sc *sidecar.Client, lm *logging.LogManager) *ProcessHandler {
-	return &ProcessHandler{sidecar: sc, lm: lm}
+func NewProcessHandler(sc *sidecar.Client, redactor *pii.Redactor, lm *logging.LogManager) *ProcessHandler {
+	return &ProcessHandler{sidecar: sc, redactor: redactor, lm: lm}
 }
 
 // Process runs LLM processing on transcript text.
@@ -109,7 +111,17 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 	// Record LLM metrics
 	metrics.RecordLLMUsage(result.Task, result.TokensGenerated, result.ProcessTimeMs)
 
-	h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_COMPLETED", "LLMProcessCompleted", slog.LevelInfo, map[string]interface{}{
+	// Redact LLM output for log emission. The response body and the LLM
+	// call input/output are untouched — only the log field is scrubbed.
+	redactedResult, piiItems, piiErr := h.redactor.RedactText(c.UserContext(), result.Result)
+	if piiErr != nil {
+		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/process",
+			"text_len":   len(result.Result),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, piiErr))
+	}
+	completedFields := map[string]interface{}{
 		"endpoint":         "/api/v1/process",
 		"task":             result.Task,
 		"model":            result.Model,
@@ -117,9 +129,14 @@ func (h *ProcessHandler) Process(c *fiber.Ctx) error {
 		"output_length":    len(result.Result),
 		"tokens_generated": result.TokensGenerated,
 		"process_time_ms":  result.ProcessTimeMs,
-		"result":           result.Result,
+		"result":           redactedResult,
+		"pii_redacted":     len(piiItems),
 		"request_id":       middleware.RequestIDFromCtx(c),
-	}))
+	}
+	if len(piiItems) > 0 {
+		completedFields["pii_entity_types"] = piiEntityTypes(piiItems)
+	}
+	h.lm.SendLog(h.lm.BuildLog("LLM_PROCESS_COMPLETED", "LLMProcessCompleted", slog.LevelInfo, completedFields))
 
 	c.Locals("usage_meta", map[string]interface{}{
 		"input_length":     len(req.TranscriptText),

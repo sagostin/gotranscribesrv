@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
 )
@@ -20,16 +22,23 @@ import (
 // DeepgramHandler handles the Deepgram-compatible streaming endpoint.
 // WS /v1/listen — proxies to the Swift sidecar's /stream WebSocket,
 // translating between Deepgram's protocol and the internal protocol.
+//
+// NOTE: Session-end logs currently do NOT include transcript text
+// (only audio bytes / duration / process time). If transcript text is
+// added to SESSION_ENDED in the future, it MUST be run through the
+// PII redactor before being added to BuildLog's AdditionalData — see
+// internal/handlers/{asr,whisper,watson}.go for the pattern.
 type DeepgramHandler struct {
 	sidecar    *sidecar.Client
+	redactor   *pii.Redactor
 	db         *gorm.DB
 	defaultITN bool
 	lm         *logging.LogManager
 }
 
 // NewDeepgramHandler creates a new DeepgramHandler.
-func NewDeepgramHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *DeepgramHandler {
-	return &DeepgramHandler{sidecar: sc, db: db, defaultITN: defaultITN, lm: lm}
+func NewDeepgramHandler(sc *sidecar.Client, redactor *pii.Redactor, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *DeepgramHandler {
+	return &DeepgramHandler{sidecar: sc, redactor: redactor, db: db, defaultITN: defaultITN, lm: lm}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -259,7 +268,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				return
 			}
 
-			slog.Info("[DG] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]), "request_id", requestID)
+			// Debug-level only — the raw message body contains
+			// transcript text (PII). At info level we surface only
+			// the parsed event type, not the raw JSON.
+			slog.Debug("[DG] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]), "request_id", requestID)
 
 			var evt sidecarStreamEvent
 			if json.Unmarshal(msg, &evt) != nil {
@@ -273,7 +285,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 			switch evt.Type {
 			case "partial":
-				slog.Info("[DG] Sidecar partial result", "text", evt.Text[:min(len(evt.Text), 200)], "request_id", requestID)
+				// Redact transcript text before logging — partials
+				// fire on every interim result, so this matters.
+				redactedPartial, _, _ := h.redactor.RedactText(context.Background(), evt.Text)
+				slog.Info("[DG] Sidecar partial result", "text", redactedPartial, "request_id", requestID)
 				if !interimResults {
 					slog.Info("[DG] Skipping partial (interim_results=false)", "request_id", requestID)
 					continue
@@ -286,7 +301,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Info("[DG] Sent Deepgram partial Results to client", "request_id", requestID)
 
 			case "final":
-				slog.Info("[DG] Sidecar final result", "text", evt.Text[:min(len(evt.Text), 200)], "request_id", requestID)
+				redactedFinal, _, _ := h.redactor.RedactText(context.Background(), evt.Text)
+				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID)
 				dgEvt := buildDGResults(evt, true, true, modelMeta)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					errCh <- err

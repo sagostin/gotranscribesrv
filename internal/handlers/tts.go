@@ -114,7 +114,6 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 
 		voiceData, err := h.voiceHandler.LoadVoiceData(voiceUUID, userID)
 		if err != nil {
-			slog.WarnContext(c.UserContext(), "failed to load stored voice", "voice_id", body.VoiceID, "error", err)
 			h.lm.SendLog(h.lm.BuildLog("TTS_VOICE_LOAD_FAILED", "TTSVoiceLoadFailed", slog.LevelWarn, map[string]interface{}{
 				"endpoint":   "/api/v1/tts",
 				"voice_id":   body.VoiceID,
@@ -149,7 +148,6 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	audio, contentType, err := h.sidecar.Synthesize(req)
 	synthDuration := time.Since(synthStart)
 	if err != nil {
-		slog.ErrorContext(c.UserContext(), "TTS synthesis failed", "error", err)
 		h.lm.SendLog(h.lm.BuildLog("TTS_FAILED", "TTSFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/api/v1/tts",
 			"voice":         req.Voice,

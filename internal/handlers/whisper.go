@@ -14,19 +14,21 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
 // WhisperHandler handles the OpenAI Whisper-compatible endpoint.
 type WhisperHandler struct {
 	sidecar    *sidecar.Client
+	redactor   *pii.Redactor
 	defaultITN bool
 	lm         *logging.LogManager
 }
 
 // NewWhisperHandler creates a new WhisperHandler.
-func NewWhisperHandler(sc *sidecar.Client, defaultITN bool, lm *logging.LogManager) *WhisperHandler {
-	return &WhisperHandler{sidecar: sc, defaultITN: defaultITN, lm: lm}
+func NewWhisperHandler(sc *sidecar.Client, redactor *pii.Redactor, defaultITN bool, lm *logging.LogManager) *WhisperHandler {
+	return &WhisperHandler{sidecar: sc, redactor: redactor, defaultITN: defaultITN, lm: lm}
 }
 
 // Transcriptions handles the Whisper-compatible endpoint.
@@ -134,6 +136,16 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	}
 
 	// ── Verbose request logging ──────────────────────────────────────
+	// The `prompt` field can contain user-supplied context (style hint,
+	// glossary). It is run through the PII redactor before being passed
+	// to slog so engineers searching stdout don't see arbitrary user
+	// content verbatim. The redactor is fail-closed.
+	redactedPrompt := prompt
+	if prompt != "" {
+		if rp, _, perr := h.redactor.RedactText(c.UserContext(), prompt); perr == nil {
+			redactedPrompt = rp
+		}
+	}
 	slog.InfoContext(c.UserContext(), "[whisper] incoming request",
 		"file", fmt.Sprintf("%s (%d bytes)", file.Filename, file.Size),
 		"model", model,
@@ -142,7 +154,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"stream", stream,
 		"granularities", strings.Join(timestampGranularities, ","),
 		"diarize", wantDiarize,
-		"prompt", prompt,
+		"prompt", redactedPrompt,
 		"temperature", temperature,
 		"ip", c.IP(),
 	)
@@ -254,7 +266,16 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"asr_ms", result.ProcessTimeMs,
 	)
 
-	h.lm.SendLog(h.lm.BuildLog("WHISPER_COMPLETED", "WhisperCompleted", slog.LevelInfo, map[string]interface{}{
+	// Redact transcript text for log emission. Response body is left untouched.
+	redactedText, piiItems, piiErr := h.redactor.RedactText(c.UserContext(), result.Text)
+	if piiErr != nil {
+		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/v1/audio/transcriptions",
+			"text_len":   len(result.Text),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, piiErr))
+	}
+	completedFields := map[string]interface{}{
 		"endpoint":        "/v1/audio/transcriptions",
 		"filename":        file.Filename,
 		"file_size":       file.Size,
@@ -269,9 +290,14 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"word_count":      len(result.Words),
 		"segment_count":   len(result.Segments),
 		"itn_applied":     result.ITNApplied,
-		"transcript":      result.Text,
+		"transcript":      redactedText,
+		"pii_redacted":    len(piiItems),
 		"request_id":      middleware.RequestIDFromCtx(c),
-	}))
+	}
+	if len(piiItems) > 0 {
+		completedFields["pii_entity_types"] = piiEntityTypes(piiItems)
+	}
+	h.lm.SendLog(h.lm.BuildLog("WHISPER_COMPLETED", "WhisperCompleted", slog.LevelInfo, completedFields))
 
 	// SSE streaming mode (OpenAI-compatible)
 	if stream {

@@ -133,7 +133,6 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	embedding, audioDurationMs, err := h.sidecar.CloneVoice(audioBytes, file.Filename)
 	cloneDuration := time.Since(cloneStart)
 	if err != nil {
-		slog.Error("voice cloning failed", "error", err, "user_id", userID)
 		errMsg := err.Error()
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_FAILED", "VoiceCloneFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/api/v1/voices/clone",
@@ -162,7 +161,13 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	// Ensure user directory exists
 	userDir := filepath.Join(h.voicesDir, userID.String())
 	if err := os.MkdirAll(userDir, 0755); err != nil {
-		slog.Error("failed to create user voice directory", "path", userDir, "error", err)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DIR_ERROR", "VoiceCloneDirError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/voices/clone",
+			"user_id":    userID.String(),
+			"name":       name,
+			"path":       userDir,
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "STORAGE_ERROR",
@@ -174,7 +179,13 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	// Write embedding to disk
 	if err := os.WriteFile(absPath, embedding, 0644); err != nil {
-		slog.Error("failed to write voice embedding", "path", absPath, "error", err)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_WRITE_ERROR", "VoiceCloneWriteError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/voices/clone",
+			"user_id":    userID.String(),
+			"name":       name,
+			"path":       absPath,
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "STORAGE_ERROR",
@@ -199,7 +210,13 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	if result := h.db.Create(&voice); result.Error != nil {
 		// Clean up the file if DB insert fails
 		_ = os.Remove(absPath)
-		slog.ErrorContext(c.UserContext(), "failed to create voice record", "error", result.Error)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DB_ERROR", "VoiceCloneDBError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/voices/clone",
+			"user_id":    userID.String(),
+			"name":       name,
+			"voice_id":   voiceID.String(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, result.Error))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "DB_ERROR",
@@ -256,7 +273,11 @@ func (h *VoiceHandler) List(c *fiber.Ctx) error {
 	// Fetch user's custom voices
 	var voices []models.Voice
 	if result := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&voices); result.Error != nil {
-		slog.Error("failed to query voices", "error", result.Error)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_LIST_DB_ERROR", "VoiceListDBError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/voices",
+			"user_id":    userID.String(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, result.Error))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "DB_ERROR",
@@ -376,7 +397,12 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 
 	// Soft-delete the record
 	if result := h.db.Delete(&voice); result.Error != nil {
-		slog.Error("failed to delete voice record", "error", result.Error)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_DELETE_DB_ERROR", "VoiceDeleteDBError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/api/v1/voices/:id",
+			"user_id":    userID.String(),
+			"voice_id":   voiceID.String(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, result.Error))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "DB_ERROR",

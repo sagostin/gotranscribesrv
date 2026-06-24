@@ -17,21 +17,30 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
 )
 
 // WatsonHandler handles IBM Watson Speech-to-Text compatible endpoints.
+//
+// NOTE: Session-end logs for the WebSocket streaming path currently
+// do NOT include transcript text (only audio bytes / duration /
+// process time). If transcript text is added to SESSION_ENDED in the
+// future, it MUST be run through the PII redactor before being added
+// to BuildLog's AdditionalData — see the Recognize() handler above
+// for the pattern.
 type WatsonHandler struct {
 	sidecar    *sidecar.Client
+	redactor   *pii.Redactor
 	db         *gorm.DB
 	defaultITN bool
 	lm         *logging.LogManager
 }
 
 // NewWatsonHandler creates a new WatsonHandler.
-func NewWatsonHandler(sc *sidecar.Client, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *WatsonHandler {
-	return &WatsonHandler{sidecar: sc, db: db, defaultITN: defaultITN, lm: lm}
+func NewWatsonHandler(sc *sidecar.Client, redactor *pii.Redactor, db *gorm.DB, defaultITN bool, lm *logging.LogManager) *WatsonHandler {
+	return &WatsonHandler{sidecar: sc, redactor: redactor, db: db, defaultITN: defaultITN, lm: lm}
 }
 
 // --- Watson Response Types ---
@@ -181,7 +190,16 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		})
 	}
 
-	h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_COMPLETED", "WatsonRecognizeCompleted", slog.LevelInfo, map[string]interface{}{
+	// Redact transcript text for log emission. Response body is left untouched.
+	redactedText, piiItems, piiErr := h.redactor.RedactText(c.UserContext(), result.Text)
+	if piiErr != nil {
+		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/v1/recognize",
+			"text_len":   len(result.Text),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, piiErr))
+	}
+	completedFields := map[string]interface{}{
 		"endpoint":      "/v1/recognize",
 		"content_type":  rawContentType,
 		"audio_ms":      int(result.Duration * 1000),
@@ -191,9 +209,14 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		"diarized":      result.Diarized,
 		"num_speakers":  result.NumSpeakers,
 		"itn_applied":   result.ITNApplied,
-		"transcript":    result.Text,
+		"transcript":    redactedText,
+		"pii_redacted":  len(piiItems),
 		"request_id":    middleware.RequestIDFromCtx(c),
-	}))
+	}
+	if len(piiItems) > 0 {
+		completedFields["pii_entity_types"] = piiEntityTypes(piiItems)
+	}
+	h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_COMPLETED", "WatsonRecognizeCompleted", slog.LevelInfo, completedFields))
 
 	// Store metadata for usage tracking
 	c.Locals("audio_duration_ms", int(result.Duration*1000))
@@ -375,7 +398,9 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				return
 			}
 
-			slog.Info("[Watson] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]),
+			// Debug-level only — the raw message body contains transcript text
+			// (PII). At info level we surface only the parsed event type.
+			slog.Debug("[Watson] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]),
 				"request_id", requestID)
 
 			var evt sidecarStreamEvent

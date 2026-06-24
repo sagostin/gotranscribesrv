@@ -35,6 +35,7 @@ This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar run
 | Swift | 6.0+ | Xcode 16+ (for FluidAudio / CoreML) |
 | Python | 3.11+ | Only needed for LLM processing |
 | PostgreSQL | 15+ | Local or remote |
+| Docker | 24+ | **Required for the Presidio PII analyzer** (runs as a container in `docker-compose.yml`). Skip if you set `ENABLE_PII=false`. |
 | RAM | 16 GB min | 24 GB recommended for full stack; see [16GB Mac Mini considerations](#16gb-mac-mini-considerations) |
 
 ---
@@ -99,6 +100,15 @@ ENABLE_ITN=true
 ENABLE_LLM=false
 LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
+# PII Redaction in Logs (Loki + stdout only — response bodies are untouched).
+# Requires the presidio-analyzer container (started automatically by `make up`).
+# Adds ~700 MB RAM for spaCy en_core_web_lg. Disable with ENABLE_PII=false.
+ENABLE_PII=true
+PRESIDIO_ANALYZER_URL=http://localhost:5002    # If using docker-compose; see below for native setup
+PRESIDIO_TIMEOUT_MS=3000
+PII_ENTITIES=                                  # empty = use built-in default set
+PII_SCORE_THRESHOLD=0.6
+
 # Rate Limits
 RATE_LIMIT_FREE=20       # requests/min
 RATE_LIMIT_PRO=120
@@ -110,6 +120,8 @@ LOG_LEVEL=info
 # ASR model (Swift sidecar auto-downloads)
 ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 ```
+
+> **Note on `PRESIDIO_ANALYZER_URL`:** When using `make up` (Docker Compose for Postgres + Go), the URL is `http://presidio-analyzer:3000` (the docker-compose service name). For manual / native setups, point to wherever you've started the Presidio container — typically `http://localhost:5002` (port mapping in our compose file).
 
 ---
 
@@ -258,16 +270,19 @@ curl -s http://localhost:3000/api/v1/usage/summary \
 
 ### Services
 
-Docker Compose runs PostgreSQL and the Go API server. Both sidecars run natively on the host for CoreML/ANE access.
+Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer. The Swift and Python sidecars run natively on the host for CoreML/ANE access.
 
 | Service | Image | Port | Notes |
 |---------|-------|------|-------|
 | `db` | postgres:16-alpine | 5432 | Persistent volume `pgdata` |
-| `server` | Custom (Go, alpine) | 3000 | Waits for healthy db |
+| `server` | Custom (Go, alpine) | 3000 | Waits for healthy db + presidio-analyzer |
+| `presidio-analyzer` | mcr.microsoft.com/presidio-analyzer:latest | 5002→3000 | spaCy `en_core_web_lg` + REST `/analyze`. Bundled with the analyzer; no model download on first start. `start_period: 60s` because spaCy cold-loads. |
 
 The Go server connects to the native sidecars via `host.docker.internal`:
 - Swift sidecar: `http://host.docker.internal:8101`
 - Python sidecar: `http://host.docker.internal:8100`
+
+The Presidio container is on the same docker network as `server`, so it uses `http://presidio-analyzer:3000` internally (no `host.docker.internal` needed). The `5002` host port is exposed only so you can `curl http://localhost:5002/health` for sanity-checking.
 
 ### Commands
 

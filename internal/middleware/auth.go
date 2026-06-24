@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"gorm.io/gorm"
@@ -24,6 +25,10 @@ type AuthConfig struct {
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
 	DB         *gorm.DB
+	// LogManager is optional. When non-nil, every failed auth attempt
+	// emits an AUTH_FAILED event to Loki/stdout. The raw token, API
+	// key, or password is NEVER included in the log payload.
+	LogManager *logging.LogManager
 }
 
 // NewAuthMiddleware creates the JWT authentication middleware.
@@ -35,7 +40,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 		// 1. Check for API key header (X-API-Key)
 		apiKey := c.Get("X-API-Key")
 		if apiKey != "" {
-			return authenticateAPIKey(c, cfg.DB, apiKey)
+			return authenticateAPIKey(c, cfg.DB, cfg.LogManager, apiKey)
 		}
 
 		// 2. Check Authorization header:
@@ -45,7 +50,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 		if strings.HasPrefix(authHeader, "Token ") {
 			// Deepgram format — always authenticate as API key
 			tokenValue := strings.TrimPrefix(authHeader, "Token ")
-			return authenticateAPIKey(c, cfg.DB, tokenValue)
+			return authenticateAPIKey(c, cfg.DB, cfg.LogManager, tokenValue)
 		}
 		if strings.HasPrefix(authHeader, "Basic ") {
 			// Watson format — "Basic base64(apikey:THE_KEY)"
@@ -55,9 +60,10 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 				parts := strings.SplitN(string(decoded), ":", 2)
 				if len(parts) == 2 {
 					// Use the password portion as the API key
-					return authenticateAPIKey(c, cfg.DB, parts[1])
+					return authenticateAPIKey(c, cfg.DB, cfg.LogManager, parts[1])
 				}
 			}
+			logAuthFailure(cfg.LogManager, c, "basic", "malformed_header")
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": fiber.Map{
 					"code":    "UNAUTHORIZED",
@@ -69,7 +75,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			bearerValue := strings.TrimPrefix(authHeader, "Bearer ")
 			// Try as API key first (any key format, not just gtx_*)
-			if tryAuthenticateAPIKey(c, cfg.DB, bearerValue) {
+			if tryAuthenticateAPIKey(c, cfg.DB, cfg.LogManager, bearerValue) {
 				return c.Next()
 			}
 			// Fall through — will be tried as JWT below
@@ -79,12 +85,13 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 		//    cannot be set from browser clients)
 		if qToken := c.Query("token"); qToken != "" {
 			// Try as API key first (any format)
-			if tryAuthenticateAPIKey(c, cfg.DB, qToken) {
+			if tryAuthenticateAPIKey(c, cfg.DB, cfg.LogManager, qToken) {
 				return c.Next()
 			}
 			// Otherwise treat as JWT
 			claims, err := ParseToken(qToken, cfg.Secret, cfg.DB)
 			if err != nil {
+				logAuthFailure(cfg.LogManager, c, "jwt_query", classifyTokenError(err))
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 					"error": fiber.Map{
 						"code":    "UNAUTHORIZED",
@@ -107,11 +114,11 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 			if len(parts) == 2 {
 				apiKeyVal := strings.TrimSpace(parts[1])
 				if apiKeyVal != "" {
-					return authenticateAPIKey(c, cfg.DB, apiKeyVal)
+					return authenticateAPIKey(c, cfg.DB, cfg.LogManager, apiKeyVal)
 				}
 			}
 			// Single value — try as API key directly
-			return authenticateAPIKey(c, cfg.DB, strings.TrimSpace(swp))
+			return authenticateAPIKey(c, cfg.DB, cfg.LogManager, strings.TrimSpace(swp))
 		}
 
 		// 4. Fall through to JWT from Authorization header
@@ -119,6 +126,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 			SigningKey: jwtware.SigningKey{Key: []byte(cfg.Secret)},
 			ErrorHandler: func(c *fiber.Ctx, err error) error {
 				metrics.RecordAuthAttempt("jwt", "failure")
+				logAuthFailure(cfg.LogManager, c, "jwt", classifyJWTMiddlewareError(err))
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 					"error": fiber.Map{
 						"code":    "UNAUTHORIZED",
@@ -137,6 +145,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 					cfg.DB.Model(&models.TokenBlacklist{}).Where("token_id = ?", tokenID).Count(&count)
 					if count > 0 {
 						metrics.RecordAuthAttempt("jwt", "failure")
+						logAuthFailure(cfg.LogManager, c, "jwt", "blacklisted")
 						return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 							"error": fiber.Map{
 								"code":    "TOKEN_REVOKED",
@@ -158,7 +167,7 @@ func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 }
 
 // authenticateAPIKey validates an API key against the database.
-func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
+func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, lm *logging.LogManager, rawKey string) error {
 	hash := sha256.Sum256([]byte(rawKey))
 	keyHash := hex.EncodeToString(hash[:])
 
@@ -169,6 +178,7 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 
 	if result.Error != nil {
 		metrics.RecordAuthAttempt("api_key", "failure")
+		logAuthFailure(lm, c, "api_key", "unknown_or_revoked")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "INVALID_API_KEY",
@@ -191,7 +201,7 @@ func authenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) error {
 // the user context if found. Returns true on success, false if not found.
 // Unlike authenticateAPIKey, this does NOT write a 401 response on failure,
 // allowing callers to fall through to other auth methods.
-func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) bool {
+func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, lm *logging.LogManager, rawKey string) bool {
 	hash := sha256.Sum256([]byte(rawKey))
 	keyHash := hex.EncodeToString(hash[:])
 
@@ -201,6 +211,10 @@ func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) bool {
 		First(&apiKey)
 
 	if result.Error != nil {
+		// Don't emit an AUTH_FAILED here — this is a probe. The
+		// caller will either continue with JWT (and emit its own
+		// failure if that also fails) or 401 directly. Emitting
+		// here would double-count every Bearer-as-API-key probe.
 		return false
 	}
 
@@ -210,6 +224,70 @@ func tryAuthenticateAPIKey(c *fiber.Ctx, db *gorm.DB, rawKey string) bool {
 	c.Locals("tier", apiKey.User.Tier)
 	c.Locals("admin", apiKey.User.Admin)
 	return true
+}
+
+// logAuthFailure emits an AUTH_FAILED structured log event.
+// SECURITY: the raw token, API key, or password is NEVER included
+// — only the auth method, failure reason, IP, user agent, and
+// request id. Operators correlate failed-auth patterns in Loki
+// via {type="AUTH_FAILED"} and group by reason/method/path.
+func logAuthFailure(lm *logging.LogManager, c *fiber.Ctx, method, reason string) {
+	if lm == nil {
+		return
+	}
+	fields := map[string]interface{}{
+		"endpoint":    c.Path(),
+		"method":      c.Method(),
+		"auth_method": method,
+		"reason":      reason,
+		"ip":          c.IP(),
+		"user_agent":  c.Get("User-Agent"),
+		"request_id":  RequestIDFromCtx(c),
+	}
+	lm.SendLog(lm.BuildLog("AUTH_FAILED", "AuthFailed", slog.LevelWarn, fields, method, reason))
+}
+
+// classifyJWTMiddlewareError maps the fiber-jwt middleware's error
+// to a short, stable reason string suitable for log labels.
+func classifyJWTMiddlewareError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "missing") || strings.Contains(msg, "no token"):
+		return "missing_token"
+	case strings.Contains(msg, "expired"):
+		return "expired"
+	case strings.Contains(msg, "signature"):
+		return "bad_signature"
+	case strings.Contains(msg, "malformed"):
+		return "malformed"
+	default:
+		return "invalid"
+	}
+}
+
+// classifyTokenError maps a ParseToken error to a stable reason
+// string. Mirrors classifyJWTMiddlewareError but operates on the
+// errors returned by our ParseToken helper.
+func classifyTokenError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "revoked"):
+		return "blacklisted"
+	case strings.Contains(msg, "expired"):
+		return "expired"
+	case strings.Contains(msg, "signature") || strings.Contains(msg, "signing"):
+		return "bad_signature"
+	case strings.Contains(msg, "unexpected signing method"):
+		return "wrong_algorithm"
+	default:
+		return "invalid"
+	}
 }
 
 // GenerateTokens creates a new JWT access/refresh token pair.

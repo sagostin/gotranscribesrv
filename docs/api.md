@@ -1282,3 +1282,149 @@ X-RateLimit-Remaining: 118
 X-RateLimit-Reset: 1710720000
 ```
 
+---
+
+## PII Redaction
+
+PII entities in the `transcript` / `result` / `prompt` log fields are replaced with `<TYPE>` placeholders before the structured log payload is emitted to stdout or shipped to Loki. The HTTP response body and the LLM call input/output are **never** modified — only what engineers see in Grafana / `kubectl logs`.
+
+### What's redacted
+
+| Endpoint | Log event | Field redacted |
+|---|---|---|
+| `POST /api/v1/asr` | `ASR_COMPLETED` | `transcript` |
+| `POST /v1/audio/transcriptions` | `WHISPER_COMPLETED` | `transcript` |
+| `POST /v1/audio/transcriptions` | verbose request log | `prompt` |
+| `POST /v1/recognize` | `WATSON_RECOGNIZE_COMPLETED` | `transcript` |
+| `POST /api/v1/process` | `LLM_PROCESS_COMPLETED` | `result` |
+
+Streaming WebSocket endpoints (`/ws/asr`, `/v1/listen`, `/v1/recognize` WS) currently log only audio bytes / duration / process time at session end — no transcript text — so redaction is a no-op there. If transcript logging is added to those paths in the future, it must go through the same redactor.
+
+### Default entities
+
+`PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD`, `US_SSN`, `IP_ADDRESS`, `IBAN_CODE`, `URL`, `DATE_TIME`, `LOCATION`. Override via `PII_ENTITIES=PERSON,EMAIL_ADDRESS,...`.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `ENABLE_PII` | `true` | Master switch. When `false`, transcripts are logged verbatim. |
+| `PRESIDIO_ANALYZER_URL` | `http://presidio-analyzer:3000` | URL of the Presidio analyzer service. Override to point at an external/centralized deployment. |
+| `PRESIDIO_TIMEOUT_MS` | `3000` | Per-call HTTP timeout to the analyzer. |
+| `PII_ENTITIES` | _(empty)_ | Comma-separated entity list. Empty = use built-in default set. |
+| `PII_SCORE_THRESHOLD` | `0.6` | Minimum Presidio confidence to consider a detection (0.0–1.0). |
+
+### Fail-closed semantics
+
+When the analyzer is unreachable, times out, or returns an invalid response, the affected log field is replaced with the literal string `<REDACTED-ERROR>` and a separate `PII_REDACTOR_ERROR` warning event is emitted. Operators see degraded mode via the `gotranscribesrv_pii_errors_total{reason="analyzer_error"}` Prometheus counter.
+
+Example degraded log line:
+```json
+{"type":"ASR_COMPLETED","additional_data":{"transcript":"<REDACTED-ERROR>","pii_redacted":0,...}}
+```
+
+### Deployment topology
+
+- **Default (recommended)** — the `presidio-analyzer` container runs in the same `docker-compose.yml` as the Go server. Network call is intra-host, no auth required, and PII-bearing text never leaves the cluster.
+- **Centralized** — set `PRESIDIO_ANALYZER_URL=https://presidio.internal.company.com` and remove the `presidio-analyzer` service from your compose file. Saves ~700 MB RAM per node by sharing one Presidio deployment across many gotranscribesrv nodes. Tradeoff: PII text now crosses the network to a shared service. Use only when your trust boundary includes that endpoint.
+
+### Sample log line, before and after
+
+**Before** (a Whisper-compat request whose audio contained personally-identifiable content):
+```json
+{
+  "type": "WHISPER_COMPLETED",
+  "message": "Whisper-compat transcription completed",
+  "request_id": "8a4f...",
+  "additional_data": {
+    "transcript": "Hi, my name is John Smith and my phone number is 212-555-1234. Email me at john@example.com.",
+    "word_count": 22,
+    "segment_count": 1
+  }
+}
+```
+
+**After** (with `ENABLE_PII=true` and the default entity set):
+```json
+{
+  "type": "WHISPER_COMPLETED",
+  "message": "Whisper-compat transcription completed",
+  "request_id": "8a4f...",
+  "additional_data": {
+    "transcript": "Hi, my name is <PERSON> and my phone number is <PHONE_NUMBER>. Email me at <EMAIL_ADDRESS>.",
+    "word_count": 22,
+    "segment_count": 1,
+    "pii_redacted": 3,
+    "pii_entity_types": ["PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS"]
+  }
+}
+```
+
+### Metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `gotranscribesrv_pii_redactions_total` | Counter | `entity_type` | Total PII entities replaced, by detected type. |
+| `gotranscribesrv_pii_duration_seconds` | Histogram | `result` (`success`/`error`) | Wall-clock latency of `POST /analyze` calls. |
+| `gotranscribesrv_pii_errors_total` | Counter | `reason` | Redactor failures by reason. |
+
+---
+
+## Audit Logging
+
+Every request that hits the API server produces structured log events. The full pipeline is `slog → stdout → optional Loki`, with mirrored rows to PostgreSQL for successful requests (`usage_logs`) and failed requests (`request_logs`).
+
+### What gets logged
+
+| Event | Type | Source | When |
+|---|---|---|---|
+| `REQUEST_RECEIVED` | `*_REQUEST_RECEIVED` | handlers | Every speech/voice/process request arrives |
+| `REQUEST_COMPLETED` | `*_COMPLETED` | handlers | Every successful ASR / TTS / voice / LLM response |
+| `REQUEST_FAILED` | `REQUEST_FAILED` | middleware | Every 4xx/5xx response across all authed endpoints |
+| `AUTH_FAILED` | `AUTH_FAILED` | middleware | Every failed authentication attempt (401) |
+| `PII_REDACTOR_ERROR` | `PIIRedactorError` | handlers | PII analyzer unreachable / errored (fail-closed trigger) |
+| `RATE_LIMITED` | (HTTP 429) | middleware | Rate limit rejections, also via `gotranscribesrv_rate_limit_rejections_total` |
+
+### Where to find things
+
+| Question | Loki query |
+|---|---|
+| Who failed auth in the last hour? | `{type="AUTH_FAILED"} \| json \| reason="bad_signature"` |
+| What's the PII error rate? | `sum(rate(gotranscribesrv_pii_errors_total[5m]))` |
+| What endpoints 5xx'd today? | `{type="REQUEST_FAILED"} \| json \| status>=500 \| endpoint` |
+| What's the slow ASR latency distribution? | `histogram_quantile(0.99, sum(rate(gotranscribesrv_asr_processing_duration_seconds_bucket[5m])) by (le, endpoint))` |
+| Token blacklist hits? | `{type="AUTH_FAILED"} \| json \| reason="blacklisted"` |
+
+### Failed auth — what's recorded
+
+Every `AUTH_FAILED` event carries:
+- `auth_method`: `jwt`, `api_key`, `basic`, `jwt_query`
+- `reason`: `missing_token`, `expired`, `bad_signature`, `malformed`, `wrong_algorithm`, `blacklisted`, `unknown_or_revoked`, `invalid`, `malformed_header`
+- `endpoint`, `method`, `ip`, `user_agent`, `request_id`
+
+**Security: the raw token, API key, or password is NEVER logged — only metadata about the failure.** Operators correlate failed-auth patterns via the `reason` and `auth_method` labels.
+
+### Failed requests — what's recorded
+
+Every `REQUEST_FAILED` event (via the `UsageTracker` middleware) carries:
+- `endpoint`, `status`, `error_code` (extracted from JSON error body), `method`, `path`, `ip`, `user_agent`, `content_type`, `process_ms`, `user_id` (when authenticated), `api_key_id`
+
+A `request_logs` row is also written to PostgreSQL on every 4xx/5xx (skipping anonymous failures, since there's no `user_id` to attach).
+
+### What is NOT logged
+
+- Raw request bodies (audio bytes, JSON payloads) — only metadata (file_size, content_type, word_count).
+- Raw response bodies — only metadata.
+- Raw tokens, API keys, or passwords — never, in any log event.
+- WebSocket streaming session-end events currently log only audio bytes / duration / process time — no transcript text. If transcript text is added to those paths, it will go through the PII redactor before logging.
+
+### Prometheus metrics for audit
+
+| Metric | Type | Labels |
+|---|---|---|
+| `gotranscribesrv_http_requests_total` | Counter | `method`, `path`, `status` |
+| `gotranscribesrv_auth_attempts_total` | Counter | `method` (`jwt`/`api_key`), `result` (`success`/`failure`) |
+| `gotranscribesrv_rate_limit_rejections_total` | Counter | `tier` |
+| `gotranscribesrv_sidecar_errors_total` | Counter | `sidecar`, `operation` |
+| `gotranscribesrv_pii_errors_total` | Counter | `reason` |
+

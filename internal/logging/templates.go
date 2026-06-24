@@ -69,6 +69,28 @@ func (lm *LogManager) LoadTemplates() {
 		"LLMProcessFailed":    "LLM processing failed: %v",
 		"LLMTasksListFailed":  "LLM tasks list failed: %v",
 
+		// ── PII redaction ─────────────────────────────────────────
+		// Emitted when the Presidio analyzer is unreachable, errors,
+		// or returns an invalid response. The associated log field
+		// will contain the literal "<REDACTED-ERROR>" sentinel. The
+		// presence of this event in Loki indicates PII may not have
+		// been scrubbed from the related *_COMPLETED log entry.
+		"PIIRedactorError": "PII redactor error: %v",
+
+		// ── Auth failures ─────────────────────────────────────────
+		// SECURITY: the raw token, API key, or password is NEVER
+		// included in this event — only the auth method, reason, IP,
+		// user agent, and request id. Operators see failed-auth
+		// patterns in Loki via {type="AUTH_FAILED"}.
+		"AuthFailed": "Authentication failed: method=%s reason=%s",
+
+		// ── Voice cloning failures (5xx storage/DB paths) ──────────
+		// Reached via the VOICE_CLONE_FAILED template already; the
+		// following cover the storage / DB error paths that fire
+		// AFTER a successful sidecar clone.
+		"VoiceListDBError":   "Voice list DB query failed: %v",
+		"VoiceDeleteDBError": "Voice delete DB error: %v",
+
 		// ── Sidecar client (transport-level) ────────────────────
 		"SidecarCallStarted": "Sidecar call started",
 		"SidecarCallOK":      "Sidecar call completed",

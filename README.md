@@ -24,6 +24,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **Inverse Text Normalization (ITN)** | Optional spoken→written form (e.g. "five dollars" → "$5.00"); `ENABLE_ITN=true`; per-request override via `?itn=false` |
 | **Admin / Enterprise API** | User management, customer API key issuance, global usage rollup (`/api/v1/admin/*`, enterprise tier) |
 | **Prometheus Metrics** | `/metrics` endpoint with HTTP, ASR, TTS, LLM, sidecar, auth, and rate-limit collectors |
+| **PII Redaction in Logs** | Replaces PII entities in `transcript` / `result` / `prompt` log fields (Loki + stdout) via [Microsoft Presidio](https://microsoft.github.io/presidio/). Response bodies are never modified. Fail-closed. |
 | **Horizontal Scaling** | Add Mac Minis behind a load balancer; stateless nodes, shared PostgreSQL |
 
 ---
@@ -54,11 +55,30 @@ Each node runs:
 - **Go (Fiber)** — API gateway, auth, WebSocket handling, usage tracking
 - **Swift (Vapor + FluidAudio)** — Audio AI inference: ASR (Parakeet TDT v3), VAD (Silero), speaker diarization (Sortformer), TTS (PocketTTS) — all via CoreML/ANE
 - **Python (FastAPI)** *(optional, off by default)* — LLM transcript processing (Llama 3.1 8B via mlx-lm). Off in most deployments.
+- **Presidio Analyzer** *(optional, on by default)* — PII detection for log redaction (mcr.microsoft.com/presidio-analyzer). See "PII Redaction" below.
 - Communication: HTTP/WebSocket on localhost between all components
 
 **Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` / `LLM_SIDECAR_URL` env vars — no code changes needed.
 
 See [docs/architecture.md](docs/architecture.md) for detailed design.
+
+---
+
+## PII Redaction in Logs
+
+The `transcript` field on `ASR_COMPLETED` / `WHISPER_COMPLETED` / `WATSON_RECOGNIZE_COMPLETED`, the `result` field on `LLM_PROCESS_COMPLETED`, and the `prompt` attribute on the Whisper verbose-request log are all run through a Microsoft Presidio analyzer before being placed into the structured log pipeline. PII entities (names, emails, phone numbers, credit cards, SSNs, IPs, IBANs, URLs, dates, locations) are replaced with `<TYPE>` placeholders. The HTTP response body and the LLM call input/output are NEVER modified — only what shows up in Loki / stdout.
+
+**Default behavior:** ON. Set `ENABLE_PII=false` in `.env` to disable.
+
+**Fail-closed:** if the Presidio analyzer is unreachable or returns an error, the affected log field is replaced with the literal string `<REDACTED-ERROR>` and a `PII_REDACTOR_ERROR` warning event is emitted. The error is also exposed via Prometheus (`gotranscribesrv_pii_errors_total{reason="analyzer_error"}`) so operators see the degraded mode immediately.
+
+**Deployment topology:**
+- **Default** — Presidio runs as a sidecar container in the same `docker-compose.yml` (the `presidio-analyzer` service). Network call is intra-host, no auth required, and PII text never leaves the cluster. Recommended for most deployments.
+- **Centralized** — set `PRESIDIO_ANALYZER_URL=https://presidio.internal.company.com` and remove the `presidio-analyzer` service from your compose file. Saves ~700 MB RAM per node by sharing one Presidio deployment. Tradeoff: PII-bearing transcript text now crosses the network to a shared service. Use only when your trust boundary includes that endpoint.
+
+**Entities:** the default set is `PERSON, EMAIL_ADDRESS, PHONE_NUMBER, CREDIT_CARD, US_SSN, IP_ADDRESS, IBAN_CODE, URL, DATE_TIME, LOCATION`. Override via `PII_ENTITIES=PERSON,EMAIL_ADDRESS,...`.
+
+See [docs/api.md → PII Redaction](docs/api.md#pii-redaction) for the full config reference and sample log lines.
 
 ---
 

@@ -1,11 +1,19 @@
 .PHONY: run build test migrate lint sidecar swift-sidecar swift-test swift-build \
         itn-build itn-vendor itn-clean clean setup-models setup-voices venv \
-        up down logs rebuild
+        up down logs rebuild \
+        presidio-up presidio-down presidio-logs presidio-pull presidio-shell
 
 # ---------- Config ----------
 VENV_DIR  := sidecar/.venv
 VENV_PY   := $(VENV_DIR)/bin/python3
 VENV_PIP  := $(VENV_DIR)/bin/pip
+
+# Presidio analyzer (PII redaction for logs). Pulled as a Docker image and
+# started alongside the rest of the stack via `make up`. These targets exist
+# for ad-hoc inspection / when running the Go server outside of compose.
+PRESIDIO_IMAGE  := mcr.microsoft.com/presidio-analyzer:latest
+PRESIDIO_PORT   := 5002
+PRESIDIO_NAME   := gotranscribesrv-presidio
 
 # Rust host target for vendored text-processing-rs (used by `make itn-build`).
 # Override with `make itn-build RUST_TARGET=x86_64-apple-darwin` on Intel Macs.
@@ -149,3 +157,32 @@ clean:
 
 tidy:
 	go mod tidy
+
+# ---------- Presidio (PII redaction) ----------
+# These targets are for ad-hoc Presidio management — when running the Go
+# server natively (not via `make up`), you'll want to start Presidio
+# manually with `make presidio-up`. The `make up` path already includes
+# Presidio via docker-compose, so these are mostly for debugging.
+
+presidio-pull:
+	docker pull $(PRESIDIO_IMAGE)
+
+presidio-up: presidio-pull
+	@echo ""
+	@echo "  🚀 Starting Presidio analyzer (PII redaction)"
+	@echo "  ℹ  Listening on http://localhost:$(PRESIDIO_PORT) → container :3000"
+	@echo "  ℹ  Set PRESIDIO_ANALYZER_URL=http://localhost:$(PRESIDIO_PORT) in .env"
+	@echo ""
+	docker run -d --rm \
+		--name $(PRESIDIO_NAME) \
+		-p $(PRESIDIO_PORT):3000 \
+		$(PRESIDIO_IMAGE)
+
+presidio-down:
+	-docker rm -f $(PRESIDIO_NAME)
+
+presidio-logs:
+	docker logs -f $(PRESIDIO_NAME)
+
+presidio-shell:
+	docker exec -it $(PRESIDIO_NAME) /bin/bash

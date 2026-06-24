@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"time"
 )
@@ -64,6 +65,16 @@ type Config struct {
 	LokiUsername string
 	LokiPassword string
 	LokiJob      string
+
+	// PII redaction in logs (Loki + stdout only — response bodies are
+	// never modified). Presidio-analyzer is the analyzer; replacement
+	// is performed in Go. The redactor is fail-closed: on any error
+	// from the analyzer, log fields are replaced with "<REDACTED-ERROR>".
+	EnablePII         bool
+	PresidioURL       string
+	PresidioTimeoutMs int
+	PIIEntities       string // CSV; empty = use built-in default set
+	PIIScoreThreshold float64
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -108,7 +119,25 @@ func Load() *Config {
 		LokiUsername: envOrDefault("LOKI_USERNAME", ""),
 		LokiPassword: envOrDefault("LOKI_PASSWORD", ""),
 		LokiJob:      envOrDefault("LOKI_JOB", "gotranscribesrv"),
+
+		EnablePII:         envOrDefault("ENABLE_PII", "true") == "true",
+		PresidioURL:       envOrDefault("PRESIDIO_ANALYZER_URL", "http://presidio-analyzer:3000"),
+		PresidioTimeoutMs: envOrDefaultInt("PRESIDIO_TIMEOUT_MS", 3000),
+		PIIEntities:       envOrDefault("PII_ENTITIES", ""),
+		PIIScoreThreshold: envOrDefaultFloat("PII_SCORE_THRESHOLD", 0.6),
 	}
+}
+
+func envOrDefaultFloat(key string, fallback float64) float64 {
+	val := os.Getenv(key)
+	if val == "" {
+		return fallback
+	}
+	var f float64
+	if _, err := fmt.Sscanf(val, "%f", &f); err != nil {
+		return fallback
+	}
+	return f
 }
 
 // IsProd returns true if running in production mode.

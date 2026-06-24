@@ -51,6 +51,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      presidio-analyzer:
+        condition: service_started
     environment:
       PORT: ${PORT:-3000}
       ENVIRONMENT: ${ENVIRONMENT:-development}
@@ -63,6 +65,13 @@ services:
       SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
       # Python sidecar (LLM only) runs natively on the host
       LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8100}
+      # PII redaction — Presidio analyzer runs in the compose stack.
+      # To centralize, override PRESIDIO_ANALYZER_URL with an external endpoint.
+      ENABLE_PII: ${ENABLE_PII:-true}
+      PRESIDIO_ANALYZER_URL: ${PRESIDIO_ANALYZER_URL:-http://presidio-analyzer:3000}
+      PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-3000}
+      PII_ENTITIES: ${PII_ENTITIES:-}
+      PII_SCORE_THRESHOLD: ${PII_SCORE_THRESHOLD:-0.6}
       RATE_LIMIT_FREE: ${RATE_LIMIT_FREE:-20}
       RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
       RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
@@ -83,6 +92,24 @@ services:
       - voicedata:/app/data/voices
     ports:
       - "${PORT:-3000}:3000"
+    logging: *logging
+
+  # ── Presidio Analyzer (PII detection for log redaction) ────────
+  # Microsoft's official Presidio analyzer image. Returns entity
+  # spans via POST /analyze; we do the <TYPE> replacement in Go.
+  # Docs: https://microsoft.github.io/presidio/
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    container_name: gotranscribesrv-presidio
+    restart: unless-stopped
+    ports:
+      - "5002:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     logging: *logging
 
 volumes:
