@@ -260,6 +260,7 @@ curl -H "X-API-Key: gtx_live_..." http://localhost:3000/api/v1/process/tasks
 | `POST` | `/api/v1/auth/logout` | Invalidate refresh token |
 | `POST` | `/api/v1/asr` | Transcribe uploaded audio file |
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
+| `GET`  | `/v1/models` | OpenAI-compatible model listing (STT, TTS, LLM) |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |

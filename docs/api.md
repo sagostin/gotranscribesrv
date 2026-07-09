@@ -180,6 +180,40 @@ Transcribe an uploaded audio file.
 
 ---
 
+### GET `/v1/models` (OpenAI-Compatible)
+
+Lists the models this server advertises, following the OpenAI `/v1/models` schema. Includes both OpenAI-branded mock IDs (so unmodified OpenAI SDKs can look up a known model) and the real on-device engines actually doing the work.
+
+**Request:** No body. Auth required (Bearer token or API key).
+
+| Query | Type | Description |
+|-------|------|-------------|
+| `owned_by` | string | Optional. Return only entries whose `owned_by` matches (e.g. `openai`, `nvidia`, `kyutai`, `meta`). |
+
+**Response — `200 OK`:**
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "whisper-1", "object": "model", "created": 1677649200, "owned_by": "openai" },
+    { "id": "gpt-4o-transcribe", "object": "model", "created": 1742000000, "owned_by": "openai" },
+    { "id": "gpt-4o-mini-transcribe", "object": "model", "created": 1742000000, "owned_by": "openai" },
+    { "id": "gpt-4o-transcribe-diarize", "object": "model", "created": 1742000000, "owned_by": "openai" },
+    { "id": "parakeet-tdt-v3-coreml", "object": "model", "created": 1735689600, "owned_by": "nvidia" },
+    { "id": "tts-1", "object": "model", "created": 1696280400, "owned_by": "openai" },
+    { "id": "tts-1-hd", "object": "model", "created": 1696280400, "owned_by": "openai" },
+    { "id": "gpt-4o-mini-tts", "object": "model", "created": 1736380800, "owned_by": "openai" },
+    { "id": "pocket-tts-1", "object": "model", "created": 1735603200, "owned_by": "kyutai" },
+    { "id": "Meta-Llama-3.1-8B-Instruct-4bit", "object": "model", "created": 1725148800, "owned_by": "meta" }
+  ]
+}
+```
+
+> **Note:** The `model` field on `/v1/audio/transcriptions` is not validated against this list. Any value (including unknown IDs) is accepted; the real engine (Parakeet TDT v3 / CoreML) is always used for STT.
+
+---
+
 ### POST `/v1/audio/transcriptions` (Whisper-Compatible)
 
 Drop-in replacement for the OpenAI Whisper API. Allows existing tools and SDKs that target the OpenAI transcription endpoint to work with GoTranscribeSrv without code changes.

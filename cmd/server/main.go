@@ -275,6 +275,7 @@ func main() {
 	authed.Post("/api/v1/asr", asrHandler.TranscribeFile)
 
 	// Whisper-compatible
+	authed.Get("/v1/models", handlers.ListModels)
 	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)
 
 	// Watson-compatible
