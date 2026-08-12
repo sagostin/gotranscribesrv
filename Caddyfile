@@ -22,7 +22,7 @@
 	}
 }
 
-:80 {
+:8030 {
 	reverse_proxy {
 		# ── Mac mini nodes ─────────────────────────────────────
 		# One entry per mini: <LAN IP>:<published server port>.

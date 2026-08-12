@@ -474,26 +474,42 @@ build:            # Build binary to bin/server
 test:             # Run Go tests
 migrate:          # Run GORM migrations only
 lint:             # golangci-lint
+tidy:             # go mod tidy
 
 # Swift sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
 swift-sidecar:    # Build & run Swift sidecar on :8101
 swift-build:      # Build Swift sidecar in release mode
+swift-test:       # Sidecar tests (ITN)
+sidecar-install:  # Install launchd agent (auto-start at login — prod nodes)
+sidecar-restart:  # Restart the launchd agent
+sidecar-uninstall:# Remove the launchd agent
+sidecar-status:   # launchd state + :8101 health check
 
-# Docker (Postgres + Go server)
+# ITN (optional Rust build — run BEFORE swift-build)
+itn-vendor:       # Clone text-processing-rs
+itn-build:        # Build libtext_processing_rs.a
+itn-clean:        # Remove Rust build artifacts
+
+# Dev Docker (Postgres + Go server + Presidio)
 up:               # docker compose up -d --build
 down:             # docker compose down
 logs:             # docker compose logs -f
-rebuild:          # docker compose up -d --build
 
 # Production (multi-node — see docs/production.md)
 node-up:          # Mac mini node: server + Presidio (docker-compose.node.yml)
+node-down:        # Stop node stack
+node-logs:        # Tail node logs
 node-migrate:     # One-shot DB migration from a node
 db-up:            # DB VM: Postgres + Caddy (docker-compose.db.yml)
+db-down:          # Stop DB VM stack
+db-logs:          # Tail DB VM logs
+db-backup:        # pg_dump (compressed) into ./backups/
+db-restore:       # Restore: make db-restore FILE=backups/....dump
 caddy-reload:     # Zero-downtime Caddy reload after Caddyfile edits
 
 # Utilities
 clean:            # Remove bin/, sidecar-swift/.build
-tidy:             # go mod tidy
+help:             # List all targets (also the default: bare `make`)
 ```
 
 ---

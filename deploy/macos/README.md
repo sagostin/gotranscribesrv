@@ -52,34 +52,36 @@ Docker Desktop **or** OrbStack:
 
 ## 3. Install the sidecar LaunchAgent
 
-From a checkout of this repo on the mini:
+From a checkout of this repo on the mini, one command does everything —
+release build, plist path substitution, install into `~/Library/LaunchAgents`,
+and `launchctl bootstrap`:
 
 ```bash
-# Build the Swift sidecar release binary first
-make swift-build
+make sidecar-install    # builds .build/release/Server, installs + starts the agent
+make sidecar-status     # verify: launchd state + :8101 health check
+```
 
-# Point the plist at your repo path
-REPO=/Users/transcribe/gotranscribesrv    # ← your actual checkout path
-mkdir -p "$REPO/deploy/macos/logs"
-sed -i '' "s|__REPO_PATH__|$REPO|g" deploy/macos/com.gotranscribesrv.swift-sidecar.plist
+Day-to-day management:
 
-# Install into the service account's LaunchAgents
-mkdir -p ~/Library/LaunchAgents
-cp deploy/macos/com.gotranscribesrv.swift-sidecar.plist ~/Library/LaunchAgents/
-
-# Load it (starts now and at every login)
-launchctl load ~/Library/LaunchAgents/com.gotranscribesrv.swift-sidecar.plist
+```bash
+make sidecar-restart    # restart after `git pull && make swift-build`
+make sidecar-uninstall  # remove the agent entirely
 ```
 
 Notes:
 
-- The Swift plist runs the **release binary** (`.build/release/Server`), not
+- The plist runs the **release binary** (`.build/release/Server`), not
   `swift run`, so boot startup is fast and doesn't need a toolchain warmup.
 - `KeepAlive` restarts a crashed sidecar; `ThrottleInterval` prevents
-  crash-loop spinning. Check `deploy/macos/logs/*.log` if a sidecar won't
+  crash-loop spinning. Check `deploy/macos/logs/*.log` if the sidecar won't
   stay up.
-- After `git pull` + `make swift-build`, restart the sidecar:
-  `launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.swift-sidecar`
+- `make sidecar-install` writes a substituted copy of the plist to
+  `~/Library/LaunchAgents/` — the repo copy keeps its `__REPO_PATH__`
+  placeholder, so re-running the target after moving the repo just works.
+- If you ever need the manual equivalent (no Makefile), the steps the target
+  performs are: `make swift-build`, `sed 's|__REPO_PATH__|<repo>|g'` the
+  plist into `~/Library/LaunchAgents/`, then
+  `launchctl bootstrap gui/$(id -u) <plist>`.
 
 ## 4. Start the node stack
 
@@ -106,6 +108,6 @@ make node-up                # builds + starts server + presidio
 |---|---|
 | Machine doesn't power on after outage | `pmset autorestart` not set; also check the mini isn't on a switched power strip |
 | Boots to a password screen, never logs in | FileVault still enabled, or auto-login not configured |
-| Containers down but sidecars up | Docker Desktop not set to start at login |
-| Sidecars down, containers up | Plists not in `~/Library/LaunchAgents` of the auto-login account, or `__REPO_PATH__` not substituted |
+| Containers down but sidecar up | Docker Desktop not set to start at login |
+| Sidecar down, containers up | Run `make sidecar-status` — agent not installed (`make sidecar-install`), or check `deploy/macos/logs/` |
 | Server up but transcriptions fail | `host.docker.internal` unreachable — confirm Docker Desktop/OrbStack (not colima) is the runtime |

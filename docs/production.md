@@ -1,7 +1,7 @@
 # Production deployment — split nodes + DB/Caddy VM
 
 This setup runs the Go API server in Docker on **each Mac mini** (next to its
-native CoreML/ANE sidecars), with **Postgres and Caddy on a separate
+native CoreML/ANE Swift sidecar), with **Postgres and Caddy on a separate
 virtualized server**. Caddy load-balances client requests across the minis;
 every mini talks to the same database.
 
@@ -25,8 +25,8 @@ every mini talks to the same database.
                     DATABASE_URL → Postgres on DB VM
 ```
 
-**Why server-per-mini (not one server + remote inference):** the sidecars
-bind to localhost on each mini, so co-locating the API server keeps audio
+**Why server-per-mini (not one server + remote inference):** the sidecar
+binds to localhost on each mini, so co-locating the API server keeps audio
 payloads off the LAN entirely. JWTs are stateless — with the same
 `JWT_SECRET` on every node, a token issued by any mini is valid on all of
 them. The only shared state is Postgres. Each node sets a unique `SERVER_ID`
@@ -62,12 +62,14 @@ sudo ufw allow from 192.168.1.0/24 to any port 5432 proto tcp
 ### 2. Each Mac mini
 
 Follow `deploy/macos/README.md` for the headless boot configuration
-(power-on after outage, FileVault off, auto-login, Docker at login, sidecar
-LaunchAgents), then:
+(power-on after outage, FileVault off, auto-login, Docker at login), then:
 
 ```bash
-cp .env.node.example .env        # DB VM IP in DATABASE_URL, shared JWT_SECRET,
-chmod 600 .env                   # unique SERVER_ID for this mini
+make sidecar-install           # builds + installs the Swift sidecar launchd agent
+make sidecar-status            # verify it's up on :8101
+
+cp .env.node.example .env      # DB VM IP in DATABASE_URL, shared JWT_SECRET,
+chmod 600 .env                 # unique SERVER_ID for this mini
 ```
 
 Generate the shared JWT secret **once** and copy it into every node's `.env`:
@@ -99,7 +101,8 @@ curl http://<db-vm>/health               # through Caddy
 
 ## Adding another Mac mini
 
-1. Set up the mini per `deploy/macos/README.md` (plists, auto-login, pmset).
+1. Set up the mini per `deploy/macos/README.md` (auto-login, pmset, Docker
+   at login), then `make sidecar-install`.
 2. `cp .env.node.example .env` — same `JWT_SECRET`/`DATABASE_URL`, new
    `SERVER_ID`.
 3. `make node-up` on the mini.
@@ -151,7 +154,7 @@ Verify from any machine: `curl http://<mini-ip>:3000/health` and
 ```bash
 # On the mini (SSH in, or physically):
 make node-down && make node-up          # restart server + presidio
-launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.swift-sidecar
+make sidecar-restart                    # restart the Swift sidecar launchd agent
 ```
 
 Caddy keeps traffic on the remaining minis while this one is down; no
@@ -189,7 +192,7 @@ make caddy-reload  # zero downtime; new upstreams gated by health checks
 
 | Check | Where | Fix |
 |---|---|---|
-| `curl http://<mini-ip>:8101/health` | mini | Swift sidecar down → `launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.swift-sidecar`; logs in `deploy/macos/logs/` |
+| `curl http://<mini-ip>:8101/health` | mini | Swift sidecar down → `make sidecar-status` / `make sidecar-restart`; logs in `deploy/macos/logs/` |
 | `docker compose -f docker-compose.node.yml ps` | mini | Containers down → `make node-up`; check `make node-logs` |
 | `curl http://<mini-ip>:3000/health` | mini | Server up but sidecar dead → fix sidecar first |
 | `curl http://<db-vm>/health` | anywhere | Caddy up but a mini missing → that mini's health check is failing; check the mini, not Caddy |
@@ -209,5 +212,40 @@ another Mac mini" below.
 git pull
 make node-migrate      # from the FIRST upgraded node only, if schema changed
 make node-up
-launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.swift-sidecar   # if sidecar changed
+make swift-build && make sidecar-restart   # if the Swift sidecar changed
 ```
+
+## Database backups
+
+Backups run on the **DB VM** and write compressed `pg_dump` files (custom
+format) to `./backups/` (gitignored):
+
+```bash
+make db-backup                                    # one-off backup
+make db-restore FILE=backups/transcribesrv-....dump   # restore (drops/recreates objects)
+```
+
+For automatic nightly backups, add a cron entry on the DB VM:
+
+```cron
+0 3 * * * cd /path/to/gotranscribesrv && make db-backup
+```
+
+Plus retention — e.g. delete dumps older than 14 days:
+
+```cron
+15 3 * * * find /path/to/gotranscribesrv/backups -name '*.dump' -mtime +14 -delete
+```
+
+Notes:
+
+- Dumps are node-independent — every node shares this one database, so a
+  single backup covers the whole fleet (users, API keys, usage logs, voice
+  metadata). **Exception:** cloned-voice embedding *files* live per-node in
+  the `voicedata` Docker volume; back those up separately if you use cloning
+  (`docker run --rm -v gotranscribesrv_voicedata:/v -v $PWD/backups:/b alpine tar czf /b/voicedata-<node>.tgz -C /v .`).
+- `db-restore` uses `pg_restore --clean --if-exists`: it drops existing
+  objects before recreating them. Stop the nodes (`make node-down`) during a
+  restore to avoid servers writing to a half-restored schema.
+- Keep `backups/` on a different disk/machine than the DB VM itself (rsync,
+  object storage) for real disaster recovery.
