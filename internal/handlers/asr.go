@@ -121,7 +121,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	}))
 
 	start := time.Now()
-	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
+	result, err := h.sidecar.Transcribe(c.UserContext(), sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: file.Filename,
 		Language: language,

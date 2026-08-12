@@ -40,13 +40,19 @@ func main() {
 	// text format; the ContextHandler wrapper additionally pulls
 	// request_id off context.Context and attaches it as a slog attr
 	// to every record — so slog.InfoContext(c.UserContext(), ...)
-	// calls in handlers automatically get correlated.
+	// calls in handlers automatically get correlated. When SERVER_ID
+	// is set, it is baked in as a slog attr on EVERY record so stdout
+	// lines can be attributed to a node when running multiple minis.
 	logLevel := slog.LevelInfo
 	if cfg.Environment == "development" {
 		logLevel = slog.LevelDebug
 	}
 	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
-	slog.SetDefault(slog.New(logging.NewContextHandler(baseHandler)))
+	ctxHandler := logging.NewContextHandler(baseHandler)
+	if cfg.ServerID != "" {
+		ctxHandler = logging.NewContextHandler(baseHandler.WithAttrs([]slog.Attr{slog.String("server_id", cfg.ServerID)}))
+	}
+	slog.SetDefault(slog.New(ctxHandler))
 
 	slog.Info("starting GoTranscribeSrv",
 		"environment", cfg.Environment,
@@ -63,7 +69,7 @@ func main() {
 		lokiClient = logging.NewLokiClient(cfg.LokiPushURL, cfg.LokiUsername, cfg.LokiPassword)
 		slog.Info("loki logging enabled", "url", cfg.LokiPushURL, "job", cfg.LokiJob)
 	}
-	logManager := logging.NewLogManager(lokiClient, cfg.LokiEnabled)
+	logManager := logging.NewLogManager(lokiClient, cfg.LokiEnabled, cfg.ServerID)
 	defer logManager.CloseLogManager()
 
 	// Initialize Prometheus metrics (no-op when METRICS_ENABLED=false)
@@ -142,8 +148,16 @@ func main() {
 	// Global middleware
 	app.Use(middleware.RequestID())
 	app.Use(recover.New())
+	// Access log carries server_id (baked in, static per process) and
+	// request_id (from the RequestID middleware's Locals) so raw HTTP
+	// lines correlate with the structured slog/Loki events.
+	accessLogFormat := "${time} | ${status} | ${latency} | ${method} ${path}"
+	if cfg.ServerID != "" {
+		accessLogFormat += " | server=" + cfg.ServerID
+	}
+	accessLogFormat += " | req=${locals:request_id}\n"
 	app.Use(fiberlogger.New(fiberlogger.Config{
-		Format: "${time} | ${status} | ${latency} | ${method} ${path}\n",
+		Format: accessLogFormat,
 	}))
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
@@ -213,7 +227,7 @@ func main() {
 	wsHandler := handlers.NewWSHandler(sc, db.DB, cfg.EnableITN, logManager)
 	app.Use("/ws/asr", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
-			slog.Info("WebSocket upgrade request", "path", "/ws/asr", "remote", c.IP())
+			slog.InfoContext(c.UserContext(), "WebSocket upgrade request", "path", "/ws/asr", "remote", c.IP())
 			return c.Next()
 		}
 		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
@@ -226,7 +240,7 @@ func main() {
 	dgHandler := handlers.NewDeepgramHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
 	app.Use("/v1/listen", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
-			slog.Info("Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())
+			slog.InfoContext(c.UserContext(), "Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())
 			return c.Next()
 		}
 		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
@@ -238,7 +252,7 @@ func main() {
 	// Watson-compatible streaming (WebSocket only — POST /v1/recognize is in the authed group below)
 	app.Use("/v1/recognize", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
-			slog.Info("Watson WebSocket upgrade request", "path", "/v1/recognize", "remote", c.IP())
+			slog.InfoContext(c.UserContext(), "Watson WebSocket upgrade request", "path", "/v1/recognize", "remote", c.IP())
 			return c.Next()
 		}
 		// For non-WebSocket requests (POST), skip this middleware chain entirely

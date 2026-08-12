@@ -3,6 +3,7 @@ package logging
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -162,6 +163,37 @@ func TestBuildLogWithoutRequestIDWorks(t *testing.T) {
 	}
 	if _, present := out["request_id"]; present {
 		t.Errorf("request_id should be omitted from JSON when empty: %v", out)
+	}
+}
+
+// TestBuildLogStampsServerID verifies that every entry built by a
+// manager configured with a server id carries it as a top-level
+// JSON field, and that an empty server id is omitted from the payload.
+func TestBuildLogStampsServerID(t *testing.T) {
+	lm := NewLogManager(nil, false, "mini-1")
+	defer lm.CloseLogManager()
+
+	log := lm.BuildLog("X", "ASRCompleted", slog.LevelInfo, nil)
+	if log.ServerID != "mini-1" {
+		t.Errorf("ServerID not stamped: got %q", log.ServerID)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(log.String()), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["server_id"] != "mini-1" {
+		t.Errorf("server_id missing in JSON payload: %v", out)
+	}
+
+	lm2 := NewLogManager(nil, false, "")
+	defer lm2.CloseLogManager()
+	log2 := lm2.BuildLog("X", "ASRCompleted", slog.LevelInfo, nil)
+	var out2 map[string]interface{}
+	if err := json.Unmarshal([]byte(log2.String()), &out2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := out2["server_id"]; present && os.Getenv("SERVER_ID") == "" {
+		t.Errorf("server_id should be omitted when unset: %v", out2)
 	}
 }
 

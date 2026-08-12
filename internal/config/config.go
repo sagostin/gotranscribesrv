@@ -48,6 +48,11 @@ type Config struct {
 	// Logging
 	LogLevel string
 
+	// ServerID identifies this node in every log entry (slog attr +
+	// LoggingFormat JSON payload) and as the Loki `server_id` label —
+	// useful when running multiple nodes behind a load balancer.
+	ServerID string
+
 	// Metrics
 	MetricsEnabled bool
 	MetricsPath    string
@@ -103,6 +108,8 @@ func Load() *Config {
 		VoicesDataDir: envOrDefault("VOICES_DATA_DIR", "data/voices"),
 
 		LogLevel: envOrDefault("LOG_LEVEL", "info"),
+
+		ServerID: envOrDefault("SERVER_ID", ""),
 
 		MetricsEnabled: envOrDefault("METRICS_ENABLED", "true") == "true",
 		MetricsPath:    envOrDefault("METRICS_PATH", "/metrics"),

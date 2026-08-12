@@ -49,15 +49,20 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 
 	// Per-session request id — used as the correlation id for every
 	// log event in this WS session. WS slog calls below pass this
-	// explicitly as the "request_id" attr.
-	requestID := uuid.New().String()
-	c.Locals(middleware.RequestIDLocalKey, requestID)
+	// explicitly as the "request_id" attr. Reuse the id minted by the
+	// HTTP RequestID middleware (if present) so the access log and
+	// upgrade log correlate with this session; otherwise mint one.
+	requestID, _ := c.Locals(middleware.RequestIDLocalKey).(string)
+	if requestID == "" {
+		requestID = uuid.New().String()
+		c.Locals(middleware.RequestIDLocalKey, requestID)
+	}
 
 	// Parse sidecar WebSocket URL
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
 	if err != nil {
-		slog.Error("invalid sidecar stream URL", "error", err)
+		slog.Error("invalid sidecar stream URL", "error", err, "request_id", requestID)
 		_ = c.WriteJSON(fiber.Map{"type": "error", "message": "internal configuration error"})
 		return
 	}
@@ -83,7 +88,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	// Connect to sidecar WebSocket
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		slog.Error("failed to connect to sidecar WebSocket", "error", err)
+		slog.Error("failed to connect to sidecar WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("WS_ASR_CONNECT_FAILED", "WSASRConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/ws/asr",
 			"request_id": requestID,
@@ -93,7 +98,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 	}
 	defer sidecarConn.Close()
 
-	slog.Info("WebSocket ASR session started")
+	slog.Info("WebSocket ASR session started", "request_id", requestID)
 	metrics.ActiveWebSocketConnections.WithLabelValues("native").Inc()
 	defer metrics.ActiveWebSocketConnections.WithLabelValues("native").Dec()
 

@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,8 +140,9 @@ func (c *Client) Health() (*HealthResponse, error) {
 
 // Transcribe sends audio to the Swift sidecar for transcription.
 // If req.Diarize is true, the Swift sidecar handles diarization inline
-// (single-hop — no separate Python call needed).
-func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) {
+// (single-hop — no separate Python call needed). ctx is used for log
+// correlation (request_id injection); pass the handler's request ctx.
+func (c *Client) Transcribe(ctx context.Context, req TranscribeRequest) (*TranscribeResponse, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
@@ -171,7 +173,7 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending transcription request to Swift sidecar",
+	slog.DebugContext(ctx, "sending transcription request to Swift sidecar",
 		"filename", req.Filename, "size", len(req.Audio), "diarize", req.Diarize)
 
 	start := time.Now()
@@ -198,7 +200,8 @@ func (c *Client) Transcribe(req TranscribeRequest) (*TranscribeResponse, error) 
 
 // VAD sends audio to the Swift sidecar for voice activity detection.
 // Returns speech segment boundaries (start/end times in seconds).
-func (c *Client) VAD(audio []byte, filename string) (*VadResponse, error) {
+// ctx is used for log correlation (request_id injection).
+func (c *Client) VAD(ctx context.Context, audio []byte, filename string) (*VadResponse, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
@@ -217,7 +220,7 @@ func (c *Client) VAD(audio []byte, filename string) (*VadResponse, error) {
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending VAD request to Swift sidecar",
+	slog.DebugContext(ctx, "sending VAD request to Swift sidecar",
 		"filename", filename, "size", len(audio))
 
 	start := time.Now()
@@ -243,7 +246,8 @@ func (c *Client) VAD(audio []byte, filename string) (*VadResponse, error) {
 }
 
 // Synthesize sends text to the Swift sidecar for TTS and returns raw audio bytes.
-func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
+// ctx is used for log correlation (request_id injection).
+func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) ([]byte, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal request: %w", err)
@@ -280,7 +284,8 @@ func (c *Client) Synthesize(req SynthesizeRequest) ([]byte, string, error) {
 
 // CloneVoice sends audio to the Swift sidecar to extract a voice embedding.
 // Returns the raw embedding bytes and the audio duration in milliseconds.
-func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, int, error) {
+// ctx is used for log correlation (request_id injection).
+func (c *Client) CloneVoice(ctx context.Context, audio []byte, filename string) ([]byte, int, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
@@ -299,7 +304,7 @@ func (c *Client) CloneVoice(audio []byte, filename string) ([]byte, int, error) 
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	slog.Debug("sending clone-voice request to Swift sidecar",
+	slog.DebugContext(ctx, "sending clone-voice request to Swift sidecar",
 		"filename", filename, "size", len(audio))
 
 	start := time.Now()

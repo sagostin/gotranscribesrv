@@ -145,7 +145,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	}))
 
 	synthStart := time.Now()
-	audio, contentType, err := h.sidecar.Synthesize(req)
+	audio, contentType, err := h.sidecar.Synthesize(c.UserContext(), req)
 	synthDuration := time.Since(synthStart)
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("TTS_FAILED", "TTSFailed", slog.LevelError, map[string]interface{}{

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GoTranscribeSrv — sidecar log rotation companion.
+
+  Runs rotate-sidecar-logs.sh hourly (and once at load) so
+  deploy/macos/logs/swift-sidecar.{out,err}.log can never fill the disk.
+  Installed by `make sidecar-install` alongside the sidecar agent.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.gotranscribesrv.swift-sidecar-logrotate</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__REPO_PATH__/deploy/macos/rotate-sidecar-logs.sh</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__REPO_PATH__</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Hourly: bounds worst-case overshoot past 10 MB to one hour of logs -->
+	<key>StartInterval</key>
+	<integer>3600</integer>
+</dict>
+</plist>

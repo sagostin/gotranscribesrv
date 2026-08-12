@@ -122,13 +122,13 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		}
 		audioBytes = wrapRawInWAV(audioBytes, fmtCode, 1, uint32(sampleRate), 8)
 		filename = "audio.wav"
-		slog.Info("[Watson] Wrapped raw audio in WAV header",
+		slog.InfoContext(c.UserContext(), "[Watson] Wrapped raw audio in WAV header",
 			"format", contentType, "sample_rate", sampleRate, "wrapped_size", len(audioBytes))
 	} else {
 		// Sniff actual audio format from magic bytes and override if Content-Type is wrong
 		detectedFormat := sniffAudioFormat(audioBytes)
 		if detectedFormat != "" && detectedFormat != filename {
-			slog.Info("[Watson] Content-Type/magic mismatch, using detected format",
+			slog.InfoContext(c.UserContext(), "[Watson] Content-Type/magic mismatch, using detected format",
 				"content_type", rawContentType,
 				"content_type_filename", filename,
 				"detected_filename", detectedFormat)
@@ -168,7 +168,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		"request_id":      middleware.RequestIDFromCtx(c),
 	}))
 
-	result, err := h.sidecar.Transcribe(sidecar.TranscribeRequest{
+	result, err := h.sidecar.Transcribe(c.UserContext(), sidecar.TranscribeRequest{
 		Audio:    audioBytes,
 		Filename: filename,
 		Language: c.Query("language", "en"),
@@ -246,8 +246,13 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	// Limit incoming message size to 1MB to prevent memory exhaustion
 	c.SetReadLimit(1 * 1024 * 1024)
 
-	requestID := uuid.New().String()
-	c.Locals(middleware.RequestIDLocalKey, requestID)
+	// Reuse the id minted by the HTTP RequestID middleware (if present)
+	// so the access/upgrade logs correlate with this session.
+	requestID, _ := c.Locals(middleware.RequestIDLocalKey).(string)
+	if requestID == "" {
+		requestID = uuid.New().String()
+		c.Locals(middleware.RequestIDLocalKey, requestID)
+	}
 	timestamps := c.Query("timestamps", "false") == "true"
 	wordConfidence := c.Query("word_confidence", "false") == "true"
 	speakerLabels := c.Query("speaker_labels", "false") == "true"
@@ -257,7 +262,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
 	if err != nil {
-		slog.Error("[Watson] invalid sidecar stream URL", "error", err)
+		slog.Error("[Watson] invalid sidecar stream URL", "error", err, "request_id", requestID)
 		_ = c.WriteJSON(fiber.Map{"error": "internal configuration error"})
 		return
 	}
@@ -284,7 +289,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		slog.Error("[Watson] failed to connect to sidecar /stream WebSocket", "error", err)
+		slog.Error("[Watson] failed to connect to sidecar /stream WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("WATSON_CONNECT_FAILED", "WatsonConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/v1/recognize",
 			"request_id": requestID,

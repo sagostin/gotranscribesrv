@@ -55,8 +55,11 @@ ITN_RELEASE     := $(ITN_VENDOR_DIR)/target/$(RUST_TARGET)/release/libtext_proce
 ITN_TEST_FILTER := TextNormalizerTests
 
 # Swift sidecar launchd agent (production nodes — see deploy/macos/)
-SIDECAR_LABEL   := com.gotranscribesrv.swift-sidecar
-SIDECAR_PLIST   := deploy/macos/$(SIDECAR_LABEL).plist
+SIDECAR_LABEL           := com.gotranscribesrv.swift-sidecar
+SIDECAR_PLIST           := deploy/macos/$(SIDECAR_LABEL).plist
+SIDECAR_ROTATE_LABEL    := com.gotranscribesrv.swift-sidecar-logrotate
+SIDECAR_ROTATE_PLIST    := deploy/macos/$(SIDECAR_ROTATE_LABEL).plist
+SIDECAR_ROTATE_SCRIPT   := deploy/macos/rotate-sidecar-logs.sh
 LAUNCHAGENTS    := $(HOME)/Library/LaunchAgents
 GUI_DOMAIN      := gui/$(shell id -u)
 
@@ -89,7 +92,7 @@ help:
 	@echo "  Swift sidecar"
 	@echo "    swift-build         Release build (.build/release/Server — used by launchd)"
 	@echo "    swift-test          Sidecar tests (ITN)"
-	@echo "    sidecar-install     Install launchd agent (auto-start at login, restart on crash)"
+	@echo "    sidecar-install     Install launchd agents (auto-start at login, restart on crash, log rotation)"
 	@echo "    sidecar-restart     Restart the launchd agent (e.g. after git pull + swift-build)"
 	@echo "    sidecar-uninstall   Remove the launchd agent"
 	@echo "    sidecar-status      launchd state + :8101 health check"
@@ -159,8 +162,13 @@ sidecar-install: swift-build
 	sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LABEL) 2>/dev/null
 	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
+	chmod +x $(SIDECAR_ROTATE_SCRIPT)
+	sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_ROTATE_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
+	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL) 2>/dev/null
+	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
 	@echo ""
 	@echo "  ✅ Sidecar installed — starts now and at every login"
+	@echo "  ℹ  Log rotation installed — hourly, 10m x 3 (mirrors Docker logging)"
 	@echo "  ℹ  Verify: make sidecar-status"
 	@echo "  ℹ  Logs:   deploy/macos/logs/"
 	@echo ""
@@ -171,12 +179,17 @@ sidecar-restart:
 
 sidecar-uninstall:
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LABEL)
+	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL)
 	rm -f $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
-	@echo "  ✅ Sidecar LaunchAgent removed"
+	rm -f $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
+	@echo "  ✅ Sidecar LaunchAgents removed"
 
 sidecar-status:
-	@echo "  launchd:"
+	@echo "  launchd (sidecar):"
 	@out=$$(launchctl print $(GUI_DOMAIN)/$(SIDECAR_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
+		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (not loaded)"; fi
+	@echo "  launchd (logrotate):"
+	@out=$$(launchctl print $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
 		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (not loaded)"; fi
 	@echo "  health:"
 	@out=$$(curl -sf http://localhost:8101/health 2>/dev/null); \

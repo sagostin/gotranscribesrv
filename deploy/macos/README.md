@@ -65,8 +65,20 @@ Day-to-day management:
 
 ```bash
 make sidecar-restart    # restart after `git pull && make swift-build`
-make sidecar-uninstall  # remove the agent entirely
+make sidecar-uninstall  # remove the agents entirely
 ```
+
+### Logs and rotation
+
+The sidecar's launchd stdout/stderr go to flat files in
+`deploy/macos/logs/` (`swift-sidecar.out.log`, `swift-sidecar.err.log`).
+launchd itself never rotates these, so `make sidecar-install` also installs
+a companion agent (`com.gotranscribesrv.swift-sidecar-logrotate`) that runs
+`rotate-sidecar-logs.sh` hourly and at load. Rotation is copy-truncate
+(safe with launchd's append-mode file handles — no sidecar restart needed)
+and mirrors the Docker logging policy: rotate at 10 MB, keep 3 archives,
+so sidecar logs can never exceed ~80 MB on disk. Override via
+`LOG_MAX_SIZE` / `LOG_MAX_FILE` (same names as the compose files).
 
 Notes:
 

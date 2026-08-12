@@ -188,7 +188,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		result, asrErr = h.sidecar.Transcribe(sidecar.TranscribeRequest{
+		result, asrErr = h.sidecar.Transcribe(c.UserContext(), sidecar.TranscribeRequest{
 			Audio:    audioBytes,
 			Filename: file.Filename,
 			Language: language,
@@ -201,9 +201,9 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			vadResult, vadErr = h.sidecar.VAD(audioBytes, file.Filename)
+			vadResult, vadErr = h.sidecar.VAD(c.UserContext(), audioBytes, file.Filename)
 			if vadErr != nil {
-				slog.Warn("[whisper] VAD failed, continuing without",
+				slog.WarnContext(c.UserContext(), "[whisper] VAD failed, continuing without",
 					"error", vadErr)
 			}
 		}()
@@ -247,7 +247,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	if vadResult != nil && len(vadResult.SpeechSegments) > 1 && len(result.Segments) <= 2 && len(result.Words) > 0 {
 		split := splitSegmentsByVAD(result.Words, vadResult.SpeechSegments)
 		if len(split) > len(result.Segments) {
-			slog.Info("[whisper] split segments using VAD boundaries",
+			slog.InfoContext(c.UserContext(), "[whisper] split segments using VAD boundaries",
 				"original_segments", len(result.Segments),
 				"vad_segments", len(vadResult.SpeechSegments),
 				"new_segments", len(split),
@@ -470,7 +470,7 @@ func formatWhisperResponse(
 		}
 		resp["segments"] = segments
 
-		slog.Info("[whisper] diarized response",
+		slog.InfoContext(c.UserContext(), "[whisper] diarized response",
 			"segments", len(segments),
 			"speakers", result.NumSpeakers,
 			"duration_s", fmt.Sprintf("%.1f", result.Duration),

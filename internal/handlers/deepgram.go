@@ -112,8 +112,14 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	// Limit incoming message size to 1MB to prevent memory exhaustion
 	c.SetReadLimit(1 * 1024 * 1024)
 
-	requestID := uuid.New().String()
-	c.Locals(middleware.RequestIDLocalKey, requestID)
+	// Reuse the id minted by the HTTP RequestID middleware (if present)
+	// so the access/upgrade logs correlate with this session; the id is
+	// also echoed to the client in the Deepgram Metadata event.
+	requestID, _ := c.Locals(middleware.RequestIDLocalKey).(string)
+	if requestID == "" {
+		requestID = uuid.New().String()
+		c.Locals(middleware.RequestIDLocalKey, requestID)
+	}
 	interimResults := c.Query("interim_results", "true") == "true"
 
 	modelMeta := dgModelMeta{
@@ -136,7 +142,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		ModelInfo: modelMeta.ModelInfo,
 	}
 	if err := c.WriteJSON(meta); err != nil {
-		slog.Error("failed to send Metadata event", "error", err)
+		slog.Error("failed to send Metadata event", "error", err, "request_id", requestID)
 		return
 	}
 
@@ -144,7 +150,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
 	if err != nil {
-		slog.Error("invalid sidecar stream URL", "error", err)
+		slog.Error("invalid sidecar stream URL", "error", err, "request_id", requestID)
 		_ = c.WriteJSON(fiber.Map{"type": "Error", "message": "internal configuration error"})
 		return
 	}
@@ -171,7 +177,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		slog.Error("failed to connect to sidecar /stream WebSocket", "error", err)
+		slog.Error("failed to connect to sidecar /stream WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_CONNECT_FAILED", "DeepgramConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/v1/listen",
 			"request_id": requestID,

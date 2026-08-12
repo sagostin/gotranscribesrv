@@ -29,6 +29,7 @@ type LogManager struct {
 	LogChannel   chan *LoggingFormat
 	wg           sync.WaitGroup
 	printToLocal bool
+	serverID     string
 }
 
 // LoggingFormat is the wire-format of a single event. It serializes to
@@ -38,6 +39,7 @@ type LoggingFormat struct {
 	Type           string                 `json:"type,omitempty"`
 	Level          slog.Level             `json:"level,omitempty"`
 	RequestID      string                 `json:"request_id,omitempty"`
+	ServerID       string                 `json:"server_id,omitempty"`
 	AdditionalData map[string]interface{} `json:"additional_data,omitempty"`
 	Timestamp      time.Time              `json:"timestamp,omitempty"`
 }
@@ -46,13 +48,23 @@ type LoggingFormat struct {
 // Loki push path entirely (no goroutine work, no allocations beyond
 // the channel) so the cost when disabled is just the channel buffer
 // and one idle goroutine that immediately skips on receive.
-func NewLogManager(lokiClient *LokiClient, lokiEnabled bool) *LogManager {
+//
+// serverID is optional; when omitted (or empty) the SERVER_ID env var
+// is used. The resolved value is stamped onto every LoggingFormat so
+// the JSON payload identifies the emitting node — not just the Loki
+// stream label.
+func NewLogManager(lokiClient *LokiClient, lokiEnabled bool, serverID ...string) *LogManager {
+	sid := os.Getenv("SERVER_ID")
+	if len(serverID) > 0 && serverID[0] != "" {
+		sid = serverID[0]
+	}
 	lm := &LogManager{
 		Templates:    make(map[string]string),
 		LokiClient:   lokiClient,
 		LokiEnabled:  lokiEnabled,
 		LogChannel:   make(chan *LoggingFormat, 512),
 		printToLocal: true,
+		serverID:     sid,
 	}
 	lm.LoadTemplates()
 	lm.wg.Add(1)
@@ -95,6 +107,7 @@ func (lm *LogManager) BuildLog(logType string, templateName string, level slog.L
 		Type:           strings.ToUpper(logType),
 		Level:          level,
 		RequestID:      requestID,
+		ServerID:       lm.serverID,
 		AdditionalData: fields,
 		Timestamp:      time.Now(),
 	}
@@ -152,7 +165,7 @@ func (lm *LogManager) processLogChannel() {
 		}
 		labels := map[string]string{
 			"job":       os.Getenv("LOKI_JOB"),
-			"server_id": os.Getenv("SERVER_ID"),
+			"server_id": lm.serverID,
 			"type":      log.Type,
 			"level":     log.Level.String(),
 		}
@@ -185,6 +198,9 @@ func (lf *LoggingFormat) Print() {
 	}
 	if lf.RequestID != "" {
 		attrs = append(attrs, slog.String("request_id", lf.RequestID))
+	}
+	if lf.ServerID != "" {
+		attrs = append(attrs, slog.String("server_id", lf.ServerID))
 	}
 	logEntry := slog.Default().With(attrs...)
 	for key, value := range lf.AdditionalData {

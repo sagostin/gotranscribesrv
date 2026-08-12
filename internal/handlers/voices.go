@@ -130,7 +130,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	// Send to sidecar to extract voice embedding
 	cloneStart := time.Now()
-	embedding, audioDurationMs, err := h.sidecar.CloneVoice(audioBytes, file.Filename)
+	embedding, audioDurationMs, err := h.sidecar.CloneVoice(c.UserContext(), audioBytes, file.Filename)
 	cloneDuration := time.Since(cloneStart)
 	if err != nil {
 		errMsg := err.Error()
