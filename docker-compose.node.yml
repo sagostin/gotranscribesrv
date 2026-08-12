@@ -1,0 +1,135 @@
+# ============================================================
+# GoTranscribeSrv — Production NODE Compose (runs on each Mac mini)
+# ============================================================
+# Runs the Go API server + Presidio PII analyzer in Docker.
+# Postgres lives on the separate DB VM (see docker-compose.db.yml).
+# Swift + Python sidecars run NATIVELY on this host via launchd
+# (see deploy/macos/) for CoreML/ANE access.
+#
+# Every node shares the SAME JWT_SECRET and DATABASE_URL, so JWTs
+# are valid on any node and all nodes read/write the same DB.
+# Set SERVER_ID uniquely per node for per-node log attribution.
+#
+# Usage (from a git checkout of this repo on the mini):
+#   cp .env.node.example .env      # edit DB VM IP, secrets, SERVER_ID
+#   make node-migrate              # FIRST BOOT ONLY, on ONE node
+#   make node-up                   # build + start server + presidio
+#   make node-logs
+# ============================================================
+
+# ── Logging defaults ──────────────────────────────────────
+# Cap per-service logs at 3 × 10 MB (~30 MB max per container)
+# so a runaway logging loop can't fill the host disk. Set
+# LOG_MAX_SIZE / LOG_MAX_FILE in .env to override.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
+services:
+  # ── Go API Server ────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      presidio-analyzer:
+        condition: service_started
+    environment:
+      PORT: ${PORT:-3000}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-false}
+      # Remote Postgres on the DB VM. Same value on every node.
+      # Example: postgres://transcribesrv:SECRET@192.168.1.10:5432/transcribesrv?sslmode=disable
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env — point it at the DB VM}
+      # Shared JWT secret — MUST be identical on every node so tokens
+      # validate no matter which mini Caddy routes to.
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env — must match on all nodes}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+      # Swift sidecar runs natively on THIS host (launchd) for CoreML/ANE.
+      # host.docker.internal works on Docker Desktop and OrbStack.
+      SWIFT_SIDECAR_URL: ${SWIFT_SIDECAR_URL:-http://host.docker.internal:8101}
+      SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
+      # Python sidecar (LLM only) runs natively on THIS host (launchd).
+      LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8100}
+      # PII redaction — Presidio runs per-node (below) so unredacted
+      # transcript text never leaves this machine.
+      ENABLE_PII: ${ENABLE_PII:-true}
+      PRESIDIO_ANALYZER_URL: ${PRESIDIO_ANALYZER_URL:-http://presidio-analyzer:3000}
+      PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-3000}
+      PII_ENTITIES: ${PII_ENTITIES:-}
+      PII_SCORE_THRESHOLD: ${PII_SCORE_THRESHOLD:-0.6}
+      # NOTE: rate limiting is IN-MEMORY per node. Behind Caddy with N
+      # nodes, effective per-user limits are roughly N × these values.
+      RATE_LIMIT_FREE: ${RATE_LIMIT_FREE:-20}
+      RATE_LIMIT_PRO: ${RATE_LIMIT_PRO:-120}
+      RATE_LIMIT_ENTERPRISE: ${RATE_LIMIT_ENTERPRISE:-0}
+      VOICES_DATA_DIR: ${VOICES_DATA_DIR:-/app/data/voices}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_PATH: ${METRICS_PATH:-/metrics}
+      # Loki logging (optional). Point LOKI_PUSH_URL at a Loki reachable
+      # from this node (e.g. on the DB VM). SERVER_ID tags this node's
+      # events so you can filter per mini.
+      LOKI_ENABLED: ${LOKI_ENABLED:-false}
+      LOKI_PUSH_URL: ${LOKI_PUSH_URL:-http://loki:3100}
+      LOKI_USERNAME: ${LOKI_USERNAME:-}
+      LOKI_PASSWORD: ${LOKI_PASSWORD:-}
+      LOKI_JOB: ${LOKI_JOB:-gotranscribesrv}
+      SERVER_ID: ${SERVER_ID:?Set SERVER_ID in .env — unique per node, e.g. node-1}
+    volumes:
+      # NOTE: cloned-voice embedding files are stored HERE, per node.
+      # DB metadata is shared, but the files are not — a clone created
+      # on node A only works on node A. See docs/production.md.
+      - voicedata:/app/data/voices
+    ports:
+      # Published on the LAN so Caddy (on the DB VM) can reach this node.
+      - "${PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    logging: *logging
+
+  # ── One-shot migration (first boot / upgrades) ───────────
+  # Run ONCE from ONE node before starting the fleet (or after
+  # pulling a new version) to avoid concurrent AutoMigrate races:
+  #   docker compose -f docker-compose.node.yml --profile migrate run --rm migrate
+  # (make node-migrate)
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["migrate"]
+    command: ["-migrate"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    logging: *logging
+
+  # ── Presidio Analyzer (PII detection for log redaction) ──
+  # Runs per-node so unredacted transcripts never traverse the LAN.
+  # The Go server reaches it via the compose-internal service name.
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    restart: unless-stopped
+    ports:
+      # localhost-only, for ad-hoc debugging. The server container
+      # does NOT use this port — it uses the service name above.
+      - "127.0.0.1:5002:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging: *logging
+
+volumes:
+  voicedata:
+    driver: local

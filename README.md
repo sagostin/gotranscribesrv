@@ -60,6 +60,8 @@ Each node runs:
 
 **Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` / `LLM_SIDECAR_URL` env vars — no code changes needed.
 
+**Multi-node production (Mac mini fleet + separate DB/Caddy VM):** Ready-made compose files — `docker-compose.node.yml` (server + Presidio per mini), `docker-compose.db.yml` (Postgres + Caddy load balancer), a `Caddyfile` with health-checked least-connection balancing, and `deploy/macos/` for headless auto-boot after power outages. See [docs/production.md](docs/production.md).
+
 See [docs/architecture.md](docs/architecture.md) for detailed design.
 
 ---
@@ -399,6 +401,7 @@ gotranscribesrv/
 | [docs/api.md](docs/api.md) | Full API reference: auth, ASR, TTS, voices, usage, admin, error format, rate limits |
 | [docs/architecture.md](docs/architecture.md) | System design, data flow, model pipeline, memory layout, scaling strategy |
 | [docs/setup.md](docs/setup.md) | Detailed setup, environment variables, deployment topologies, 16 GB Mac Mini notes |
+| [docs/production.md](docs/production.md) | Multi-node production: Mac mini fleet + separate DB/Caddy VM, headless boot, scaling runbook |
 | [docs/pricing.md](docs/pricing.md) | Pricing reference and cost model |
 | [docs/cost-benefit-analysis.md](docs/cost-benefit-analysis.md) | ROI analysis: self-hosted vs cloud APIs |
 | [docs/nvidia_cost_analysis.md](docs/nvidia_cost_analysis.md) | Mac Mini vs NVIDIA GPU cost & throughput comparison |

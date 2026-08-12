@@ -1,6 +1,7 @@
 .PHONY: run build test migrate lint sidecar swift-sidecar swift-test swift-build \
         itn-build itn-vendor itn-clean clean setup-models setup-voices venv \
         up down logs rebuild \
+        node-up node-down node-logs node-migrate db-up db-down db-logs caddy-reload \
         presidio-up presidio-down presidio-logs presidio-pull presidio-shell
 
 # ---------- Config ----------
@@ -149,6 +150,51 @@ logs:
 
 rebuild:
 	docker compose up -d --build
+
+# ---------- Production: Mac mini node (docker-compose.node.yml) ----------
+# Runs on each Mac mini: Go server + Presidio in Docker, sidecars native
+# via launchd (see deploy/macos/). DB lives on the separate DB VM.
+NODE_COMPOSE := docker compose -f docker-compose.node.yml
+
+node-up:
+	$(NODE_COMPOSE) up -d --build
+	@echo ""
+	@echo "  ✅ Node server + Presidio running"
+	@echo "  ℹ  API at http://localhost:3000 (reachable by Caddy on the DB VM)"
+	@echo "  ℹ  Sidecars are native — see deploy/macos/README.md"
+	@echo ""
+
+node-down:
+	$(NODE_COMPOSE) down
+
+node-logs:
+	$(NODE_COMPOSE) logs -f
+
+# FIRST BOOT (and after upgrades): run migrations once, from ONE node,
+# before starting the fleet.
+node-migrate:
+	$(NODE_COMPOSE) --profile migrate run --rm migrate
+
+# ---------- Production: DB VM (docker-compose.db.yml) ----------
+# Runs on the virtualized DB server: Postgres + Caddy load balancer.
+DB_COMPOSE := docker compose -f docker-compose.db.yml
+
+db-up:
+	$(DB_COMPOSE) up -d
+	@echo ""
+	@echo "  ✅ Postgres + Caddy running"
+	@echo "  ℹ  Edit Caddyfile with your node IPs, then 'make caddy-reload'"
+	@echo ""
+
+db-down:
+	$(DB_COMPOSE) down
+
+db-logs:
+	$(DB_COMPOSE) logs -f
+
+# Zero-downtime reload after editing the Caddyfile (add/remove nodes).
+caddy-reload:
+	$(DB_COMPOSE) exec caddy caddy reload --config /etc/caddy/Caddyfile
 
 # ---------- Utilities ----------
 clean:

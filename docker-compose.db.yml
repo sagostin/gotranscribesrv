@@ -1,0 +1,83 @@
+# ============================================================
+# GoTranscribeSrv — Production DB + LOAD BALANCER Compose
+# ============================================================
+# Runs on the separate (virtualized) DB server:
+#   • postgres — the single shared database for all nodes
+#   • caddy    — reverse proxy / load balancer across the Mac mini
+#                nodes (upstream IPs listed in ./Caddyfile)
+#
+# The Mac minis run docker-compose.node.yml and point their
+# DATABASE_URL at this host.
+#
+# Usage:
+#   cp .env.db.example .env        # set a strong POSTGRES_PASSWORD
+#   # edit Caddyfile — list your Mac mini IPs under `to`
+#   make db-up
+#   make db-logs
+# ============================================================
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-transcribesrv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-transcribesrv}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Exposed to the LAN so the Mac mini nodes can connect.
+      # IMPORTANT: firewall this port to ONLY the node IPs, e.g.:
+      #   sudo ufw allow from 192.168.1.0/24 to any port 5432 proto tcp
+      # (or bind to a specific LAN interface: "192.168.1.10:5432:5432")
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-transcribesrv}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging: *logging
+
+  # ── Caddy (reverse proxy / load balancer) ────────────────
+  # Upstreams (Mac mini IPs) are listed in ./Caddyfile — edit that
+  # file, then reload without downtime:
+  #   docker compose -f docker-compose.db.yml exec caddy \
+  #     caddy reload --config /etc/caddy/Caddyfile
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    depends_on:
+      db:
+        condition: service_started
+    ports:
+      - "80:80"
+      # Uncomment for TLS (see commented block in Caddyfile):
+      # - "443:443"
+      # - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+volumes:
+  pgdata:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local

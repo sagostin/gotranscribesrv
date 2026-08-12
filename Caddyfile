@@ -1,0 +1,79 @@
+# ============================================================
+# GoTranscribeSrv — Caddy load balancer (runs on the DB VM)
+# ============================================================
+# LAN/internal mode: plain HTTP on port 80. Clients call
+#   http://<db-vm-ip-or-lan-hostname>/...
+# and Caddy spreads requests across the Mac mini nodes.
+#
+# To add/remove a node: edit the `to` list below, then:
+#   docker compose -f docker-compose.db.yml exec caddy \
+#     caddy reload --config /etc/caddy/Caddyfile
+# (zero-downtime reload)
+# ============================================================
+
+# Global options: generous listener timeouts for long-running uploads /
+# transcription requests. (reverse_proxy itself has no response timeout.)
+{
+	servers {
+		timeouts {
+			read_body 5m
+			idle 10m
+		}
+	}
+}
+
+:80 {
+	reverse_proxy {
+		# ── Mac mini nodes ─────────────────────────────────────
+		# One entry per mini: <LAN IP>:<published server port>.
+		to 192.168.1.11:3000
+		to 192.168.1.12:3000
+		# to 192.168.1.13:3000
+
+		# least_conn routes new requests to the node with the fewest
+		# in-flight requests — best fit for long transcription jobs
+		# and long-lived WebSocket connections.
+		lb_policy least_conn
+
+		# Active health checks: Caddy polls /health on every node and
+		# automatically stops routing to a mini that is down, then
+		# re-adds it when it recovers (e.g. after a power outage).
+		health_uri /health
+		health_interval 10s
+		health_timeout 3s
+		health_status 2xx
+
+		# Mark a node down after this long of consecutive failures.
+		fail_duration 30s
+
+		# Transcription of large files can take a while — don't let
+		# the proxy give up early on a healthy-but-busy node.
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# ── Optional: TLS variant ──────────────────────────────────
+# Replace the `:80` site above with ONE of these if you later
+# want encryption:
+#
+# 1) Public domain + automatic Let's Encrypt (needs 80/443 open
+#    to the internet and DNS pointing at this VM):
+#
+# api.example.com {
+# 	reverse_proxy { ...same block as above... }
+# }
+#
+# 2) Internal CA (encrypted without a public domain — clients
+#    must trust Caddy's root cert, exportable from the caddy_data
+#    volume at pki/authorities/local/root.crt):
+#
+# https://transcribe.lan {
+# 	tls internal
+# 	reverse_proxy { ...same block as above... }
+# }

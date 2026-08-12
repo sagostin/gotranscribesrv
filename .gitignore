@@ -32,6 +32,9 @@ sample_test.mp3
 *.swo
 .DS_Store
 Thumbs.db
+
+# ── Deploy (launchd sidecar logs, local to each node) ──
+deploy/macos/logs/
 /sidecar-swift/.build/
 /sidecar-swift/Vendor/text-processing-rs/
 /sidecar-swift/Vendor/text-processing-rs/target/
