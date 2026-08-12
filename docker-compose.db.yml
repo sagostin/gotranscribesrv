@@ -63,6 +63,11 @@ services:
       # Uncomment for TLS (see commented block in Caddyfile):
       # - "443:443"
       # - "443:443/udp"
+    environment:
+      # Which upstream proxies may set X-Forwarded-For (see Caddyfile).
+      # Default private_ranges = trust any internal proxy; set to a single
+      # CIDR (e.g. your nginx IP/32) in .env to restrict.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-private_ranges}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

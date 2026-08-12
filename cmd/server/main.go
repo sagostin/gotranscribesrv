@@ -130,6 +130,9 @@ func main() {
 		AppName:     "GoTranscribeSrv",
 		BodyLimit:   100 * 1024 * 1024, // 100MB
 		ProxyHeader: "X-Forwarded-For", // Trust proxy headers from Caddy/nginx
+		// Extract the first valid IP from the XFF chain (e.g. "client, proxy"
+		// as appended by Caddy) instead of logging the whole chain string.
+		EnableIPValidation: true,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {

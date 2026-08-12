@@ -15,25 +15,33 @@
 # ============================================================
 
 # ── Client IP forwarding ───────────────────────────────────
-# reverse_proxy automatically sets X-Forwarded-For (client IP chain),
-# X-Forwarded-Proto and X-Forwarded-Host on every request. The Go server
-# already trusts X-Forwarded-For (Fiber ProxyHeader config), so logs and
-# rate limiting see real client IPs with NO extra config here.
+# reverse_proxy sets X-Forwarded-For (client IP chain), X-Forwarded-Proto
+# and X-Forwarded-Host on every request. The Go server already trusts
+# X-Forwarded-For (Fiber ProxyHeader config), so logs and rate limiting
+# see real client IPs.
 #
-# OPTIONAL — only if Caddy itself sits BEHIND another proxy (Cloudflare,
-# Tailscale serve, an upstream LB): without trusted_proxies, Caddy treats
-# that front proxy as the client and its X-Forwarded-For as untrusted.
-# Add these lines inside the `servers` block below (requires Caddy ≥ 2.7),
-# listing YOUR front proxy IPs/CIDRs:
+# IMPORTANT — Caddy sits BEHIND our outside nginx: by default Caddy
+# DISCARDS incoming X-Forwarded-* headers from any peer it doesn't trust
+# (anti-spoofing), replacing them with the connecting proxy's IP — so the
+# Go server would log the nginx/LB IP instead of the real client.
+# trusted_proxies below declares which upstream proxies may set them.
 #
-# 	trusted_proxies static 10.0.0.0/8 192.168.1.0/24
-# 	trusted_proxies_strict   # optional: additionally REQUIRE traffic via them
+# Default: private_ranges — trust ANY internal (RFC1918/loopback) proxy.
+# Safe here because Caddy is only reachable on the internal network; the
+# only internet-facing hop is the outside nginx.
+#
+# To RESTRICT which sources may forward client IPs (optional hardening),
+# set TRUSTED_PROXIES in .env to a single CIDR of your front proxy, e.g.:
+#   TRUSTED_PROXIES=10.40.50.104/32
+# (For multiple ranges, edit this line directly — an env var value with
+# spaces is substituted as a single Caddyfile token.)
+# Requires Caddy ≥ 2.7.
 
 # Global options: generous listener timeouts for long-running uploads /
 # transcription requests. (reverse_proxy itself has no response timeout.)
 {
 	servers {
-		# trusted_proxies ... goes here — see note above.
+		trusted_proxies static {$TRUSTED_PROXIES:private_ranges}
 		timeouts {
 			read_body 5m
 			idle 10m
