@@ -3,6 +3,8 @@
 bin/
 *.md
 docs/
-sidecar/
+deploy/
 .env
 .env.example
+.env.node.example
+.env.db.example

@@ -1,8 +1,8 @@
 # Setup Guide
 
-## Quick Start (Docker + Native Sidecars)
+## Quick Start (Docker + Native Sidecar)
 
-The fastest way to get running. Docker handles PostgreSQL and the Go API server. The Swift and Python sidecars run natively on the Mac for CoreML/ANE access.
+The fastest way to get running. Docker handles PostgreSQL and the Go API server. The Swift sidecar runs natively on the Mac for CoreML/ANE access.
 
 ```bash
 cp .env.example .env
@@ -14,13 +14,9 @@ docker compose logs -f server   # Watch for admin credentials
 
 # Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS)
 make swift-sidecar              # Builds & serves on :8101
-
-# Terminal 3 — Python sidecar (LLM only, optional)
-make setup                      # Download LLM models
-make sidecar                    # Serves on :8100
 ```
 
-This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar runs natively for CoreML/ANE access. The Python sidecar is optional — only needed for LLM transcript processing. On first boot, an admin user and API key are printed to the console.
+This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar runs natively for CoreML/ANE access. On first boot, an admin user and API key are printed to the console.
 
 ---
 
@@ -33,7 +29,6 @@ This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar run
 | macOS | 14 Sonoma+ | Apple Silicon required (M1/M2/M4) |
 | Go | 1.22+ | |
 | Swift | 6.0+ | Xcode 16+ (for FluidAudio / CoreML) |
-| Python | 3.11+ | Only needed for LLM processing |
 | PostgreSQL | 15+ | Local or remote |
 | Docker | 24+ | **Required for the Presidio PII analyzer** (runs as a container in `docker-compose.yml`). Skip if you set `ENABLE_PII=false`. |
 | RAM | 16 GB min | 24 GB recommended for full stack; see [16GB Mac Mini considerations](#16gb-mac-mini-considerations) |
@@ -82,9 +77,6 @@ JWT_REFRESH_TTL=168h
 SWIFT_SIDECAR_URL=http://localhost:8101
 SWIFT_SIDECAR_WS_URL=ws://localhost:8101
 
-# Python Sidecar (LLM only — MLX, optional)
-LLM_SIDECAR_URL=http://localhost:8100
-
 # Models (Swift sidecar auto-downloads on first run)
 ENABLE_DIARIZATION=true
 ENABLE_TTS=true
@@ -95,10 +87,6 @@ ENABLE_TTS=true
 # every request that doesn't pass an explicit per-request override.
 # Per-request opt-out: pass ?itn=false (WS) or form itn=false (REST).
 ENABLE_ITN=true
-
-# LLM Processing (opt-in, requires ~4.5 GB extra RAM + Python sidecar)
-ENABLE_LLM=false
-LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 # PII Redaction in Logs (Loki + stdout only — response bodies are untouched).
 # Requires the presidio-analyzer container (started automatically by `make up`).
@@ -198,29 +186,7 @@ WS partials log at debug level (they fire every ~3s); REST + WS final events log
 
 ---
 
-### 4. Start the Python Sidecar (LLM Only — Optional)
-
-The Python sidecar is only needed if you want on-device LLM transcript processing (summarization, action items, translation). Skip this step if you don't need LLM features.
-
-```bash
-# Pre-download LLM models
-make setup
-
-# Start sidecar
-make sidecar
-# 🚀 Starting Python sidecar (LLM only — MLX)
-# Serving on http://0.0.0.0:8100
-```
-
-Verify:
-```bash
-curl http://localhost:8100/health
-# {"status":"ok","models":{"llm":"loaded"}}
-```
-
----
-
-### 5. Start the Go Backend
+### 4. Start the Go Backend
 
 ```bash
 make run        # Starts Go backend (cmd/server/main.go)
@@ -249,7 +215,7 @@ curl http://localhost:3000/health
 
 ---
 
-### 5b. Presidio (PII Redaction) {#presidio-setup}
+### 5. Presidio (PII Redaction) {#presidio-setup}
 
 The PII redactor runs as a separate container. There are two setup paths; pick the one that matches how you're running the Go backend.
 
@@ -351,7 +317,7 @@ curl -s http://localhost:3000/api/v1/usage/summary \
 
 ### Services
 
-Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer. The Swift and Python sidecars run natively on the host for CoreML/ANE access.
+Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer. The Swift sidecar runs natively on the host for CoreML/ANE access.
 
 | Service | Image | Port | Notes |
 |---------|-------|------|-------|
@@ -359,21 +325,19 @@ Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer
 | `server` | Custom (Go, alpine) | 3000 | Waits for healthy db + presidio-analyzer |
 | `presidio-analyzer` | mcr.microsoft.com/presidio-analyzer:latest | 5002→3000 | spaCy `en_core_web_lg` + REST `/analyze`. Bundled with the analyzer; no model download on first start. `start_period: 60s` because spaCy cold-loads. |
 
-The Go server connects to the native sidecars via `host.docker.internal`:
+The Go server connects to the native Swift sidecar via `host.docker.internal`:
 - Swift sidecar: `http://host.docker.internal:8101`
-- Python sidecar: `http://host.docker.internal:8100`
 
 The Presidio container is on the same docker network as `server`, so it uses `http://presidio-analyzer:3000` internally (no `host.docker.internal` needed). The `5002` host port is exposed only so you can `curl http://localhost:5002/health` for sanity-checking.
 
 ### Commands
 
 ```bash
-# Start Postgres + Go server (run sidecars separately)
+# Start Postgres + Go server (run the sidecar separately)
 make up
 
-# Start sidecars in separate terminals:
+# Start the Swift sidecar in a separate terminal:
 make swift-sidecar       # Terminal 2 — ASR, VAD, diarization, TTS
-make sidecar             # Terminal 3 — LLM only (optional)
 
 docker compose logs -f server   # Watch Go server logs (admin creds here)
 docker compose down              # Stop Docker services
@@ -385,8 +349,10 @@ docker compose down -v           # Stop + delete volumes (⚠️ data loss)
 ## Multi-Node Deployment
 
 There are two approaches for multi-node deployments:
-- **Co-located** — Go + Swift + Python on every Mac Mini (simpler, all-in-one)
+- **Co-located** — Go + Swift on every Mac Mini (simpler, all-in-one)
 - **Split** — Go API on normal server infra, Macs as pure inference nodes (recommended)
+
+For a complete production walkthrough of the co-located approach (compose files, headless boot, shared DB VM with Caddy), see [docs/production.md](production.md).
 
 ### Option A: Co-Located (All-in-One on Every Mac)
 
@@ -417,7 +383,7 @@ Run the Go API gateway on your normal server infrastructure and keep Macs as ded
 
 #### 1. Mac Minis (Inference Only)
 
-Each Mac runs the Swift sidecar (and optionally the Python sidecar for LLM):
+Each Mac runs the Swift sidecar:
 
 ```bash
 git clone https://github.com/yourorg/gotranscribesrv.git
@@ -425,10 +391,6 @@ cd gotranscribesrv
 
 # Start Swift sidecar (models auto-download on first run)
 make swift-sidecar       # ASR, VAD, diarization, TTS on :8101
-
-# Optional: Start Python sidecar for LLM
-make setup               # Download LLM models
-make sidecar             # LLM processing on :8100
 ```
 
 Verify each Mac is serving:
@@ -476,7 +438,6 @@ Run the Go server anywhere — Docker, K8s, VPS, bare metal:
 # .env on the Go server
 SWIFT_SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
 SWIFT_SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
-LLM_SIDECAR_URL=http://inference.internal:80         # Optional
 # Or with TLS:
 # SWIFT_SIDECAR_URL=https://inference.internal:443
 # SWIFT_SIDECAR_WS_URL=wss://inference.internal:443
@@ -493,9 +454,9 @@ make run   # or: docker compose up server db
 #### Architecture Diagram
 
 ```
-  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (Swift :8101, Py :8100)
-              on VPS/K8s         ↗   → Mac Mini 2 (Swift :8101, Py :8100)
-                           LB  ↗    → Mac Mini 3 (Swift :8101, Py :8100)
+  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (Swift :8101)
+              on VPS/K8s         ↗   → Mac Mini 2 (Swift :8101)
+                           LB  ↗    → Mac Mini 3 (Swift :8101)
                     ↓
               PostgreSQL
 ```
@@ -518,20 +479,20 @@ lint:             # golangci-lint
 swift-sidecar:    # Build & run Swift sidecar on :8101
 swift-build:      # Build Swift sidecar in release mode
 
-# Python sidecar (LLM only — MLX)
-sidecar:          # Start Python sidecar on :8100
-venv:             # Create Python 3.11 venv + install deps
-setup-models:     # Pre-download LLM models
-setup:            # Create venv + download LLM models
-
 # Docker (Postgres + Go server)
 up:               # docker compose up -d --build
 down:             # docker compose down
 logs:             # docker compose logs -f
 rebuild:          # docker compose up -d --build
 
+# Production (multi-node — see docs/production.md)
+node-up:          # Mac mini node: server + Presidio (docker-compose.node.yml)
+node-migrate:     # One-shot DB migration from a node
+db-up:            # DB VM: Postgres + Caddy (docker-compose.db.yml)
+caddy-reload:     # Zero-downtime Caddy reload after Caddyfile edits
+
 # Utilities
-clean:            # Remove bin/, .venv, sidecar-swift/.build
+clean:            # Remove bin/, sidecar-swift/.build
 tidy:             # go mod tidy
 ```
 
@@ -556,8 +517,7 @@ A single 16 GB Mac Mini M4 can run GoTranscribeSrv, but with important constrain
 │  Go runtime                   ~0.1 GB           │
 │  Audio buffers               ~0.3 GB           │
 │  ─────────────────────────────────              │
-│  Free (16GB, no LLM)          ~9.95 GB         │
-│  Free (16GB, with LLM)        ~5.45 GB         │
+│  Free (16GB)                  ~9.95 GB         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -568,15 +528,13 @@ A single 16 GB Mac Mini M4 can run GoTranscribeSrv, but with important constrain
 | ASR only (0.6B Parakeet) | ✅ Works | 3–5 concurrent streams |
 | ASR + VAD + Diarization | ✅ Works | 3–5 concurrent streams |
 | ASR + TTS + Diarization | ✅ Works | Performance may degrade with TTS under load |
-| PostgreSQL co-located | ✅ Works | Only if LLM is disabled |
-| LLM (Llama 8B Q4) | ❌ OOM | Requires ~4.5 GB — too much for 16 GB with other services |
+| PostgreSQL co-located | ✅ Works | |
 
 ### Critical Constraints
 
-1. **LLM must be disabled** (`ENABLE_LLM=false`). The Llama 8B Q4 model alone requires ~4.5 GB, which is incompatible with 16 GB when running the full stack.
-2. **No co-located PostgreSQL in production** — offload the database to an external PostgreSQL host (RDS, Supabase, or a dedicated $5/mo VPS) to conserve ~1 GB.
-3. **Reduce concurrent streams** — expect 3–5 concurrent streams instead of 5–8. Monitor the node; if `process_time / audio_duration` exceeds 0.5, the node is saturated.
-4. **No headroom for spikes** — 16 GB has minimal free memory (~10 GB). A memory spike (e.g., multiple large audio files queued) can trigger OOM kills. Add a swap file as a safety net:
+1. **No co-located PostgreSQL in production** — offload the database to an external PostgreSQL host (RDS, Supabase, or a dedicated $5/mo VPS) to conserve ~1 GB.
+2. **Reduce concurrent streams** — expect 3–5 concurrent streams instead of 5–8. Monitor the node; if `process_time / audio_duration` exceeds 0.5, the node is saturated.
+3. **No headroom for spikes** — 16 GB has minimal free memory (~10 GB). A memory spike (e.g., multiple large audio files queued) can trigger OOM kills. Add a swap file as a safety net:
 
    ```bash
    # Create a 4 GB swap file (macOS)
@@ -587,7 +545,6 @@ A single 16 GB Mac Mini M4 can run GoTranscribeSrv, but with important constrain
 
 A 16 GB Mac Mini M4 is acceptable if:
 
-- [ ] `ENABLE_LLM=false` (LLM sidecar not running)
 - [ ] PostgreSQL is hosted externally (not co-located)
 - [ ] Expected concurrent load is ≤5 streams
 - [ ] Audio file sizes are modest (<30 min per file; streaming is fine)
@@ -597,9 +554,6 @@ A 16 GB Mac Mini M4 is acceptable if:
 ### Recommended `.env` for 16 GB
 
 ```bash
-# Disable LLM — critical for 16 GB
-ENABLE_LLM=false
-
 # External PostgreSQL (not on this node)
 DATABASE_URL=postgres://user:pass@your-external-pg-host:5432/transcribesrv?sslmode=disable
 
@@ -615,11 +569,10 @@ ENABLE_DIARIZATION=true
 |----------|-------------------|
 | Dev/staging, solo | 16 GB — cost-effective |
 | Production, ASR + TTS only | 16 GB — acceptable with external DB |
-| Production, any LLM features | 24 GB minimum |
-| Production, full stack | 32 GB |
+| Production, full stack | 24–32 GB |
 | 5+ concurrent streams expected | 24 GB minimum |
 
-> **TL;DR:** A single 16 GB Mac Mini M4 works for ASR + TTS + diarization with an external database. It does NOT work with LLM. If you need LLM features now or soon, order the 24 GB — the ~$200 premium is worth the headroom and avoids a second deployment cycle.
+> **TL;DR:** A single 16 GB Mac Mini M4 works for ASR + TTS + diarization with an external database.
 
 ---
 
@@ -635,7 +588,6 @@ ENABLE_DIARIZATION=true
 | Port 3000 in use | Change `PORT` in `.env` |
 | PostgreSQL connection refused | Check `brew services list` for postgres status |
 | Sidecar health check fails | Ensure Swift sidecar is running on port 8101 |
-| Out of memory on 16 GB | Disable LLM (`ENABLE_LLM=false`) or use a smaller ASR model |
+| Out of memory on 16 GB | Move PostgreSQL to an external host, reduce concurrent streams |
 | Admin credentials lost | Delete all users from DB and restart — seed runs again |
-| Python sidecar not needed | Python is only required for LLM processing — skip it if you only need ASR/TTS |
 | `PocketTTS model not initialized` | Check Swift sidecar logs — TTS model may have failed to download |

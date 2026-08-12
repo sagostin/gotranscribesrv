@@ -95,11 +95,10 @@ func main() {
 	// Start periodic cleanup of expired blacklisted tokens
 	go middleware.CleanupBlacklist(db.DB)
 
-	// Create dual-sidecar client:
-	// Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE) + Python sidecar (LLM — MLX)
+	// Create sidecar client:
+	// Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE)
 	sc := sidecar.NewClient(
 		cfg.SwiftSidecarURL, cfg.SwiftSidecarWSURL,
-		cfg.LLMSidecarURL,
 	)
 
 	// PII redactor — wraps the Presidio analyzer service and applies
@@ -180,7 +179,6 @@ func main() {
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
-	processHandler := handlers.NewProcessHandler(sc, redactor, logManager)
 	watsonHandler := handlers.NewWatsonHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
 
 	// === Health ===
@@ -290,9 +288,6 @@ func main() {
 	authed.Get("/api/v1/voices/:id", voiceHandler.Get)
 	authed.Delete("/api/v1/voices/:id", voiceHandler.Delete)
 
-	// LLM Transcript Processing
-	authed.Post("/api/v1/process", processHandler.Process)
-	authed.Get("/api/v1/process/tasks", processHandler.ListTasks)
 	// Usage
 	authed.Get("/api/v1/usage/summary", usageHandler.Summary)
 	authed.Get("/api/v1/usage/history", usageHandler.History)

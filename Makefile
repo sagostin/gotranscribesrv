@@ -1,14 +1,10 @@
-.PHONY: run build test migrate lint sidecar swift-sidecar swift-test swift-build \
-        itn-build itn-vendor itn-clean clean setup-models setup-voices venv \
+.PHONY: run build test migrate lint swift-sidecar swift-test swift-build \
+        itn-build itn-vendor itn-clean clean \
         up down logs rebuild \
         node-up node-down node-logs node-migrate db-up db-down db-logs caddy-reload \
         presidio-up presidio-down presidio-logs presidio-pull presidio-shell
 
 # ---------- Config ----------
-VENV_DIR  := sidecar/.venv
-VENV_PY   := $(VENV_DIR)/bin/python3
-VENV_PIP  := $(VENV_DIR)/bin/pip
-
 # Presidio analyzer (PII redaction for logs). Pulled as a Docker image and
 # started alongside the rest of the stack via `make up`. These targets exist
 # for ad-hoc inspection / when running the Go server outside of compose.
@@ -104,42 +100,13 @@ itn-build:
 itn-clean:
 	rm -rf $(ITN_VENDOR_DIR)/target
 
-# ---------- Python venv ----------
-venv: $(VENV_PY)
-
-PYTHON    := $(shell command -v python3.11 || echo python3)
-
-$(VENV_PY): sidecar/requirements.txt
-	$(PYTHON) -m venv $(VENV_DIR)
-	$(VENV_PIP) install --upgrade pip
-	$(VENV_PIP) install -r sidecar/requirements.txt
-	@touch $(VENV_PY)
-
-# ---------- Python sidecar (LLM only — MLX) ----------
-sidecar: venv
-	@echo ""
-	@echo "  🚀 Starting Python sidecar (LLM only — MLX)"
-	@echo "  ℹ  Listening on http://localhost:8100"
-	@echo ""
-	cd sidecar && $(abspath $(VENV_PY)) main.py
-
-# ---------- Setup scripts ----------
-setup-models: venv
-	cd sidecar && $(abspath $(VENV_PY)) ../scripts/download_models.py
-
-setup-voices:
-	@echo "Voices now managed by Swift sidecar (PocketTTS)"
-
-setup: venv setup-models
-	@echo "✅ LLM models ready. Swift sidecar downloads models on first run."
-
 # ---------- Docker (Postgres + Go server) ----------
 up:
 	docker compose up -d --build
 	@echo ""
 	@echo "  ✅ Postgres + Go server running"
 	@echo "  ℹ  API at http://localhost:3000"
-	@echo "  ℹ  Run 'make swift-sidecar' and 'make sidecar' in other terminals"
+	@echo "  ℹ  Run 'make swift-sidecar' in another terminal"
 	@echo ""
 
 down:
@@ -198,7 +165,7 @@ caddy-reload:
 
 # ---------- Utilities ----------
 clean:
-	rm -rf bin/ $(VENV_DIR) sidecar-swift/.build
+	rm -rf bin/ sidecar-swift/.build
 	go clean
 
 tidy:

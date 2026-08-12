@@ -63,12 +63,6 @@ func (lm *LogManager) LoadTemplates() {
 		"VoiceCloneWriteError": "Voice clone failed to write embedding: %v",
 		"VoiceCloneDBError":    "Voice clone DB record error: %v",
 
-		// ── LLM processing ──────────────────────────────────────
-		"LLMProcessStarted":   "LLM processing started",
-		"LLMProcessCompleted": "LLM processing completed",
-		"LLMProcessFailed":    "LLM processing failed: %v",
-		"LLMTasksListFailed":  "LLM tasks list failed: %v",
-
 		// ── PII redaction ─────────────────────────────────────────
 		// Emitted when the Presidio analyzer is unreachable, errors,
 		// or returns an invalid response. The associated log field

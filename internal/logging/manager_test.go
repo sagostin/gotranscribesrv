@@ -36,7 +36,6 @@ func TestNewLogManagerSeedsTemplates(t *testing.T) {
 		"WSASRSessionStarted", "WSASRSessionEnded",
 		"TTSCompleted", "TTSFailed",
 		"VoiceCloneCompleted", "VoiceCloneFailed",
-		"LLMProcessCompleted", "LLMProcessFailed",
 		"GenericError",
 	}
 	for _, name := range expected {

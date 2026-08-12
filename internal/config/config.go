@@ -24,15 +24,11 @@ type Config struct {
 	SwiftSidecarURL   string
 	SwiftSidecarWSURL string
 
-	// Python Sidecar (LLM only — MLX)
-	LLMSidecarURL string
-
 	// Models
 	ASRModel          string
 	ASRRuntime        string
 	EnableDiarization bool
 	EnableTTS         bool
-	EnableLLM         bool
 
 	// ITN (Inverse Text Normalization) — spoken-form ASR -> written form
 	// ("one two five O" -> "1250"). Applied in the Swift sidecar. Default on.
@@ -92,13 +88,10 @@ func Load() *Config {
 		SwiftSidecarURL:   envOrDefault("SWIFT_SIDECAR_URL", "http://127.0.0.1:8101"),
 		SwiftSidecarWSURL: envOrDefault("SWIFT_SIDECAR_WS_URL", "ws://127.0.0.1:8101"),
 
-		LLMSidecarURL: envOrDefault("LLM_SIDECAR_URL", "http://localhost:8100"),
-
 		ASRModel:          envOrDefault("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3"),
 		ASRRuntime:        envOrDefault("ASR_RUNTIME", "mlx"),
 		EnableDiarization: envOrDefault("ENABLE_DIARIZATION", "true") == "true",
 		EnableTTS:         envOrDefault("ENABLE_TTS", "true") == "true",
-		EnableLLM:         envOrDefault("ENABLE_LLM", "false") == "true",
 		EnableITN:         envOrDefault("ENABLE_ITN", "true") == "true",
 
 		RateLimitFree:       envOrDefaultInt("RATE_LIMIT_FREE", 20),

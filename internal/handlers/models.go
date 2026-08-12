@@ -45,9 +45,6 @@ func supportedModels() []Model {
 
 		// ── TTS — real on-device model ──────────────────────────────
 		{ID: "pocket-tts-1", Object: "model", Created: 1735603200, OwnedBy: "kyutai"},
-
-		// ── LLM — real on-device model (Python sidecar / MLX) ───────
-		{ID: "Meta-Llama-3.1-8B-Instruct-4bit", Object: "model", Created: 1725148800, OwnedBy: "meta"},
 	}
 }
 

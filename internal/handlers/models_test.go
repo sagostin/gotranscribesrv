@@ -71,7 +71,6 @@ func TestListModels_ContainsExpectedIDs(t *testing.T) {
 		"parakeet-tdt-v3-coreml",
 		"tts-1",
 		"pocket-tts-1",
-		"Meta-Llama-3.1-8B-Instruct-4bit",
 	}
 
 	have := make(map[string]bool, len(list.Data))

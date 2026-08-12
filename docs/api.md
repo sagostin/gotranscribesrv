@@ -25,8 +25,7 @@ Check server and sidecar connectivity. **No authentication required.**
     "asr": "parakeet-tdt-v3",
     "vad": "silero-vad",
     "diarizer": "sortformer",
-    "tts": "pockettts",
-    "llm": "llama-3.1-8b-q4"
+    "tts": "pockettts"
   }
 }
 ```
@@ -204,8 +203,7 @@ Lists the models this server advertises, following the OpenAI `/v1/models` schem
     { "id": "tts-1", "object": "model", "created": 1696280400, "owned_by": "openai" },
     { "id": "tts-1-hd", "object": "model", "created": 1696280400, "owned_by": "openai" },
     { "id": "gpt-4o-mini-tts", "object": "model", "created": 1736380800, "owned_by": "openai" },
-    { "id": "pocket-tts-1", "object": "model", "created": 1735603200, "owned_by": "kyutai" },
-    { "id": "Meta-Llama-3.1-8B-Instruct-4bit", "object": "model", "created": 1725148800, "owned_by": "meta" }
+    { "id": "pocket-tts-1", "object": "model", "created": 1735603200, "owned_by": "kyutai" }
   ]
 }
 ```
@@ -873,76 +871,6 @@ Delete a custom voice and remove the stored embedding.
 
 ---
 
-## LLM Transcript Processing
-
-### POST `/api/v1/process`
-
-Run LLM processing on transcript text. Requires the Python sidecar (mlx-lm).
-
-**Request:**
-```json
-{
-  "transcript_text": "Hello, how are you? I'm doing well, thanks for asking...",
-  "task": "summarize",
-  "max_tokens": 1024,
-  "temperature": 0.3
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `transcript_text` | string | yes | The transcript text to process |
-| `task` | string | no | Processing task (default: `"summarize"`) |
-| `language` | string | conditional | Required when `task` is `"translate"` |
-| `prompt` | string | conditional | Required when `task` is `"qa"` or `"custom"` |
-| `max_tokens` | int | no | Max tokens to generate (default: 1024) |
-| `temperature` | number | no | Sampling temperature (default: 0.3) |
-
-**Available tasks:**
-
-| Task | Description |
-|------|-------------|
-| `summarize` | Concise summary of the transcript |
-| `action_items` | Extract action items and next steps |
-| `translate` | Translate to target `language` |
-| `qa` | Answer a question about the transcript (`prompt` required) |
-| `custom` | Run a custom prompt against the transcript (`prompt` required) |
-
-**Response (200):**
-```json
-{
-  "result": "The discussion covered project timelines and resource allocation...",
-  "task": "summarize",
-  "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-  "processing_time_ms": 2340,
-  "tokens_generated": 156
-}
-```
-
-**Errors:** `422` missing required fields, `502` LLM sidecar unavailable
-
----
-
-### GET `/api/v1/process/tasks`
-
-List available LLM processing tasks.
-
-**Response (200):**
-```json
-{
-  "tasks": ["summarize", "action_items", "translate", "qa", "custom"],
-  "descriptions": {
-    "summarize": "Generate a concise summary of the transcript",
-    "action_items": "Extract action items and next steps",
-    "translate": "Translate the transcript to a target language",
-    "qa": "Answer a question about the transcript",
-    "custom": "Run a custom prompt against the transcript"
-  }
-}
-```
-
----
-
 ## Speaker Diarization
 
 Speaker diarization is available as part of the ASR endpoint by setting `diarize=true`.
@@ -1320,7 +1248,7 @@ X-RateLimit-Reset: 1710720000
 
 ## PII Redaction
 
-PII entities in the `transcript` / `result` / `prompt` log fields are replaced with `<TYPE>` placeholders before the structured log payload is emitted to stdout or shipped to Loki. The HTTP response body and the LLM call input/output are **never** modified — only what engineers see in Grafana / `kubectl logs`.
+PII entities in the `transcript` / `prompt` log fields are replaced with `<TYPE>` placeholders before the structured log payload is emitted to stdout or shipped to Loki. The HTTP response body is **never** modified — only what engineers see in Grafana / `kubectl logs`.
 
 ### What's redacted
 
@@ -1330,7 +1258,6 @@ PII entities in the `transcript` / `result` / `prompt` log fields are replaced w
 | `POST /v1/audio/transcriptions` | `WHISPER_COMPLETED` | `transcript` |
 | `POST /v1/audio/transcriptions` | verbose request log | `prompt` |
 | `POST /v1/recognize` | `WATSON_RECOGNIZE_COMPLETED` | `transcript` |
-| `POST /api/v1/process` | `LLM_PROCESS_COMPLETED` | `result` |
 
 Streaming WebSocket endpoints (`/ws/asr`, `/v1/listen`, `/v1/recognize` WS) currently log only audio bytes / duration / process time at session end — no transcript text — so redaction is a no-op there. If transcript logging is added to those paths in the future, it must go through the same redactor.
 
@@ -1413,7 +1340,7 @@ Every request that hits the API server produces structured log events. The full 
 | Event | Type | Source | When |
 |---|---|---|---|
 | `REQUEST_RECEIVED` | `*_REQUEST_RECEIVED` | handlers | Every speech/voice/process request arrives |
-| `REQUEST_COMPLETED` | `*_COMPLETED` | handlers | Every successful ASR / TTS / voice / LLM response |
+| `REQUEST_COMPLETED` | `*_COMPLETED` | handlers | Every successful ASR / TTS / voice response |
 | `REQUEST_FAILED` | `REQUEST_FAILED` | middleware | Every 4xx/5xx response across all authed endpoints |
 | `AUTH_FAILED` | `AUTH_FAILED` | middleware | Every failed authentication attempt (401) |
 | `PII_REDACTOR_ERROR` | `PIIRedactorError` | handlers | PII analyzer unreachable / errored (fail-closed trigger) |

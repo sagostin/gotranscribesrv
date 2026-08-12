@@ -15,14 +15,11 @@ __pycache__/
 *.pyo
 .venv/
 *.egg-info/
-sidecar/LuxTTS/
 
 # ── ML Models (cached via HuggingFace) ─────────
 *.pt
 *.onnx
 *.nemo
-sidecar/voices/*.wav
-sidecar/voices/*.mp3
 sample_test.mp3
 
 # ── IDE / OS ────────────────────────────────────

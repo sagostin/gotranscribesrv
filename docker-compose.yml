@@ -5,10 +5,8 @@
 # Swift + Python sidecars run natively on the host for CoreML/ANE access.
 #
 # Usage:
-#   make setup           # Download models, create venv
 #   make up              # Start Postgres + Go server
 #   make swift-sidecar   # Start native Swift sidecar (separate terminal)
-#   make sidecar         # Start native Python sidecar (separate terminal)
 # ============================================================
 
 # ── Logging defaults ──────────────────────────────────────
@@ -63,8 +61,6 @@ services:
       # Swift sidecar runs natively on the host for CoreML/ANE acceleration
       SWIFT_SIDECAR_URL: ${SWIFT_SIDECAR_URL:-http://host.docker.internal:8101}
       SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
-      # Python sidecar (LLM only) runs natively on the host
-      LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8100}
       # PII redaction — Presidio analyzer runs in the compose stack.
       # To centralize, override PRESIDIO_ANALYZER_URL with an external endpoint.
       ENABLE_PII: ${ENABLE_PII:-true}

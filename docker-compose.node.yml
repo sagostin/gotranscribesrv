@@ -54,8 +54,6 @@ services:
       # host.docker.internal works on Docker Desktop and OrbStack.
       SWIFT_SIDECAR_URL: ${SWIFT_SIDECAR_URL:-http://host.docker.internal:8101}
       SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
-      # Python sidecar (LLM only) runs natively on THIS host (launchd).
-      LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8100}
       # PII redaction — Presidio runs per-node (below) so unredacted
       # transcript text never leaves this machine.
       ENABLE_PII: ${ENABLE_PII:-true}

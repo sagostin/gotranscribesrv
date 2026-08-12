@@ -58,7 +58,6 @@ If the channel is full, a single `slog.Warn("log channel full, dropping log", ..
 | TTS | `TTS_REQUEST_RECEIVED` / `TTS_COMPLETED` / `TTS_FAILED` / `TTS_VOICE_LOAD_FAILED` | voice, voice_id, text_length, output_bytes, output_duration_ms, synth_time_ms |
 | Voice clone | `VOICE_CLONE_STARTED` / `_COMPLETED` / `_FAILED` / `_DIR_ERROR` / `_WRITE_ERROR` / `_DB_ERROR` | user_id, name, file_size, embedding_bytes, audio_duration_ms, clone_time_ms |
 | Voice list / delete | `VOICE_LIST_DB_ERROR` / `VOICE_DELETE_DB_ERROR` | user_id, voice_id |
-| LLM process | `LLM_PROCESS_STARTED` / `_COMPLETED` / `_FAILED` | task, input_length, output_length, tokens_generated, process_time_ms, **result (PII-redacted)**, pii_redacted |
 | Aggregated 4xx/5xx | `REQUEST_FAILED` | endpoint, status, error_code, method, path, ip, user_agent, process_ms, user_id, api_key_id |
 | Failed auth | `AUTH_FAILED` | endpoint, method, auth_method (`jwt`/`api_key`/`basic`/`jwt_query`), reason (`expired`/`bad_signature`/`blacklisted`/`unknown_or_revoked`/etc.), ip, user_agent, request_id — **never logs the raw token/key** |
 | PII analyzer fault | `PII_REDACTOR_ERROR` | endpoint, text_len, request_id — emitted when Presidio is unreachable; the associated `*_COMPLETED` event has `transcript: "<REDACTED-ERROR>"` |

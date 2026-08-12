@@ -2,7 +2,7 @@
 
 **On-device speech services powered by CoreML/Apple Neural Engine on Apple Silicon.**
 
-A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (speech-to-text), TTS (text-to-speech), speaker diarization, and VAD — all running natively on Mac Mini hardware via CoreML and the Apple Neural Engine. An optional Python sidecar handles on-device LLM processing. No cloud APIs, no GPU rental, full data privacy.
+A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (speech-to-text), TTS (text-to-speech), speaker diarization, and VAD — all running natively on Mac Mini hardware via CoreML and the Apple Neural Engine. No cloud APIs, no GPU rental, full data privacy.
 
 ---
 
@@ -17,13 +17,12 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS with per-user stored voice cloning + 17 built-in system voices, 24 kHz output |
-| **LLM Transcript Processing** | *Opt-in, ~4.5 GB RAM overhead* — summarization, action items, translation, Q&A via Llama 3.1 8B. Most deployments leave this off. |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
 | **Rate Limiting** | Per-user, in-memory sliding window |
 | **Inverse Text Normalization (ITN)** | Optional spoken→written form (e.g. "five dollars" → "$5.00"); `ENABLE_ITN=true`; per-request override via `?itn=false` |
 | **Admin / Enterprise API** | User management, customer API key issuance, global usage rollup (`/api/v1/admin/*`, enterprise tier) |
-| **Prometheus Metrics** | `/metrics` endpoint with HTTP, ASR, TTS, LLM, sidecar, auth, and rate-limit collectors |
+| **Prometheus Metrics** | `/metrics` endpoint with HTTP, ASR, TTS, sidecar, auth, and rate-limit collectors |
 | **PII Redaction in Logs** | Replaces PII entities in `transcript` / `result` / `prompt` log fields (Loki + stdout) via [Microsoft Presidio](https://microsoft.github.io/presidio/). Response bodies are never modified. Fail-closed. |
 | **Horizontal Scaling** | Add Mac Minis behind a load balancer; stateless nodes, shared PostgreSQL |
 
@@ -38,11 +37,10 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
                      └────────┬─────────┘
                ┌──────────────┼──────────────┐
                ▼              ▼              ▼
-         ┌──────────┐  ┌──────────┐  ┌──────────┐
-         │Mac Mini 1│  │Mac Mini 2│  │Mac Mini 3│
-         │Go+Swift  │  │Go+Swift  │  │Go+Swift  │
-         │  (+Py)   │  │  (+Py)   │  │  (+Py)   │
-         └────┬─────┘  └────┬─────┘  └────┬─────┘
+          ┌──────────┐  ┌──────────┐  ┌──────────┐
+          │Mac Mini 1│  │Mac Mini 2│  │Mac Mini 3│
+          │Go+Swift  │  │Go+Swift  │  │Go+Swift  │
+          └────┬─────┘  └────┬─────┘  └────┬─────┘
               └──────────────┼──────────────┘
                              ▼
                      ┌──────────────────┐
@@ -54,11 +52,10 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 Each node runs:
 - **Go (Fiber)** — API gateway, auth, WebSocket handling, usage tracking
 - **Swift (Vapor + FluidAudio)** — Audio AI inference: ASR (Parakeet TDT v3), VAD (Silero), speaker diarization (Sortformer), TTS (PocketTTS) — all via CoreML/ANE
-- **Python (FastAPI)** *(optional, off by default)* — LLM transcript processing (Llama 3.1 8B via mlx-lm). Off in most deployments.
 - **Presidio Analyzer** *(optional, on by default)* — PII detection for log redaction (mcr.microsoft.com/presidio-analyzer). See "PII Redaction" below.
 - Communication: HTTP/WebSocket on localhost between all components
 
-**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` / `LLM_SIDECAR_URL` env vars — no code changes needed.
+**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` env vars — no code changes needed.
 
 **Multi-node production (Mac mini fleet + separate DB/Caddy VM):** Ready-made compose files — `docker-compose.node.yml` (server + Presidio per mini), `docker-compose.db.yml` (Postgres + Caddy load balancer), a `Caddyfile` with health-checked least-connection balancing, and `deploy/macos/` for headless auto-boot after power outages. See [docs/production.md](docs/production.md).
 
@@ -68,7 +65,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed design.
 
 ## PII Redaction in Logs
 
-The `transcript` field on `ASR_COMPLETED` / `WHISPER_COMPLETED` / `WATSON_RECOGNIZE_COMPLETED`, the `result` field on `LLM_PROCESS_COMPLETED`, and the `prompt` attribute on the Whisper verbose-request log are all run through a Microsoft Presidio analyzer before being placed into the structured log pipeline. PII entities (names, emails, phone numbers, credit cards, SSNs, IPs, IBANs, URLs, dates, locations) are replaced with `<TYPE>` placeholders. The HTTP response body and the LLM call input/output are NEVER modified — only what shows up in Loki / stdout.
+The `transcript` field on `ASR_COMPLETED` / `WHISPER_COMPLETED` / `WATSON_RECOGNIZE_COMPLETED` and the `prompt` attribute on the Whisper verbose-request log are all run through a Microsoft Presidio analyzer before being placed into the structured log pipeline. PII entities (names, emails, phone numbers, credit cards, SSNs, IPs, IBANs, URLs, dates, locations) are replaced with `<TYPE>` placeholders. The HTTP response body is NEVER modified — only what shows up in Loki / stdout.
 
 **Default behavior:** ON. Set `ENABLE_PII=false` in `.env` to disable.
 
@@ -86,9 +83,9 @@ See [docs/api.md → PII Redaction](docs/api.md#pii-redaction) for the full conf
 
 ## Quick Start
 
-### Option A: Docker + Native Sidecars (Recommended)
+### Option A: Docker + Native Sidecar (Recommended)
 
-Docker runs PostgreSQL and the Go API server. The Swift and Python sidecars run natively on the Mac for CoreML/ANE access.
+Docker runs PostgreSQL and the Go API server. The Swift sidecar runs natively on the Mac for CoreML/ANE access.
 
 ```bash
 git clone https://github.com/sagostin/gotranscribesrv.git
@@ -101,10 +98,6 @@ make up
 
 # Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS) — required
 make swift-sidecar       # Builds & serves on :8101
-
-# Terminal 3 — Python sidecar (LLM only) — OPTIONAL, skip for pure ASR/TTS
-#   See "Optional Components" below. Adds ~4.5 GB RAM.
-make sidecar             # Serves on :8100
 ```
 
 > **Want ITN (spoken→written form conversion, on by default)?** You must build the Rust static lib and rebuild the Swift sidecar **before** `make swift-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default) for the 3-step sequence.
@@ -119,7 +112,7 @@ On first boot, an admin user is automatically created with a **random password**
 
 ### Option B: Fully Manual Setup
 
-**Prerequisites:** macOS 14+ (Apple Silicon M1/M2/M4), Go 1.22+, Swift 6.0+ (Xcode 16+), Python 3.11+ (for LLM only), PostgreSQL 15+
+**Prerequisites:** macOS 14+ (Apple Silicon M1/M2/M4), Go 1.22+, Swift 6.0+ (Xcode 16+), PostgreSQL 15+
 
 ```bash
 git clone https://github.com/sagostin/gotranscribesrv.git
@@ -128,10 +121,6 @@ cp .env.example .env     # Edit DB credentials, JWT secret
 
 # Start Swift sidecar (downloads models on first run)
 make swift-sidecar &     # Loads CoreML models, serves on :8101
-
-# OPTIONAL: Python sidecar for LLM transcript processing (skip for pure ASR/TTS)
-make setup               # Downloads LLM models (~5 GB)
-make sidecar &           # Serves on :8100
 
 # Start Go backend
 make run                 # Starts Go backend, runs migrations, seeds admin (:3000)
@@ -169,10 +158,9 @@ curl -X POST http://localhost:3000/api/v1/tts \
 
 ## Optional Components
 
-The core stack — ASR, VAD, diarization, TTS, auth, usage tracking — runs out of the box. Two optional components add capability at the cost of extra build steps and/or memory:
+The core stack — ASR, VAD, diarization, TTS, auth, usage tracking — runs out of the box. One optional component adds capability at the cost of extra build steps:
 
 - **ITN** — spoken→written form conversion. *On by default* in `.env`, but requires a one-time Rust build before the Swift sidecar will link it. Skip the build and the sidecar still runs; ITN is just a no-op.
-- **LLM** — transcript post-processing (summarize, action items, Q&A). *Off by default*; opt-in via `ENABLE_LLM=true` + Python sidecar. Adds ~4.5 GB RAM. Most deployments leave this off.
 
 ### Inverse Text Normalization (ITN) — *on by default*
 
@@ -215,38 +203,9 @@ make swift-sidecar
 
 > **If `make itn-build` fails or you skip it:** The Swift sidecar still builds and runs, but ITN is silently disabled — `ENABLE_ITN=true` becomes a no-op. The sidecar logs a warning at startup.
 
-### LLM Transcript Processing — *opt-in, adds ~4.5 GB RAM*
+### LLM Transcript Processing — *removed*
 
-Powers `POST /api/v1/process` (summarize, action items, translation, Q&A, custom prompts) via Llama 3.1 8B (4-bit) on MLX.
-
-> **Most deployments do not need this.** It exists for transcript post-processing. If your use case is pure ASR/TTS, **leave `ENABLE_LLM=false` and skip the Python sidecar entirely** — that saves ~4.5 GB of unified memory on a 16 GB Mac Mini and avoids the ~5 GB model download.
-
-**To enable:**
-```bash
-# 1. Edit .env:
-ENABLE_LLM=true
-LLM_MODEL=mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
-
-# 2. Download the model (~5 GB, one-time):
-make setup
-
-# 3. Start the Python sidecar:
-make sidecar        # Serves on :8100
-
-# 4. Verify the /api/v1/process/tasks endpoint returns the task list
-curl -H "X-API-Key: gtx_live_..." http://localhost:3000/api/v1/process/tasks
-```
-
-**Memory impact:**
-
-| Node RAM | With LLM enabled | Recommended config |
-|---|---|---|
-| 16 GB | Tight (~5 GB free with full stack); OOM risk under load | 16 GB nodes should keep `ENABLE_LLM=false` |
-| 24 GB | Comfortable (~12 GB free) | Default for `ENABLE_LLM=true` |
-| 32 GB+ | Plenty of headroom | Run LLM + ASR + TTS + diarization concurrently |
-
-**Tasks exposed** (see [docs/api.md](docs/api.md#llm-transcript-processing)):
-`summarize` · `action_items` · `translate` · `qa` · `custom`
+The LLM transcript-processing feature (Python mlx-lm sidecar, Llama 3.1 8B, `POST /api/v1/process`) **has been fully removed** — sidecar, endpoints, metrics, and log events. This project now focuses on the transcription pipeline (ASR, VAD, diarization, TTS). See git history if you need the old implementation.
 
 ---
 
@@ -262,7 +221,7 @@ curl -H "X-API-Key: gtx_live_..." http://localhost:3000/api/v1/process/tasks
 | `POST` | `/api/v1/auth/logout` | Invalidate refresh token |
 | `POST` | `/api/v1/asr` | Transcribe uploaded audio file |
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
-| `GET`  | `/v1/models` | OpenAI-compatible model listing (STT, TTS, LLM) |
+| `GET`  | `/v1/models` | OpenAI-compatible model listing (STT, TTS) |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |
@@ -272,8 +231,6 @@ curl -H "X-API-Key: gtx_live_..." http://localhost:3000/api/v1/process/tasks
 | `GET`  | `/api/v1/voices` | List custom + system voices |
 | `GET`  | `/api/v1/voices/:id` | Get custom voice details |
 | `DELETE` | `/api/v1/voices/:id` | Delete a custom voice |
-| `POST` | `/api/v1/process` | LLM transcript processing (summarize, action items, etc.) |
-| `GET`  | `/api/v1/process/tasks` | List available LLM processing tasks |
 | `GET`  | `/api/v1/usage/summary` | Usage stats for current user |
 | `GET`  | `/api/v1/usage/history` | Detailed usage history |
 | `GET`  | `/api/v1/usage/keys/:id` | Per-key usage summary |
@@ -303,8 +260,8 @@ Full reference: [docs/api.md](docs/api.md)
 |--------|------|-----|-------|--------------------|----------|
 | **Dev** | M4 | 16 GB / 256 GB | ~$799 | 3–5 | Development, 0.6B model |
 | **Standard** | M4 | 24 GB / 512 GB | $1,399 | 5–8 | ASR + TTS + diarization |
-| **Recommended** | M4 | 32 GB / 512 GB | ~$1,599 | 5–8 | Full stack incl. LLM processing |
-| **Power Node** | M4 Pro | 48 GB | ~$1,899 | 8–12 | Heavy concurrent LLM + ASR (~50% more throughput vs base M4) |
+| **Recommended** | M4 | 32 GB / 512 GB | ~$1,599 | 5–8 | Full stack with headroom |
+| **Power Node** | M4 Pro | 48 GB | ~$1,899 | 8–12 | Heavy concurrent ASR + TTS (~50% more throughput vs base M4) |
 
 ### Cluster Scaling
 
@@ -350,7 +307,7 @@ gotranscribesrv/
 │   ├── middleware/               # Auth, usage tracking, rate limiting
 │   ├── handlers/                 # Route handlers: asr, auth, whisper, deepgram, watson, tts, voices, process, usage, keys, admin, ws
 │   ├── metrics/                  # Prometheus collectors + middleware
-│   └── sidecar/                  # HTTP/WS client for Swift + Python sidecars
+│   └── sidecar/                  # HTTP/WS client for the Swift sidecar
 ├── sidecar-swift/                # Swift inference sidecar (CoreML/ANE)
 │   ├── Package.swift             # SPM manifest (Vapor + FluidAudio)
 │   └── Sources/
@@ -360,14 +317,7 @@ gotranscribesrv/
 │       │   ├── AudioConverter.swift  # Format detect + resample → 16 kHz mono PCM
 │       │   └── Routes/               # Transcribe, Stream, VAD, Diarize, TTS, Health
 │       └── ITNHelpers/           # Inverse text normalization (TextNormalizer)
-├── sidecar/                      # Python sidecar (LLM, optional)
-│   ├── main.py                   # FastAPI server
-│   ├── routers/                  # Processing endpoints (process, asr)
-│   ├── engines/                  # ML engine wrappers (LLM, diarizer, VAD, ASR)
-│   └── inference_pool.py         # Concurrency-managed inference queue
-├── sidecar-node/                 # Node.js sidecar (legacy, pre-Swift — ASR + VAD only)
-│   ├── server.js                 # Express server
-│   └── routes/                   # Transcribe, VAD, Health
+├── deploy/macos/                 # Headless node setup (launchd plist + guide)
 ├── scripts/                      # Operational scripts
 ├── docs/                         # Architecture, API, setup, pricing, cost analysis
 ├── .env.example
@@ -389,7 +339,6 @@ gotranscribesrv/
 | Diarization | Sortformer (end-to-end neural, up to 4 speakers) |
 | VAD | Silero VAD (CoreML/ANE) |
 | TTS | PocketTTS — 24 kHz, per-user stored voice cloning, 17+ built-in voices |
-| LLM Processing | Llama 3.1 8B (4-bit) via [mlx-lm](https://github.com/ml-explore/mlx-examples) — opt-in, Python sidecar |
 | Load Balancer | Caddy / Nginx (multi-node) |
 
 ---

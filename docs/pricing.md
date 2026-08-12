@@ -16,8 +16,8 @@ GoTranscribeSrv runs entirely on-premise on Mac Mini hardware. There are no per-
 |--------|------|-----|---------|------------|----------------------|----------|
 | **Starter** | M4 | 16 GB | 256 GB | ~$799 | 3–5 | Dev/staging, 0.6B model |
 | **Standard** | M4 | 24 GB | 512 GB | $1,399 | 5–8 | ASR + TTS + diarization |
-| **Recommended** | M4 | 32 GB | 512 GB | ~$1,599 | 5–8 | Full stack incl. LLM processing |
-| **Pro** | M4 Pro | 48 GB | 512 GB | ~$1,900 | 8–12 | Heavy concurrent LLM + ASR |
+| **Recommended** | M4 | 32 GB | 512 GB | ~$1,599 | 5–8 | Full stack with headroom |
+| **Pro** | M4 Pro | 48 GB | 512 GB | ~$1,900 | 8–12 | Heavy concurrent ASR + TTS |
 
 ### Cluster Configurations
 

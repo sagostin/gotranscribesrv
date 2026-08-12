@@ -20,7 +20,6 @@ every mini talks to the same database.
    │  server :3000  │ │  server :3000  │ │  server :3000  │   ← Docker
    │  presidio      │ │  presidio      │ │  presidio      │   ← Docker
    │  swift :8101   │ │  swift :8101   │ │  swift :8101   │   ← native (launchd)
-   │  python :8100  │ │  python :8100  │ │  python :8100  │   ← native (launchd)
    └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
            └──────────────────┴──────────────────┘
                     DATABASE_URL → Postgres on DB VM
@@ -137,7 +136,7 @@ Everything below is ordered from "happens on its own" to "you SSH in".
 2. macOS auto-logs-in the service account (FileVault must be off).
 3. Docker Desktop/OrbStack starts at login → `server` + `presidio`
    containers start (`restart: unless-stopped`).
-4. LaunchAgents start the Swift (:8101) and Python (:8100) sidecars.
+4. LaunchAgent starts the Swift sidecar (:8101).
 5. Caddy's `/health` checks pass (~10–30 s) → traffic resumes to that mini.
 
 Verify from any machine: `curl http://<mini-ip>:3000/health` and
@@ -153,7 +152,6 @@ Verify from any machine: `curl http://<mini-ip>:3000/health` and
 # On the mini (SSH in, or physically):
 make node-down && make node-up          # restart server + presidio
 launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.swift-sidecar
-launchctl kickstart -k gui/$(id -u)/com.gotranscribesrv.llm-sidecar   # if LLM enabled
 ```
 
 Caddy keeps traffic on the remaining minis while this one is down; no

@@ -8,8 +8,8 @@ Two things must start automatically after boot:
 
 1. **Docker containers** (Go server + Presidio) — via Docker Desktop/OrbStack
    "start at login" + `restart: unless-stopped` in `docker-compose.node.yml`.
-2. **Native sidecars** (Swift on :8101, Python LLM on :8100) — via the
-   LaunchAgents in this folder. They must run natively for CoreML/ANE access.
+2. **Native sidecar** (Swift on :8101 — ASR, VAD, diarization, TTS) — via the
+   LaunchAgent in this folder. It must run natively for CoreML/ANE access.
 
 > The DB VM (Postgres + Caddy) is a separate machine — see
 > `docker-compose.db.yml` and `docs/production.md`.
@@ -50,29 +50,25 @@ Docker Desktop **or** OrbStack:
 - The compose file already sets `restart: unless-stopped` on every service,
   so containers come up with Docker.
 
-## 3. Install the sidecar LaunchAgents
+## 3. Install the sidecar LaunchAgent
 
 From a checkout of this repo on the mini:
 
 ```bash
-# Build the Swift sidecar release binary + Python venv first
+# Build the Swift sidecar release binary first
 make swift-build
-make setup            # venv + LLM models (only needed if ENABLE_LLM=true)
 
-# Point the plists at your repo path
+# Point the plist at your repo path
 REPO=/Users/transcribe/gotranscribesrv    # ← your actual checkout path
 mkdir -p "$REPO/deploy/macos/logs"
-for p in deploy/macos/com.gotranscribesrv.*.plist; do
-  sed -i '' "s|__REPO_PATH__|$REPO|g" "$p"
-done
+sed -i '' "s|__REPO_PATH__|$REPO|g" deploy/macos/com.gotranscribesrv.swift-sidecar.plist
 
 # Install into the service account's LaunchAgents
 mkdir -p ~/Library/LaunchAgents
-cp deploy/macos/com.gotranscribesrv.*.plist ~/Library/LaunchAgents/
+cp deploy/macos/com.gotranscribesrv.swift-sidecar.plist ~/Library/LaunchAgents/
 
-# Load them (starts now and at every login)
+# Load it (starts now and at every login)
 launchctl load ~/Library/LaunchAgents/com.gotranscribesrv.swift-sidecar.plist
-launchctl load ~/Library/LaunchAgents/com.gotranscribesrv.llm-sidecar.plist  # only if ENABLE_LLM=true
 ```
 
 Notes:

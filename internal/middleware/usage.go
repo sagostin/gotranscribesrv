@@ -331,8 +331,6 @@ func classifyEndpoint(c *fiber.Ctx) string {
 		return "tts"
 	case path == "/api/v1/voices/clone":
 		return "voice_clone"
-	case path == "/api/v1/process":
-		return "llm_process"
 	default:
 		return ""
 	}

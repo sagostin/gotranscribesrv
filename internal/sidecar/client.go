@@ -13,24 +13,20 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 )
 
-// Client communicates with the inference sidecars.
+// Client communicates with the Swift inference sidecar.
 // Swift sidecar → ASR, VAD, diarization, TTS (CoreML/ANE, port 8101)
-// Python sidecar → LLM processing only (MLX, port 8100)
 type Client struct {
 	swiftURL   string // Swift sidecar (ASR, VAD, diarization, TTS)
 	swiftWSURL string
-	llmURL     string // Python sidecar (LLM only)
 	httpClient *http.Client
 }
 
-// NewClient creates a new dual-sidecar client.
+// NewClient creates a new sidecar client.
 // swiftURL/swiftWSURL = Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE)
-// llmURL = Python sidecar (LLM processing — MLX)
-func NewClient(swiftURL, swiftWSURL, llmURL string) *Client {
+func NewClient(swiftURL, swiftWSURL string) *Client {
 	return &Client{
 		swiftURL:   swiftURL,
 		swiftWSURL: swiftWSURL,
-		llmURL:     llmURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Long timeout for large audio files
 		},
@@ -114,7 +110,7 @@ type HealthResponse struct {
 	Models map[string]string `json:"models"`
 }
 
-// Health checks both sidecar health endpoints and merges results.
+// Health checks the Swift sidecar health endpoint.
 func (c *Client) Health() (*HealthResponse, error) {
 	merged := &HealthResponse{
 		Status: "ok",
@@ -133,20 +129,6 @@ func (c *Client) Health() (*HealthResponse, error) {
 		var swiftHealth HealthResponse
 		if err := json.NewDecoder(swiftResp.Body).Decode(&swiftHealth); err == nil {
 			for k, v := range swiftHealth.Models {
-				merged.Models[k] = v
-			}
-		}
-	}
-
-	// Check Python sidecar (LLM only)
-	pyResp, err := c.httpClient.Get(c.llmURL + "/health")
-	if err != nil {
-		merged.Models["llm"] = "disconnected"
-	} else {
-		defer pyResp.Body.Close()
-		var pyHealth HealthResponse
-		if err := json.NewDecoder(pyResp.Body).Decode(&pyHealth); err == nil {
-			for k, v := range pyHealth.Models {
 				merged.Models[k] = v
 			}
 		}
@@ -382,87 +364,6 @@ func (c *Client) ListVoices() (*VoicesResponse, error) {
 	var result VoicesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode voices response: %w", err)
-	}
-	return &result, nil
-}
-
-// ProcessRequest is sent to the Python sidecar for LLM transcript processing.
-type ProcessRequest struct {
-	TranscriptText string  `json:"transcript_text"`
-	Task           string  `json:"task"`
-	Language       string  `json:"language,omitempty"`
-	Prompt         string  `json:"prompt,omitempty"`
-	MaxTokens      int     `json:"max_tokens"`
-	Temperature    float64 `json:"temperature"`
-}
-
-// ProcessResponse is the JSON result from LLM processing.
-type ProcessResponse struct {
-	Result          string `json:"result"`
-	Task            string `json:"task"`
-	Model           string `json:"model"`
-	ProcessTimeMs   int    `json:"processing_time_ms"`
-	TokensGenerated int    `json:"tokens_generated"`
-}
-
-// TasksResponse lists available LLM processing tasks.
-type TasksResponse struct {
-	Tasks        []string          `json:"tasks"`
-	Descriptions map[string]string `json:"descriptions"`
-}
-
-// Process sends transcript text to the Python sidecar for LLM processing.
-func (c *Client) Process(req ProcessRequest) (*ProcessResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", c.llmURL+"/process", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	slog.Debug("sending LLM process request to Python sidecar", "task", req.Task, "text_len", len(req.TranscriptText))
-
-	start := time.Now()
-	resp, err := c.httpClient.Do(httpReq)
-	durationMs := int(time.Since(start).Milliseconds())
-	metrics.RecordSidecarLatency("python", "process", durationMs, err)
-	if err != nil {
-		return nil, fmt.Errorf("sidecar request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(errBody))
-	}
-
-	var result ProcessResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode process response: %w", err)
-	}
-	return &result, nil
-}
-
-// ListTasks fetches available LLM processing tasks from the Python sidecar.
-func (c *Client) ListTasks() (*TasksResponse, error) {
-	resp, err := c.httpClient.Get(c.llmURL + "/process/tasks")
-	if err != nil {
-		return nil, fmt.Errorf("sidecar tasks request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result TasksResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode tasks response: %w", err)
 	}
 	return &result, nil
 }
