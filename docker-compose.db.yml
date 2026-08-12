@@ -4,14 +4,15 @@
 # Runs on the separate (virtualized) DB server:
 #   • postgres — the single shared database for all nodes
 #   • caddy    — reverse proxy / load balancer across the Mac mini
-#                nodes (upstream IPs listed in ./Caddyfile)
+#                nodes (upstream IPs listed in ./Caddyfile, copied from
+#                Caddyfile.example)
 #
 # The Mac minis run docker-compose.node.yml and point their
 # DATABASE_URL at this host.
 #
 # Usage:
 #   cp .env.db.example .env        # set a strong POSTGRES_PASSWORD
-#   # edit Caddyfile — list your Mac mini IPs under `to`
+#   cp Caddyfile.example Caddyfile  # then list your Mac mini IPs under `to`
 #   make db-up
 #   make db-logs
 # ============================================================
@@ -58,7 +59,7 @@ services:
       db:
         condition: service_started
     ports:
-      - "80:80"
+      - "8030:8030"
       # Uncomment for TLS (see commented block in Caddyfile):
       # - "443:443"
       # - "443:443/udp"

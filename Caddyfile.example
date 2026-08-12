@@ -1,9 +1,12 @@
 # ============================================================
 # GoTranscribeSrv — Caddy load balancer (runs on the DB VM)
 # ============================================================
-# LAN/internal mode: plain HTTP on port 80. Clients call
-#   http://<db-vm-ip-or-lan-hostname>/...
+# LAN/internal mode: plain HTTP on port 8030. Clients call
+#   http://<db-vm-ip-or-lan-hostname>:8030/...
 # and Caddy spreads requests across the Mac mini nodes.
+#
+# Setup:  cp Caddyfile.example Caddyfile   # then edit the `to` list
+# (The real Caddyfile is gitignored — your node IPs stay uncommitted.)
 #
 # To add/remove a node: edit the `to` list below, then:
 #   docker compose -f docker-compose.db.yml exec caddy \
@@ -11,10 +14,26 @@
 # (zero-downtime reload)
 # ============================================================
 
+# ── Client IP forwarding ───────────────────────────────────
+# reverse_proxy automatically sets X-Forwarded-For (client IP chain),
+# X-Forwarded-Proto and X-Forwarded-Host on every request. The Go server
+# already trusts X-Forwarded-For (Fiber ProxyHeader config), so logs and
+# rate limiting see real client IPs with NO extra config here.
+#
+# OPTIONAL — only if Caddy itself sits BEHIND another proxy (Cloudflare,
+# Tailscale serve, an upstream LB): without trusted_proxies, Caddy treats
+# that front proxy as the client and its X-Forwarded-For as untrusted.
+# Add these lines inside the `servers` block below (requires Caddy ≥ 2.7),
+# listing YOUR front proxy IPs/CIDRs:
+#
+# 	trusted_proxies static 10.0.0.0/8 192.168.1.0/24
+# 	trusted_proxies_strict   # optional: additionally REQUIRE traffic via them
+
 # Global options: generous listener timeouts for long-running uploads /
 # transcription requests. (reverse_proxy itself has no response timeout.)
 {
 	servers {
+		# trusted_proxies ... goes here — see note above.
 		timeouts {
 			read_body 5m
 			idle 10m
@@ -50,6 +69,10 @@
 		# the proxy give up early on a healthy-but-busy node.
 		lb_try_duration 30s
 		lb_try_interval 250ms
+
+		# Optional: also pass the client IP as X-Real-IP upstream.
+		# (X-Forwarded-For is always sent; enable only if you want both.)
+		# header_up X-Real-IP {remote_host}
 	}
 
 	log {
@@ -59,7 +82,7 @@
 }
 
 # ── Optional: TLS variant ──────────────────────────────────
-# Replace the `:80` site above with ONE of these if you later
+# Replace the `:8030` site above with ONE of these if you later
 # want encryption:
 #
 # 1) Public domain + automatic Let's Encrypt (needs 80/443 open

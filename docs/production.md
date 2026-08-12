@@ -38,7 +38,7 @@ so Loki/stdout logs can be attributed per mini.
 |---|---|---|
 | `docker-compose.node.yml` | each Mac mini | Go server + Presidio (no DB) |
 | `docker-compose.db.yml` | DB VM | Postgres + Caddy |
-| `Caddyfile` | DB VM | upstream node IPs, health checks, lb policy |
+| `Caddyfile.example` | DB VM | template → copy to `Caddyfile` (gitignored), list node IPs |
 | `.env.node.example` | each Mac mini | node config template |
 | `.env.db.example` | DB VM | DB config template |
 | `deploy/macos/` | each Mac mini | launchd plists + headless boot guide |
@@ -49,7 +49,7 @@ so Loki/stdout logs can be attributed per mini.
 
 ```bash
 cp .env.db.example .env          # set a strong POSTGRES_PASSWORD
-# edit Caddyfile: list each mini's LAN IP under `to`
+cp Caddyfile.example Caddyfile   # list each mini's LAN IP under `to`
 make db-up                       # Postgres + Caddy
 ```
 

@@ -35,6 +35,9 @@ deploy/macos/logs/
 
 # ── DB backups (local dumps from make db-backup) ──
 backups/
+
+# ── Real Caddyfile with node IPs (copy from Caddyfile.example) ──
+/Caddyfile
 /sidecar-swift/.build/
 /sidecar-swift/Vendor/text-processing-rs/
 /sidecar-swift/Vendor/text-processing-rs/target/

@@ -265,7 +265,8 @@ db-up:
 	$(DB_COMPOSE) up -d
 	@echo ""
 	@echo "  ✅ Postgres + Caddy running"
-	@echo "  ℹ  Edit Caddyfile with your node IPs, then 'make caddy-reload'"
+	@echo "  ℹ  First time? cp Caddyfile.example Caddyfile, list your node IPs"
+	@echo "  ℹ  After Caddyfile edits: make caddy-reload"
 	@echo ""
 
 db-down:
