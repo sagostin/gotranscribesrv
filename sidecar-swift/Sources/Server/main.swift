@@ -26,6 +26,7 @@ print("🚀 Initializing FluidAudio engines (CoreML/ANE)...")
 
 // Initialize all engines
 let engines = EngineManager()
+await engines.applyConfig()
 await engines.initialize()
 
 let status = await engines.healthStatus()
@@ -47,13 +48,15 @@ if itn.isNativeAvailable {
 healthRoutes(app, engines: engines)
 transcribeRoutes(app, engines: engines)
 streamRoutes(app, engines: engines)
+realtimeStreamRoutes(app, engines: engines)
 vadRoutes(app, engines: engines)
 diarizeRoutes(app, engines: engines)
 ttsRoutes(app, engines: engines)
 
 print("🎙  Swift sidecar listening on \(host):\(port)")
-print("   POST /transcribe  — ASR (+ optional diarization)")
-print("   WS   /stream      — real-time streaming ASR")
+print("   POST /transcribe      — ASR (+ optional diarization)")
+print("   WS   /stream          — streaming ASR (buffered, legacy protocol)")
+print("   WS   /stream/realtime — true streaming ASR (EOU/Nemotron/Unified + VAD turn events)")
 print("   POST /vad         — voice activity detection")
 print("   POST /diarize     — speaker diarization")
 print("   POST /synthesize  — text-to-speech")

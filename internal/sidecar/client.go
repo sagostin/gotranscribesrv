@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
@@ -248,14 +249,27 @@ func (c *Client) VAD(ctx context.Context, audio []byte, filename string) (*VadRe
 // Synthesize sends text to the Swift sidecar for TTS and returns raw audio bytes.
 // ctx is used for log correlation (request_id injection).
 func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) ([]byte, string, error) {
+	audio, ct, _, err := c.SynthesizeWithBackend(ctx, req, "")
+	return audio, ct, err
+}
+
+// SynthesizeWithBackend is like Synthesize but routes to a specific TTS
+// backend on the sidecar via ?backend= query param. Pass backend="" to use
+// the sidecar default (pocket). Known values: "pocket", "kokoro".
+func (c *Client) SynthesizeWithBackend(ctx context.Context, req SynthesizeRequest, backend string) ([]byte, string, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("marshal request: %w", err)
+		return nil, "", "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.swiftURL+"/synthesize", bytes.NewReader(body))
+	endpoint := c.swiftURL + "/synthesize"
+	if backend != "" {
+		endpoint += "?backend=" + url.QueryEscape(backend)
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, "", fmt.Errorf("create request: %w", err)
+		return nil, "", "", fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -264,22 +278,23 @@ func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) ([]byte,
 	durationMs := int(time.Since(start).Milliseconds())
 	metrics.RecordSidecarLatency("swift", "synthesize", durationMs, err)
 	if err != nil {
-		return nil, "", fmt.Errorf("sidecar request failed: %w", err)
+		return nil, "", "", fmt.Errorf("sidecar request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
-		return nil, "", fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(errBody))
+		return nil, "", "", fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	audio, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("read audio response: %w", err)
+		return nil, "", "", fmt.Errorf("read audio response: %w", err)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	return audio, contentType, nil
+	backendUsed := resp.Header.Get("X-TTS-Backend")
+	return audio, contentType, backendUsed, nil
 }
 
 // CloneVoice sends audio to the Swift sidecar to extract a voice embedding.
@@ -338,6 +353,27 @@ func (c *Client) CloneVoice(ctx context.Context, audio []byte, filename string) 
 // StreamURL returns the WebSocket URL for streaming ASR on the Swift sidecar.
 func (c *Client) StreamURL() string {
 	return c.swiftWSURL + "/stream"
+}
+
+// RealtimeStreamURL returns the WebSocket URL for true real-time streaming
+// ASR on the Swift sidecar (uses Parakeet EOU / Nemotron / Parakeet Unified
+// cache-aware streaming + streaming Silero VAD).
+func (c *Client) RealtimeStreamURL(engine string) string {
+	u := c.swiftWSURL + "/stream/realtime"
+	if engine != "" {
+		u += "?engine=" + url.QueryEscape(engine)
+	}
+	return u
+}
+
+// DeepgramRealtimeURL returns the WebSocket URL for Deepgram-compatible
+// realtime streaming ASR on the Swift sidecar.
+func (c *Client) DeepgramRealtimeURL(engine string) string {
+	u := c.swiftWSURL + "/stream/realtime"
+	if engine != "" {
+		u += "?engine=" + url.QueryEscape(engine)
+	}
+	return u
 }
 
 // VoiceInfo describes a single TTS voice.

@@ -194,9 +194,12 @@ func main() {
 	whisperHandler := handlers.NewWhisperHandler(sc, redactor, cfg.EnableITN, logManager)
 	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir, logManager)
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
+	openaiTTSHandler := handlers.NewOpenAITTSHandler(sc, logManager, cfg.TTSDefaultBackend)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	watsonHandler := handlers.NewWatsonHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
+	openaiRealtimeHandler := handlers.NewOpenAIRealtimeHandler(sc, logManager)
+	deepgramRealtimeHandler := handlers.NewDeepgramRealtimeHandler(sc, logManager)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -252,6 +255,31 @@ func main() {
 	}, middleware.NewAuthMiddleware(authCfg))
 	app.Get("/v1/listen", dgHandler.Upgrade())
 
+	// Deepgram-compatible REAL-TIME streaming (true streaming ASR).
+	// Legacy /v1/listen → buffered /stream route is untouched above.
+	app.Use("/v2/listen", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			slog.InfoContext(c.UserContext(), "Deepgram-realtime WebSocket upgrade request", "path", "/v2/listen", "remote", c.IP())
+			return middleware.NewAuthMiddleware(authCfg)(c)
+		}
+		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
+			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
+		})
+	})
+	app.Get("/v2/listen", deepgramRealtimeHandler.Upgrade())
+
+	// OpenAI Realtime-style streaming (true streaming ASR).
+	app.Use("/v1/realtime", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			slog.InfoContext(c.UserContext(), "OpenAI Realtime WebSocket upgrade request", "path", "/v1/realtime", "remote", c.IP())
+			return middleware.NewAuthMiddleware(authCfg)(c)
+		}
+		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
+			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
+		})
+	})
+	app.Get("/v1/realtime", openaiRealtimeHandler.Upgrade())
+
 	// Watson-compatible streaming (WebSocket only — POST /v1/recognize is in the authed group below)
 	app.Use("/v1/recognize", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -298,6 +326,9 @@ func main() {
 
 	// TTS
 	authed.Post("/api/v1/tts", ttsHandler.Synthesize)
+
+	// OpenAI-compatible TTS (POST /v1/audio/speech)
+	authed.Post("/v1/audio/speech", openaiTTSHandler.Speech)
 
 	// Voice Management
 	authed.Post("/api/v1/voices/clone", voiceHandler.Clone)

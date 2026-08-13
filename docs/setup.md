@@ -135,7 +135,8 @@ make swift-sidecar
 Verify it's running:
 ```bash
 curl http://localhost:8101/health
-# {"status":"ok","models":{"asr":"loaded","vad":"loaded","diarizer":"loaded","tts":"loaded"}}
+# {"status":"ok","models":{"asr":"loaded","vad":"loaded","diarizer":"loaded","tts":"loaded","kokoro":"loaded"},
+#  "config":{"synthesizeBackend":"pocket","streamBackend":"pocket"}}
 ```
 
 **First build note:** The initial `swift build` may take a few minutes to compile Vapor and FluidAudio dependencies. Subsequent builds are fast (incremental).
@@ -166,6 +167,75 @@ The link is **optional and graceful**: removing the `.a` file reverts the sideca
 #### Toggling ITN off globally
 
 Set `ENABLE_ITN=false` in `.env` and restart the Go server. This propagates to **all five STT ingress paths** (REST + WS, all protocols) — for any request that doesn't pass an explicit `itn=true` override, ITN is bypassed end-to-end. Per-request `itn=true` still wins if a client wants to force it on for one request.
+
+#### TTS backend selection (Kokoro vs PocketTTS)
+
+The sidecar ships two TTS backends. The default matrix is:
+
+| Endpoint                              | Default backend | Why                                                                                     |
+|---------------------------------------|-----------------|-----------------------------------------------------------------------------------------|
+| `POST /api/v1/tts` (Go legacy)        | `pocket`        | Back-compat — `voice_id`/`voice_ref` cloning keep working.                               |
+| `POST /synthesize` (sidecar)          | `pocket`        | Back-compat — same.                                                                      |
+| `POST /synthesize/stream` (sidecar)   | `pocket` (locked) | Kokoro has no streaming API in FluidAudio 0.15.5 — `?backend=kokoro` returns 501.       |
+| `POST /v1/audio/speech` (Go OpenAI)   | `kokoro`        | New endpoint; voice-agent clients automatically get higher-quality TTS.                  |
+
+Override on the sidecar:
+
+```bash
+# Change the /synthesize default (Go /api/v1/tts is hardcoded to pocket for back-compat)
+export SIDECAR_TTS_DEFAULT_BACKEND=kokoro   # or "pocket"
+
+# /synthesize/stream backend (only "pocket" is honored — anything else logs a warning)
+export SIDECAR_TTS_STREAM_BACKEND=pocket
+```
+
+Override on the Go server:
+
+```bash
+# /v1/audio/speech default (when no model is recognized)
+export TTS_DEFAULT_BACKEND=kokoro   # or "pocket"
+```
+
+Verify the resolved values via the sidecar's `/health` (`config.synthesizeBackend` / `config.streamBackend`). For voice agents, the typical pattern is: **`/synthesize/stream` for snappy conversational replies** (PocketTTS, ~80 ms first chunk) and **`/v1/audio/speech?model=kokoro` for greetings / pre-rendered prompts** (Kokoro, full-utterance quality, multilingual). See `docs/api.md` § Text-to-Speech for the full matrix.
+
+#### Real-time streaming ASR engine
+
+The WS endpoints `/stream/realtime`, `/v2/listen` (Deepgram-compat realtime), and `/v1/realtime` (OpenAI-compat realtime) all use cache-aware streaming engines on the sidecar. Default is `eou-320` (Parakeet EOU 120M — best balance for English live agents). Override per session via `?engine=` query param, or globally via:
+
+```bash
+export SIDECAR_REALTIME_ENGINE=eou-320      # default; English + built-in turn-taking
+# or
+export SIDECAR_REALTIME_ENGINE=unified-320  # Parakeet Unified 0.6B — multilingual (25 EU langs)
+export SIDECAR_REALTIME_ENGINE=nemotron-560 # Nemotron 0.6B — higher accuracy, English only
+# Also valid: eou-160, eou-1280, nemotron-1120, unified-640, unified-1120
+```
+
+The Go proxies (`/v2/listen`, `/v1/realtime`) translate their respective protocol's model field (`model=nova-3`, `model=gpt-4o-realtime-preview`, …) into a sidecar `?engine=` value — see the engine table in `docs/api.md` § Real-Time Streaming ASR for the full mapping.
+
+Verify the resolved value via the sidecar's `/health` (`config.realtimeEngine`). The realtime engines are downloaded lazily on first session connect — the first call to `/stream/realtime`, `/v2/listen`, or `/v1/realtime` with a previously-unused engine triggers a HuggingFace download (~100–800 MB per variant, cached under `~/.cache/fluidaudio/Models/`). If you switch `SIDECAR_REALTIME_ENGINE` after the initial setup, expect the first realtime session to spend a few minutes downloading the new engine before `ready` arrives.
+
+#### Models, formats & sample rates at a glance
+
+| Surface                       | Models / engines                                                                 | Input formats                                   | Output formats            | Sample rates |
+|-------------------------------|-----------------------------------------------------------------------------------|-------------------------------------------------|---------------------------|--------------|
+| `POST /api/v1/asr`            | Parakeet TDT v3 (batch)                                                           | multipart `audio` upload — mp3/wav/opus/flac/m4a/ogg/… | JSON (text + words + diar) | resampled to 16k internally |
+| `POST /v1/audio/transcriptions` (OpenAI) | Parakeet TDT v3 (batch)                                                           | multipart `file` upload                          | JSON (text + words + diar) | resampled to 16k internally |
+| `WS /ws/asr`, `/v1/listen`, `/v1/recognize` | Parakeet TDT v3 (buffered; full-buffer re-transcribe every ~2s)                  | PCM16/mulaw/alaw binary frames                   | JSON events (partial/final) | 8k upsampled to 16k, or native 16k |
+| `WS /stream/realtime`, `/v2/listen`, `/v1/realtime` | EOU/Nemotron/Unified streaming (8 variants) — see engine table                   | PCM16/mulaw/alaw binary frames                   | JSON events (partial/final/end_of_turn/speech_*); OpenAI/Deepgram on WS proxies | 8k upsampled to 16k, or native 16k |
+| `POST /synthesize` (sidecar)  | PocketTTS (default) or Kokoro via `?backend=`                                     | JSON `{text, voice, voice_id?, voice_ref?}`      | WAV (24 kHz mono PCM)      | n/a |
+| `POST /synthesize/stream`     | PocketTTS only                                                                     | JSON `{text, voice}`                            | L16 raw (24 kHz mono, 80ms chunks) | n/a |
+| `POST /api/v1/tts` (Go)       | PocketTTS only (back-compat)                                                       | JSON `{text, voice, voice_id?, voice_ref?}`      | WAV (24 kHz mono PCM)      | n/a |
+| `POST /v1/audio/speech` (Go OpenAI) | PocketTTS or Kokoro via `model=` (default: Kokoro via `TTS_DEFAULT_BACKEND`)     | JSON `{model, voice, input, response_format, speed}` | WAV or raw L16 (24 kHz mono) | n/a |
+| `POST /api/v1/voices/clone`   | PocketTTS embedding extraction                                                     | multipart `audio` upload                         | binary embedding           | resampled to 16k |
+| `POST /vad`                   | Silero VAD v6.2.1 (streaming-capable)                                              | multipart `audio` upload                         | JSON segments              | resampled to 16k |
+| `POST /diarize`               | Sortformer v2.1 (4 speakers max)                                                   | multipart `audio` upload                         | JSON segments (speaker_idx, start, end) | resampled to 16k |
+
+**Format gotchas:**
+- ASR input: any audio format that `SidecarAudioConverter.toPCM16kMono()` handles (decodes to 16 kHz mono internally). Container is irrelevant — only the audio codec matters.
+- ASR output: always 16 kHz mono; word timings are relative to that.
+- TTS output: always 24 kHz mono, 16-bit PCM. WAV is full header; `pcm` strips it.
+- Streaming TTS (`/synthesize/stream`): raw 16-bit little-endian LE Int16 frames at 24 kHz mono, 80 ms each (1920 samples per frame). Wrap in a WAV header yourself if you need one.
+- TTS cloning (`voice_id` / `voice_ref`): **pocket only**. `?backend=kokoro` + cloning → 422.
 
 #### Debug logs
 

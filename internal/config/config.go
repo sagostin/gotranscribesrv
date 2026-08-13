@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,12 @@ type Config struct {
 	ASRRuntime        string
 	EnableDiarization bool
 	EnableTTS         bool
+
+	// TTSDefaultBackend is the sidecar TTS backend used by /v1/audio/speech
+	// when the client's `model` field doesn't pin a specific backend.
+	// "pocket" (PocketTTS — supports streaming & voice cloning) or
+	// "kokoro" (Kokoro — higher quality, multilingual, batch only).
+	TTSDefaultBackend string
 
 	// ITN (Inverse Text Normalization) — spoken-form ASR -> written form
 	// ("one two five O" -> "1250"). Applied in the Swift sidecar. Default on.
@@ -98,6 +105,7 @@ func Load() *Config {
 		EnableDiarization: envOrDefault("ENABLE_DIARIZATION", "true") == "true",
 		EnableTTS:         envOrDefault("ENABLE_TTS", "true") == "true",
 		EnableITN:         envOrDefault("ENABLE_ITN", "true") == "true",
+		TTSDefaultBackend: normalizeTTSBackend(envOrDefault("TTS_DEFAULT_BACKEND", "kokoro")),
 
 		RateLimitFree:       envOrDefaultInt("RATE_LIMIT_FREE", 20),
 		RateLimitPro:        envOrDefaultInt("RATE_LIMIT_PRO", 120),
@@ -150,6 +158,18 @@ func envOrDefault(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+// normalizeTTSBackend coerces the TTS_DEFAULT_BACKEND env to one of the
+// supported values, falling back to the default for anything unrecognized.
+func normalizeTTSBackend(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "pocket", "pockettts":
+		return "pocket"
+	case "kokoro":
+		return "kokoro"
+	}
+	return "kokoro"
 }
 
 func envOrDefaultInt(key string, fallback int) int {
