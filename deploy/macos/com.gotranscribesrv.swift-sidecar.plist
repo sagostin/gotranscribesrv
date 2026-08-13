@@ -29,6 +29,21 @@
 	<dict>
 		<key>PATH</key>
 		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+
+		<!-- Optional sidecar env vars. Uncomment + edit to override defaults.
+		     See docs/api.md § "Configuration env vars" and docs/setup.md for
+		     the full list. Defaults (when commented out) preserve prior
+		     behavior — no breaking changes on existing deployments.
+
+		<key>SIDECAR_REALTIME_ENGINE</key>
+		<string>eou-320</string>
+
+		<key>SIDECAR_TTS_DEFAULT_BACKEND</key>
+		<string>pocket</string>
+
+		<key>SIDECAR_TTS_STREAM_BACKEND</key>
+		<string>pocket</string>
+		-->
 	</dict>
 
 	<key>RunAtLoad</key>

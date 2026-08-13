@@ -95,6 +95,24 @@ Notes:
   plist into `~/Library/LaunchAgents/`, then
   `launchctl bootstrap gui/$(id -u) <plist>`.
 
+### Sidecar env vars (Kokoro, real-time engine)
+
+The sidecar reads its env vars from the **plist** (`EnvironmentVariables`
+dict), not from `.env` — launchd doesn't propagate shell env to LaunchAgents.
+The plist ships with the new sidecar knobs (`SIDECAR_REALTIME_ENGINE`,
+`SIDECAR_TTS_DEFAULT_BACKEND`, `SIDECAR_TTS_STREAM_BACKEND`) **commented
+out** — existing deployments see no behavior change after `git pull`. To
+flip a knob:
+
+1. Edit `deploy/macos/com.gotranscribesrv.swift-sidecar.plist` and
+   uncomment the relevant `<key>` / `<string>` pair.
+2. `make sidecar-restart` (or `launchctl kickstart -k gui/$(id -u) com.gotranscribesrv.swift-sidecar`).
+3. Verify: `curl http://localhost:8101/health` → `config.synthesizeBackend`
+   / `streamBackend` / `realtimeEngine` reflect the new values.
+
+See `docs/setup.md` § "Real-time streaming ASR engine" and
+"TTS backend selection" for the full matrix.
+
 ## 4. Start the node stack
 
 ```bash
