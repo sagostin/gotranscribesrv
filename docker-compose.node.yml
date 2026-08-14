@@ -54,6 +54,10 @@ services:
       # host.docker.internal works on Docker Desktop and OrbStack.
       AUDIO_SIDECAR_URL: ${AUDIO_SIDECAR_URL:-http://host.docker.internal:8101}
       AUDIO_SIDECAR_WS_URL: ${AUDIO_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
+      # LLM sidecar also runs natively on THIS host (launchd). It binds
+      # 0.0.0.0 by default (LLM_SIDECAR_HOST), so host.docker.internal works.
+      ENABLE_LLM: ${ENABLE_LLM:-true}
+      LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8080}
       # PII redaction — Presidio runs per-node (below) so unredacted
       # transcript text never leaves this machine.
       ENABLE_PII: ${ENABLE_PII:-true}

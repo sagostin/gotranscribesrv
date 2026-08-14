@@ -61,6 +61,10 @@ services:
       # Audio sidecar runs natively on the host for CoreML/ANE acceleration
       AUDIO_SIDECAR_URL: ${AUDIO_SIDECAR_URL:-http://host.docker.internal:8101}
       AUDIO_SIDECAR_WS_URL: ${AUDIO_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
+      # LLM sidecar also runs natively on the host (CoreML/ANE). It binds
+      # 0.0.0.0 by default (LLM_SIDECAR_HOST), so host.docker.internal works.
+      ENABLE_LLM: ${ENABLE_LLM:-true}
+      LLM_SIDECAR_URL: ${LLM_SIDECAR_URL:-http://host.docker.internal:8080}
       # PII redaction — Presidio analyzer runs in the compose stack.
       # To centralize, override PRESIDIO_ANALYZER_URL with an external endpoint.
       ENABLE_PII: ${ENABLE_PII:-true}
