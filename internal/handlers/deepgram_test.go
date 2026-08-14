@@ -895,6 +895,71 @@ func TestDeepgramTeardownPromptWhenSidecarDiesMidFlush(t *testing.T) {
 	}
 }
 
+// TestDeepgramBinaryControlMessage verifies Postel-law handling of
+// clients that send Deepgram control messages as BINARY frames (spec
+// says text): a binary {"type":"Finalize"} must still flush the stream
+// and yield a from_finalize Results event, while binary audio that
+// happens to start with '{' must NOT be misclassified.
+func TestDeepgramBinaryControlMessage(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarApp())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+
+	// Audio frame deliberately starting with '{' — must be treated as
+	// audio (it is not valid JSON), not a control message.
+	audio := append([]byte("{not json, just pcm coincidence"), make([]byte, 958)...)
+	if err := conn.WriteMessage(ws.BinaryMessage, audio); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	// Finalize sent as a BINARY frame — misbehaving-client compat.
+	if err := conn.WriteMessage(ws.BinaryMessage, []byte(`{"type":"Finalize"}`)); err != nil {
+		t.Fatalf("write binary Finalize: %v", err)
+	}
+
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results after binary Finalize: %v", err)
+	}
+	if res["type"] != "Results" {
+		t.Fatalf("event type = %v, want Results", res["type"])
+	}
+	if res["from_finalize"] != true {
+		t.Errorf("from_finalize = %v, want true", res["from_finalize"])
+	}
+
+	// The '{'-prefixed audio frame must have been counted as audio
+	// (975 bytes), proving it was not misclassified as a control frame.
+	// Close the session to observe the stats.
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break
+		}
+	}
+	ended := waitForLogEvent(lm, "DEEPGRAM_SESSION_ENDED", 2*time.Second)
+	if ended == nil {
+		t.Fatal("DEEPGRAM_SESSION_ENDED never emitted")
+	}
+	if b, _ := ended.AdditionalData["audio_bytes"].(int); b != len(audio) {
+		t.Errorf("audio_bytes = %v, want %d ('{'-prefixed frame counted as audio)", b, len(audio))
+	}
+}
+
 // TestDGSessionStats verifies the mutex-guarded session counters used
 // by both Deepgram handlers (run with -race to catch regressions).
 func TestDGSessionStats(t *testing.T) {

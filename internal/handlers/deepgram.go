@@ -221,7 +221,9 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"itn":             itnEnabled(c, h.defaultITN),
 	}))
 	stats := &dgSessionStats{}
-	errCh := make(chan error, 2)
+	// errCh carries the session-ending condition tagged with its source,
+	// so the session-end log can say exactly what tore the session down.
+	errCh := make(chan dgSessionEnd, 2)
 	// done is closed when the session ends (after <-errCh). The client
 	// read goroutine checks it before emitting CLIENT_READ_ERROR so a
 	// read error caused by our own c.Close() during normal teardown
@@ -234,6 +236,74 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	// race with that reuse.
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// handleControl inspects a client frame for a Deepgram control
+	// message. Per spec these arrive as text frames, but some clients
+	// send them as binary — detect both so a misbehaving client doesn't
+	// silently lose its Finalize (a binary "control" frame must still
+	// parse strictly as JSON with a known type, so PCM audio that
+	// happens to start with '{' can never false-positive).
+	// handled=false means the frame is not a control message. A non-nil
+	// error means forwarding to the sidecar failed fatally.
+	handleControl := func(msg []byte, binary bool) (bool, error) {
+		var ctrl map[string]interface{}
+		if json.Unmarshal(msg, &ctrl) != nil {
+			return false, nil
+		}
+		ctrlType, ok := ctrl["type"].(string)
+		if !ok {
+			return false, nil
+		}
+		switch ctrlType {
+		case "KeepAlive", "Finalize", "CloseStream":
+		default:
+			return false, nil
+		}
+		if binary {
+			slog.Warn("[DG] Client sent control message as BINARY frame (Deepgram spec: text frame)",
+				"type", ctrlType, "request_id", requestID)
+		}
+		switch ctrlType {
+		case "KeepAlive":
+			slog.Info("[DG] KeepAlive from client", "request_id", requestID)
+			return true, nil
+		case "Finalize":
+			// Deepgram Finalize: flush the stream and answer
+			// with a Results event carrying from_finalize=true.
+			// The sidecar transcribes the buffered audio and
+			// emits a final event WITHOUT closing the session.
+			stats.requestFlush(false)
+			slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
+			if err := sidecarConn.WriteMessage(ws.TextMessage, []byte(`{"type":"Finalize"}`)); err != nil {
+				slog.Error("[DG] Failed to forward Finalize to sidecar", "error", err, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_FORWARD_FAILED", "DeepgramForwardFailed", slog.LevelError, map[string]interface{}{
+					"endpoint":   "/v1/listen",
+					"ip":         c.IP(),
+					"request_id": requestID,
+					"kind":       "finalize",
+				}, err))
+				return true, err
+			}
+			slog.Info("[DG] Finalize forwarded to sidecar OK", "request_id", requestID)
+			return true, nil
+		case "CloseStream":
+			stats.requestFlush(true)
+			slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
+			if err := sidecarConn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+				slog.Error("[DG] Failed to forward CloseStream to sidecar", "error", err, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_FORWARD_FAILED", "DeepgramForwardFailed", slog.LevelError, map[string]interface{}{
+					"endpoint":   "/v1/listen",
+					"ip":         c.IP(),
+					"request_id": requestID,
+					"kind":       "close_stream",
+				}, err))
+				return true, err
+			}
+			slog.Info("[DG] CloseStream forwarded to sidecar OK", "request_id", requestID)
+			return true, nil
+		}
+		return false, nil
+	}
 
 	// Client → Sidecar: forward binary audio and translate control messages
 	go func() {
@@ -253,45 +323,36 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 						"total_bytes": stats.bytes(),
 					}, err))
 				}
-				errCh <- err
+				errCh <- dgSessionEnd{src: "client_read", err: err}
 				return
 			}
 
-			// Text frames may be Deepgram control messages
 			if msgType == websocket.TextMessage {
 				slog.Info("[DG] Received text from client", "text", string(msg), "request_id", requestID)
-				var ctrl map[string]interface{}
-				if json.Unmarshal(msg, &ctrl) == nil {
-					if ctrlType, ok := ctrl["type"].(string); ok {
-						switch ctrlType {
-						case "KeepAlive":
-							slog.Info("[DG] KeepAlive from client", "request_id", requestID)
-							continue
-						case "Finalize":
-							// Deepgram Finalize: flush the stream and answer
-							// with a Results event carrying from_finalize=true.
-							// The sidecar transcribes the buffered audio and
-							// emits a final event WITHOUT closing the session.
-							stats.requestFlush(false)
-							slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
-							_ = sidecarConn.WriteMessage(ws.TextMessage,
-								[]byte(`{"type":"Finalize"}`))
-							continue
-						case "CloseStream":
-							stats.requestFlush(true)
-							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
-							_ = sidecarConn.WriteMessage(ws.TextMessage,
-								[]byte(`{"type":"CloseStream"}`))
-							continue
-						}
-					}
-				}
-				// Forward other text messages
-				if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
-					errCh <- err
+			}
+
+			// Control messages: text frames per spec, plus binary frames
+			// that strictly parse as one (misbehaving clients).
+			if msgType == websocket.TextMessage || (len(msg) > 0 && msg[0] == '{') {
+				handled, herr := handleControl(msg, msgType == websocket.BinaryMessage)
+				if herr != nil {
+					errCh <- dgSessionEnd{src: "control_forward", err: herr}
 					return
 				}
-				continue
+				if handled {
+					continue
+				}
+				if msgType == websocket.TextMessage {
+					// Forward unrecognized text messages verbatim.
+					if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
+						slog.Error("[DG] Failed to forward text to sidecar", "error", err, "request_id", requestID)
+						errCh <- dgSessionEnd{src: "text_forward", err: err}
+						return
+					}
+					continue
+				}
+				// Binary frame that merely starts with '{' — genuine
+				// audio; fall through to the audio path.
 			}
 
 			// Binary audio frame
@@ -308,7 +369,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					"request_id":  requestID,
 					"total_bytes": stats.bytes(),
 				}, err))
-				errCh <- err
+				errCh <- dgSessionEnd{src: "audio_forward", err: err}
 				return
 			}
 		}
@@ -326,7 +387,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			_, msg, err := sidecarConn.ReadMessage()
 			if err != nil {
 				slog.Info("[DG] Sidecar read error (connection closed?)", "error", err, "request_id", requestID)
-				errCh <- err
+				errCh <- dgSessionEnd{src: "sidecar_read", err: err}
 				return
 			}
 
@@ -339,7 +400,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			if json.Unmarshal(msg, &evt) != nil {
 				slog.Warn("[DG] Non-JSON from sidecar, forwarding raw", "request_id", requestID)
 				if writeErr := c.WriteMessage(websocket.TextMessage, msg); writeErr != nil {
-					errCh <- writeErr
+					slog.Error("[DG] Failed to write raw sidecar message to client", "error", writeErr, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: writeErr}
 					return
 				}
 				continue
@@ -365,7 +427,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				}
 				dgEvt := buildDGResults(evt, false, false, modelMeta)
 				if err := c.WriteJSON(dgEvt); err != nil {
-					errCh <- err
+					slog.Error("[DG] Failed to write partial Results to client", "error", err, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: err}
 					return
 				}
 				// Response-sent event → Loki. Transcript is PII-redacted;
@@ -396,13 +459,17 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 						"request_id": requestID,
 					}, piiErr))
 				}
-				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID)
+				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID,
+					"from_finalize", evt.FromFinalize, "words", len(evt.Words),
+					"start", evt.Start, "end", evt.End)
 				dgEvt := buildDGResults(evt, true, true, modelMeta)
 				if err := c.WriteJSON(dgEvt); err != nil {
-					errCh <- err
+					slog.Error("[DG] Failed to write final Results to client", "error", err, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: err}
 					return
 				}
 				stats.markResult()
+				slog.Info("[DG] Final Results written to client OK", "request_id", requestID, "from_finalize", evt.FromFinalize)
 				// Response-sent event → Loki. Transcript is PII-redacted.
 				finalFields := map[string]interface{}{
 					"endpoint":      "/v1/listen",
@@ -434,7 +501,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					"request_id": requestID,
 				}, evt.Message))
 				_ = c.WriteJSON(fiber.Map{"type": "Error", "message": evt.Message})
-				errCh <- nil
+				errCh <- dgSessionEnd{src: "sidecar_error"}
 				return
 
 			case "done":
@@ -444,7 +511,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				// object, then terminate") before the session ends.
 				if stats.closeStreamRequested() {
 					audioBytes, _, _, _ := stats.snapshot()
-					_ = c.WriteJSON(dgMetadata{
+					if err := c.WriteJSON(dgMetadata{
 						Type:           "Metadata",
 						TransactionKey: "deprecated",
 						RequestID:      requestID,
@@ -453,22 +520,30 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 						Duration:       float64(audioBytes) / 32000.0, // PCM 16-bit 16kHz mono
 						Channels:       1,
 						ModelInfo:      modelMeta.ModelInfo,
-					})
+					}); err != nil {
+						slog.Warn("[DG] Failed to write terminal Metadata to client", "error", err, "request_id", requestID)
+					}
 				}
-				errCh <- nil
+				errCh <- dgSessionEnd{src: "sidecar_done"}
 				return
 
 			default:
 				slog.Info("[DG] Unknown sidecar event, forwarding", "type", evt.Type, "request_id", requestID)
 				if writeErr := c.WriteMessage(websocket.TextMessage, msg); writeErr != nil {
-					errCh <- writeErr
+					slog.Error("[DG] Failed to write unknown sidecar event to client", "error", writeErr, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: writeErr}
 					return
 				}
 			}
 		}
 	}()
 
-	<-errCh
+	end := <-errCh
+	flushRequested, flushPending := stats.flushInfo()
+	slog.Info("[DG] Session ending", "request_id", requestID,
+		"cause", end.src, "error", end.err,
+		"flush_requested", flushRequested, "flush_pending", flushPending,
+		"audio_bytes", stats.bytes(), "frames", stats.frames())
 
 	// A client disconnect (including a TCP half-close, which Deepgram's
 	// own docs show clients doing) may race a pending Finalize/
@@ -479,7 +554,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	if flushAt, pending := stats.flushPending(); pending {
 		slog.Info("[DG] Client disconnected with flush pending, waiting for final",
 			"request_id", requestID, "grace_ms", dgFlushGrace.Milliseconds())
-		waitForFlushResult(stats, sidecarGone, flushAt, dgFlushGrace)
+		outcome := waitForFlushResult(stats, sidecarGone, flushAt, dgFlushGrace)
+		slog.Info("[DG] Flush grace wait finished", "request_id", requestID, "outcome", outcome)
 	}
 
 	// Signal teardown (suppresses spurious CLIENT_READ_ERROR), then
@@ -511,7 +587,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"process_ms", processTimeMs, "frames", frameCount)
+		"process_ms", processTimeMs, "frames", frameCount,
+		"end_cause", end.src, "flush_requested", flushRequested)
 
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ENDED", "DeepgramSessionEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/v1/listen",
@@ -524,7 +601,18 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"process_ms":        processTimeMs,
 		"frame_count":       frameCount,
 		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
+		"end_cause":         end.src,
+		"flush_requested":   flushRequested,
 	}))
+}
+
+// dgSessionEnd tags the condition that ended a Deepgram session with
+// its source, so teardown logging can state exactly what happened
+// (client_read, sidecar_read, sidecar_done, sidecar_error,
+// control_forward, text_forward, audio_forward, client_write).
+type dgSessionEnd struct {
+	src string
+	err error
 }
 
 // dgSessionStats tracks per-session counters shared between the two
@@ -593,6 +681,14 @@ func (s *dgSessionStats) resultAtOrAfter(t time.Time) bool {
 	return !s.lastResultAt.Before(t)
 }
 
+// flushInfo reports whether a flush (Finalize/CloseStream) was ever
+// requested this session and whether it is still unanswered.
+func (s *dgSessionStats) flushInfo() (requested, pending bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.flushAt.IsZero(), !s.flushAt.IsZero() && s.lastResultAt.Before(s.flushAt)
+}
+
 // closeStreamRequested reports whether the pending/last flush was a
 // CloseStream (used to emit the terminal Metadata event on done).
 func (s *dgSessionStats) closeStreamRequested() bool {
@@ -629,7 +725,9 @@ const dgFlushGrace = 10 * time.Second
 
 // waitForFlushResult blocks until the sidecar delivers a final at-or-after
 // flushAt, the sidecar goroutine exits, or the grace period expires.
-func waitForFlushResult(stats *dgSessionStats, sidecarGone <-chan struct{}, flushAt time.Time, grace time.Duration) {
+// It returns the outcome ("delivered", "sidecar_gone", "expired") for
+// logging.
+func waitForFlushResult(stats *dgSessionStats, sidecarGone <-chan struct{}, flushAt time.Time, grace time.Duration) string {
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -637,12 +735,12 @@ func waitForFlushResult(stats *dgSessionStats, sidecarGone <-chan struct{}, flus
 	for {
 		select {
 		case <-sidecarGone:
-			return
+			return "sidecar_gone"
 		case <-deadline.C:
-			return
+			return "expired"
 		case <-tick.C:
 			if stats.resultAtOrAfter(flushAt) {
-				return
+				return "delivered"
 			}
 		}
 	}
