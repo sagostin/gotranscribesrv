@@ -402,6 +402,10 @@ func classifyEndpoint(c *fiber.Ctx) string {
 		return "llm_images"
 	case path == "/v1/messages":
 		return "llm_messages"
+	case path == "/v1/responses":
+		return "llm_responses"
+	case strings.HasPrefix(path, "/v1/conversations"):
+		return "llm_conversations"
 	default:
 		return ""
 	}

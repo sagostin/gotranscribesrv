@@ -18,7 +18,7 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS (with per-user stored voice cloning + 17 built-in system voices) and Kokoro (multilingual EN/Mandarin/JP, higher quality), 24 kHz output. Default backend selectable per-endpoint; streaming TTS is PocketTTS-only. |
-| **LLM Gateway** | OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`) and Anthropic-compatible (`/v1/messages`) endpoints proxied to the LLM sidecar (CoreML/ANE) with auth, rate limiting, and per-model token usage tracking. SSE streaming passthrough. |
+| **LLM Gateway** | OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/responses`) and Anthropic-compatible (`/v1/messages`) endpoints proxied to the LLM sidecar (CoreML/ANE) with auth, rate limiting, and per-model token usage tracking. SSE streaming passthrough. Server-side conversation state for the Responses API via `/v1/conversations` (Postgres-backed). |
 | **User Authentication** | JWT access/refresh tokens + API key support |
 | **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint, per-model LLM token totals |
 | **Rate Limiting** | Per-user, in-memory sliding window |
@@ -207,7 +207,7 @@ make audio-sidecar
 
 ### LLM Inference (sidecar-llm)
 
-A separate Swift/Vapor sidecar (`sidecar-llm/`, port 8080) serves chat LLMs (Mistral 7B, Gemma 4 via coreml-llm, …), embeddings, and Stable Diffusion image generation on CoreML/ANE, speaking **OpenAI** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/models`) and **Anthropic** (`/v1/messages`) dialects natively. The Go server proxies those same paths with auth, rate limiting, and per-model token usage tracking — point unmodified OpenAI/Anthropic SDKs at the Go server. Management (download/load/unload/status) is proxied under `/api/v1/admin/llm/models/:id/*` (admin only).
+A separate Swift/Vapor sidecar (`sidecar-llm/`, port 8080) serves chat LLMs (Mistral 7B, Gemma 4 via coreml-llm, …), embeddings, and Stable Diffusion image generation on CoreML/ANE, speaking **OpenAI** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/models`, `/v1/responses`) and **Anthropic** (`/v1/messages`) dialects natively. The Go server proxies those same paths with auth, rate limiting, and per-model token usage tracking — point unmodified OpenAI/Anthropic SDKs at the Go server. Conversation state for the Responses API (`conversation` / `previous_response_id`) is stored gateway-side in Postgres and exposed via `/v1/conversations` CRUD. Management (download/load/unload/status) is proxied under `/api/v1/admin/llm/models/:id/*` (admin only).
 
 **Build prerequisite — run once before `make llm-sidecar` / `make llm-build`:** sidecar-llm depends on a patched copy of [swift-embeddings](https://github.com/jkrukowski/swift-embeddings) (macOS 15 platform bump + `@preconcurrency` imports for Swift 6), vendored into `sidecar-llm/vendor/` like ITN's text-processing-rs:
 
@@ -238,6 +238,10 @@ See [sidecar-llm/README.md](sidecar-llm/README.md) for details.
 | `POST` | `/v1/embeddings` | OpenAI-compatible embeddings |
 | `POST` | `/v1/images/generations` | OpenAI-compatible image generation |
 | `POST` | `/v1/messages` | Anthropic-compatible messages (SSE streaming) |
+| `POST` | `/v1/responses` | OpenAI Responses API (SSE streaming, tool calling, conversation state) |
+| `POST` | `/v1/conversations` | Create conversation (Responses API state) |
+| `GET/POST/DELETE` | `/v1/conversations/:id` | Retrieve / update metadata / delete conversation |
+| `GET/POST` | `/v1/conversations/:id/items` | List / append conversation items |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |

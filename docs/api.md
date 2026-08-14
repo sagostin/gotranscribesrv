@@ -1112,10 +1112,50 @@ The Go server proxies the LLM sidecar's native API surface, adding auth (JWT or 
 | `POST /v1/embeddings` | OpenAI | — |
 | `POST /v1/images/generations` | OpenAI | — |
 | `POST /v1/messages` | Anthropic Messages | SSE (`stream: true`) |
+| `POST /v1/responses` | OpenAI Responses | SSE (`stream: true`) |
+
+### Responses API (`/v1/responses`)
+
+OpenAI's Responses dialect, spoken natively by the sidecar. Accepts `input` as a string or an items array (`message` with `input_text`/`output_text` parts, `function_call`, `function_call_output`), plus `instructions`, flat-shape function `tools` (`{"type":"function","name",...}` — built-in tools like `web_search` are skipped), `tool_choice`, `max_output_tokens`, `temperature`, `stream`, `store`, `metadata`, `conversation`, and `previous_response_id`.
+
+The response object carries `output` items (`message` with `output_text` parts and/or `function_call` items), the `output_text` convenience string, and `usage.{input_tokens,output_tokens,total_tokens}`. Streaming emits the standard `response.*` SSE event sequence (`response.created` → `response.output_item.added` → `response.content_part.added` → `response.output_text.delta` × N → `…done` events → `response.completed` with the full response object incl. usage). Function calls stream as `response.function_call_arguments.delta/done` events. `status` is `incomplete` (with `incomplete_details.reason: "max_output_tokens"`) when generation hit the token cap.
+
+**Conversation state** lives in the gateway (Postgres): when a request carries `conversation` (id string or `{"id": ...}`) or `previous_response_id`, the stored items are prepended to `input` before proxying, and — unless `store: false` — the turn's input/output items are persisted afterwards (plus a `response_records` row per response for `previous_response_id` chaining, depth-capped at 50).
+
+**Limits:** image/file input parts return `400 invalid_request_error` (all current models are text-only); `background`, `reasoning`, and `text.format` are accepted and ignored.
+
+```bash
+curl http://localhost:3000/v1/responses \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"mistral-7b-int4","input":"Hi"}'
+
+# Multi-turn with server-side state
+CONV=$(curl -s http://localhost:3000/v1/conversations -H "X-API-Key: $KEY" -d '{}' | jq -r .id)
+curl http://localhost:3000/v1/responses -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d "{\"model\":\"mistral-7b-int4\",\"conversation\":\"$CONV\",\"input\":\"My name is Ada.\"}"
+curl http://localhost:3000/v1/responses -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d "{\"model\":\"mistral-7b-int4\",\"conversation\":\"$CONV\",\"input\":\"What is my name?\"}"
+```
+
+### Conversations API (`/v1/conversations`)
+
+Gateway-side storage for Responses-API conversation state (user-scoped; `llm_conversations` in usage logs).
+
+| Route | Purpose |
+|-------|---------|
+| `POST /v1/conversations` | Create (optional `items`, `metadata`) → `{id: "conv_…", object: "conversation", created_at, metadata}` |
+| `GET /v1/conversations/:id` | Retrieve |
+| `POST /v1/conversations/:id` | Replace `metadata` |
+| `DELETE /v1/conversations/:id` | Delete → `{object: "conversation.deleted", deleted: true}` |
+| `GET /v1/conversations/:id/items` | List (`limit` 1–100 default 20, `after` cursor, `order` asc/desc) |
+| `POST /v1/conversations/:id/items` | Append items |
+| `GET /v1/conversations/:id/items/:itemID` | Retrieve one item |
+| `DELETE /v1/conversations/:id/items/:itemID` | Delete one item |
+
 
 **Auth:** standard gateway auth — `Authorization: Bearer <jwt-or-gtx_key>` or `X-API-Key: gtx_...`. Anthropic SDK users pass their `gtx_...` key as `api_key` (the SDK's `x-api-key` header is accepted).
 
-**Usage tracking:** every request writes a `usage_logs` row whose `metadata` JSONB carries `{"model", "prompt_tokens", "completion_tokens", "total_tokens", "stream"}`. Token counts are extracted from the response (non-streaming) or tee'd from the terminal SSE frames (streaming — OpenAI finish-chunk `usage`; Anthropic `message_start`/`message_delta`). Aggregates appear in `/api/v1/usage/summary` under `by_endpoint` (`llm_chat`, `llm_completion`, `llm_embeddings`, `llm_images`, `llm_messages`) and per-model under `by_model`.
+**Usage tracking:** every request writes a `usage_logs` row whose `metadata` JSONB carries `{"model", "prompt_tokens", "completion_tokens", "total_tokens", "stream"}`. Token counts are extracted from the response (non-streaming) or tee'd from the terminal SSE frames (streaming — OpenAI finish-chunk `usage`; Anthropic `message_start`/`message_delta`). Aggregates appear in `/api/v1/usage/summary` under `by_endpoint` (`llm_chat`, `llm_completion`, `llm_embeddings`, `llm_images`, `llm_messages`, `llm_responses`, `llm_conversations`) and per-model under `by_model`.
 
 **Examples:**
 

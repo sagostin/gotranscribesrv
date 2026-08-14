@@ -32,7 +32,7 @@ Sources/
   ImageRuntime/      ImageModelManager (Stable Diffusion)
   EmbeddingRuntime/  EmbeddingModelManager (swift-embeddings)
   ExternalRuntime/   CoreMLLLMManager (coreml-llm backend)
-  App/               Vapor routes, OpenAI + Anthropic DTOs, SSE, entrypoint
+  App/               Vapor routes, OpenAI + Anthropic + Responses DTOs, SSE, entrypoint
 ```
 
 ## Conventions
@@ -67,7 +67,12 @@ Sources/
 - **Add a tool** to the Mistral prompt: edit `ModelRunner.mistralPromptText`
   (string builder) and add tests in `Tests/PromptRenderingTests.swift`.
 - **Tweak a route**: `Sources/App/Routes.swift` (OpenAI), `AnthropicRoutes.swift`
-  (Anthropic dialect).
+  (Anthropic dialect), `ResponsesRoutes.swift` (OpenAI Responses API).
+- **Responses dialect notes**: stateless by design — the Go gateway prepends
+  conversation history into `input` before proxying, so `conversation` /
+  `previous_response_id` never reach the sidecar. Tools use the flat
+  `{type:"function", name, ...}` shape (not chat-completions nesting).
+  Image/file input parts 400 — all models are text-only.
 - **Adjust gating**: `Settings` block in `models.json` (or env
   `COREML_IMAGES`, `COREML_AUTO_DOWNLOAD`, `COREML_PRELOAD`,
   `COREML_EMBEDDINGS`).

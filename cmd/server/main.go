@@ -204,6 +204,7 @@ func main() {
 	deepgramRealtimeHandler := handlers.NewDeepgramRealtimeHandler(sc, redactor, logManager, db.DB)
 	modelsHandler := handlers.NewModelsHandler(sc)
 	llmHandler := handlers.NewLLMHandler(sc, db.DB, logManager)
+	conversationsHandler := handlers.NewConversationsHandler(db.DB, logManager)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -350,6 +351,17 @@ func main() {
 		authed.Post("/v1/embeddings", llmHandler.Embeddings)
 		authed.Post("/v1/images/generations", llmHandler.Images)
 		authed.Post("/v1/messages", llmHandler.Messages)
+		// OpenAI Responses API (sidecar dialect) + Conversations API
+		// (gateway-side state in Postgres)
+		authed.Post("/v1/responses", llmHandler.Responses)
+		authed.Post("/v1/conversations", conversationsHandler.Create)
+		authed.Get("/v1/conversations/:id", conversationsHandler.Get)
+		authed.Post("/v1/conversations/:id", conversationsHandler.Update)
+		authed.Delete("/v1/conversations/:id", conversationsHandler.Delete)
+		authed.Get("/v1/conversations/:id/items", conversationsHandler.ListItems)
+		authed.Post("/v1/conversations/:id/items", conversationsHandler.CreateItems)
+		authed.Get("/v1/conversations/:id/items/:itemID", conversationsHandler.GetItem)
+		authed.Delete("/v1/conversations/:id/items/:itemID", conversationsHandler.DeleteItem)
 	}
 
 	// Voice Management

@@ -32,6 +32,9 @@ import (
 //	Anthropic non-streaming→ response usage.{input,output}_tokens
 //	Anthropic streaming    → message_start usage.input_tokens +
 //	                         message_delta usage.output_tokens (tee'd from SSE)
+//	Responses non-streaming→ response usage.{input,output}_tokens
+//	Responses streaming    → response.completed event's response.usage +
+//	                         full response object (tee'd from SSE)
 type LLMHandler struct {
 	sc *sidecar.Client
 	db *gorm.DB
@@ -49,7 +52,8 @@ type llmDialect int
 const (
 	dialectOpenAI llmDialect = iota
 	dialectAnthropic
-	dialectNone // images — no usage object
+	dialectResponses // OpenAI Responses API — usage.{input,output}_tokens
+	dialectNone      // images — no usage object
 )
 
 // ChatCompletions handles POST /v1/chat/completions (OpenAI).
@@ -217,6 +221,10 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 type streamUsage struct {
 	prompt     int
 	completion int
+	// responseJSON carries the full terminal response object for dialects
+	// that emit one (Responses API response.completed) so the handler can
+	// persist it after the stream ends.
+	responseJSON []byte
 }
 
 // teeSSE copies an SSE stream from src to w frame by frame, flushing after
@@ -275,6 +283,26 @@ func parseStreamUsage(dialect llmDialect, payload []byte, usage *streamUsage) {
 			usage.prompt = chunk.Usage.PromptTokens
 			usage.completion = chunk.Usage.CompletionTokens
 		}
+	case dialectResponses:
+		// Terminal response.completed event carries the full response object.
+		var ev struct {
+			Type     string          `json:"type"`
+			Response json.RawMessage `json:"response"`
+		}
+		if json.Unmarshal(payload, &ev) != nil || ev.Type != "response.completed" {
+			return
+		}
+		usage.responseJSON = ev.Response
+		var r struct {
+			Usage *struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(ev.Response, &r) == nil && r.Usage != nil {
+			usage.prompt = r.Usage.InputTokens
+			usage.completion = r.Usage.OutputTokens
+		}
 	case dialectAnthropic:
 		var ev struct {
 			Type    string `json:"type"`
@@ -311,6 +339,16 @@ func extractUsage(dialect llmDialect, body []byte) (prompt, completion int) {
 		}
 		if json.Unmarshal(body, &resp) == nil && resp.Usage != nil {
 			return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+		}
+	case dialectResponses:
+		var resp struct {
+			Usage *struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(body, &resp) == nil && resp.Usage != nil {
+			return resp.Usage.InputTokens, resp.Usage.OutputTokens
 		}
 	case dialectAnthropic:
 		var resp struct {

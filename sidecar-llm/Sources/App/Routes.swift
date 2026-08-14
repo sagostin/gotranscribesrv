@@ -447,6 +447,10 @@ func routes(_ app: Application, context: ServerContext) throws {
     // MARK: Anthropic Messages API
 
     anthropicRoutes(app, context: context)
+
+    // MARK: OpenAI Responses API
+
+    responsesRoutes(app, context: context)
 }
 
 // MARK: - Response helpers

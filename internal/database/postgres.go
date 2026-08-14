@@ -51,6 +51,9 @@ func (db *DB) Migrate() error {
 		&models.RequestLog{},
 		&models.TokenBlacklist{},
 		&models.Voice{},
+		&models.Conversation{},
+		&models.ConversationItem{},
+		&models.ResponseRecord{},
 	)
 }
 
