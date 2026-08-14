@@ -50,10 +50,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env — must match on all nodes}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
-      # Swift sidecar runs natively on THIS host (launchd) for CoreML/ANE.
+      # Audio sidecar runs natively on THIS host (launchd) for CoreML/ANE.
       # host.docker.internal works on Docker Desktop and OrbStack.
-      SWIFT_SIDECAR_URL: ${SWIFT_SIDECAR_URL:-http://host.docker.internal:8101}
-      SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
+      AUDIO_SIDECAR_URL: ${AUDIO_SIDECAR_URL:-http://host.docker.internal:8101}
+      AUDIO_SIDECAR_WS_URL: ${AUDIO_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
       # PII redaction — Presidio runs per-node (below) so unredacted
       # transcript text never leaves this machine.
       ENABLE_PII: ${ENABLE_PII:-true}

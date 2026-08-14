@@ -49,6 +49,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	if file.Size > 100*1024*1024 {
 		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_TOO_LARGE", "ASRFileTooLarge", slog.LevelWarn, map[string]interface{}{
 			"endpoint":      "/api/v1/asr",
+			"ip":            c.IP(),
 			"file_size":     file.Size,
 			"filename":      file.Filename,
 			"size_limit_mb": 100,
@@ -68,6 +69,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/asr",
+			"ip":         c.IP(),
 			"filename":   file.Filename,
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
@@ -85,6 +87,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("ASR_FILE_READ_ERROR", "ASRFileReadError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/asr",
+			"ip":         c.IP(),
 			"filename":   file.Filename,
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, err))
@@ -133,6 +136,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		slog.ErrorContext(c.UserContext(), "transcription failed", "error", err, "filename", file.Filename)
 		h.lm.SendLog(h.lm.BuildLog("ASR_FAILED", "ASRFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/asr",
+			"ip":         c.IP(),
 			"filename":   file.Filename,
 			"file_size":  file.Size,
 			"sidecar_ms": sidecarMs,
@@ -158,12 +162,14 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 	if piiErr != nil {
 		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
 			"endpoint":   "/api/v1/asr",
+			"ip":         c.IP(),
 			"text_len":   len(result.Text),
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, piiErr))
 	}
 	completedFields := map[string]interface{}{
 		"endpoint":       "/api/v1/asr",
+		"ip":             c.IP(),
 		"filename":       file.Filename,
 		"file_size":      file.Size,
 		"audio_ms":       int(result.Duration * 1000),

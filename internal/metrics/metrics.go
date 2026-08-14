@@ -57,6 +57,16 @@ var (
 )
 
 // ──────────────────────────────────────────────────────────────
+// LLM metrics
+// ──────────────────────────────────────────────────────────────
+
+var (
+	llmRequestsTotal *prometheus.CounterVec
+	llmTokensTotal   *prometheus.CounterVec
+	llmDuration      *prometheus.HistogramVec
+)
+
+// ──────────────────────────────────────────────────────────────
 // Sidecar metrics
 // ──────────────────────────────────────────────────────────────
 
@@ -91,6 +101,15 @@ var (
 	piiRedactionsTotal *prometheus.CounterVec
 	piiDuration        *prometheus.HistogramVec
 	piiErrorsTotal     *prometheus.CounterVec
+)
+
+// Realtime speech-to-speech (WS /v1/realtime S2S mode — docs/realtime.md).
+var (
+	realtimeS2STurnLatency   *prometheus.HistogramVec
+	realtimeS2SLLMTTFT       *prometheus.HistogramVec
+	realtimeS2STTSFirstChunk *prometheus.HistogramVec
+	realtimeS2SInterruptions prometheus.Counter
+	realtimeS2SToolCalls     prometheus.Counter
 )
 
 // per-minute ticker state — uses atomic counter so the ticker goroutine
@@ -176,6 +195,23 @@ func Init(metricsEnabled bool) {
 		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 	}, []string{})
 
+	// ── LLM ───────────────────────────────────────────────
+	llmRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gotranscribesrv_llm_requests_total",
+		Help: "Total LLM gateway requests by endpoint and model.",
+	}, []string{"endpoint", "model"})
+
+	llmTokensTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gotranscribesrv_llm_tokens_total",
+		Help: "Total LLM tokens processed by model and kind (prompt|completion).",
+	}, []string{"model", "kind"})
+
+	llmDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gotranscribesrv_llm_duration_seconds",
+		Help:    "LLM request duration in seconds (request start to stream end).",
+		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+	}, []string{"endpoint"})
+
 	// ── Sidecar ───────────────────────────────────────────
 	sidecarRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "gotranscribesrv_sidecar_request_duration_seconds",
@@ -227,6 +263,35 @@ func Init(metricsEnabled bool) {
 		Help: "PII redactor errors by reason (analyzer_error, timeout, etc).",
 	}, []string{"reason"})
 
+	// ── Realtime speech-to-speech ─────────────────────────
+	realtimeS2STurnLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gotranscribesrv_realtime_s2s_turn_latency_seconds",
+		Help:    "End of user speech (turn-end event) to first audio byte out.",
+		Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.5, 2.5, 5, 10},
+	}, []string{"engine"})
+
+	realtimeS2SLLMTTFT = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gotranscribesrv_realtime_s2s_llm_ttft_seconds",
+		Help:    "LLM time-to-first-token within an S2S turn.",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 5},
+	}, []string{"model"})
+
+	realtimeS2STTSFirstChunk = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gotranscribesrv_realtime_s2s_tts_first_chunk_seconds",
+		Help:    "TTS request to first streamed audio frame (per sentence).",
+		Buckets: []float64{0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3},
+	}, []string{})
+
+	realtimeS2SInterruptions = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gotranscribesrv_realtime_s2s_interruptions_total",
+		Help: "Barge-in events (user speech cancelled an in-flight response).",
+	})
+
+	realtimeS2SToolCalls = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gotranscribesrv_realtime_s2s_tool_calls_total",
+		Help: "Tool calls relayed to clients in S2S sessions.",
+	})
+
 	// ── Register all ──────────────────────────────────────
 	prometheus.MustRegister(
 		httpRequestsTotal,
@@ -240,6 +305,9 @@ func Init(metricsEnabled bool) {
 		ActiveWebSocketConnections,
 		ttsRequestsTotal,
 		ttsDuration,
+		llmRequestsTotal,
+		llmTokensTotal,
+		llmDuration,
 		sidecarRequestDuration,
 		sidecarErrorsTotal,
 		authAttemptsTotal,
@@ -249,6 +317,11 @@ func Init(metricsEnabled bool) {
 		piiRedactionsTotal,
 		piiDuration,
 		piiErrorsTotal,
+		realtimeS2STurnLatency,
+		realtimeS2SLLMTTFT,
+		realtimeS2STTSFirstChunk,
+		realtimeS2SInterruptions,
+		realtimeS2SToolCalls,
 	)
 
 	// Set build info (constant gauge = 1)
@@ -358,8 +431,24 @@ func RecordTTSUsage(voice string, processTimeMs int) {
 	ttsDuration.WithLabelValues().Observe(float64(processTimeMs) / 1000.0)
 }
 
+// RecordLLMUsage records LLM gateway metrics: request count, token totals
+// per model, and end-to-end request duration.
+func RecordLLMUsage(endpoint, model string, promptTokens, completionTokens, processTimeMs int) {
+	if !enabled {
+		return
+	}
+	llmRequestsTotal.WithLabelValues(endpoint, model).Inc()
+	if promptTokens > 0 {
+		llmTokensTotal.WithLabelValues(model, "prompt").Add(float64(promptTokens))
+	}
+	if completionTokens > 0 {
+		llmTokensTotal.WithLabelValues(model, "completion").Add(float64(completionTokens))
+	}
+	llmDuration.WithLabelValues(endpoint).Observe(float64(processTimeMs) / 1000.0)
+}
+
 // RecordSidecarLatency records sidecar round-trip latency and errors.
-// sidecar should be "swift". operation should be the endpoint name.
+// sidecar should be "swift" (audio), "llm", or "presidio". operation should be the endpoint name.
 func RecordSidecarLatency(sidecar, operation string, durationMs int, err error) {
 	if !enabled {
 		return
@@ -368,6 +457,49 @@ func RecordSidecarLatency(sidecar, operation string, durationMs int, err error) 
 	if err != nil {
 		sidecarErrorsTotal.WithLabelValues(sidecar, operation).Inc()
 	}
+}
+
+// ── Realtime speech-to-speech (docs/realtime.md) ────────────
+
+// RecordRealtimeS2STurn records end-of-speech → first-audio-byte latency
+// for one completed S2S turn (the headline voice-agent metric).
+func RecordRealtimeS2STurn(engine string, seconds float64) {
+	if !enabled {
+		return
+	}
+	realtimeS2STurnLatency.WithLabelValues(engine).Observe(seconds)
+}
+
+// RecordRealtimeS2STTFT records LLM time-to-first-token within a turn.
+func RecordRealtimeS2STTFT(model string, seconds float64) {
+	if !enabled {
+		return
+	}
+	realtimeS2SLLMTTFT.WithLabelValues(model).Observe(seconds)
+}
+
+// RecordRealtimeS2STTSFirstChunk records TTS request → first streamed frame.
+func RecordRealtimeS2STTSFirstChunk(seconds float64) {
+	if !enabled {
+		return
+	}
+	realtimeS2STTSFirstChunk.WithLabelValues().Observe(seconds)
+}
+
+// RecordRealtimeS2SInterruption counts a barge-in event.
+func RecordRealtimeS2SInterruption() {
+	if !enabled {
+		return
+	}
+	realtimeS2SInterruptions.Inc()
+}
+
+// RecordRealtimeS2SToolCall counts a tool call relayed to the client.
+func RecordRealtimeS2SToolCall() {
+	if !enabled {
+		return
+	}
+	realtimeS2SToolCalls.Inc()
 }
 
 // RecordPIIRedaction increments the per-entity-type redaction counter.

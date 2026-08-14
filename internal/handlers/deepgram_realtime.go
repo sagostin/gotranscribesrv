@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/url"
@@ -14,11 +15,13 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
+	"gorm.io/gorm"
 )
 
 // DeepgramRealtimeHandler proxies a Deepgram-compatible WebSocket session
-// to the Swift sidecar's /stream/realtime endpoint. The legacy /v1/listen
+// to the audio sidecar's /stream/realtime endpoint. The legacy /v1/listen
 // handler (DeepgramCompatHandler in deepgram.go) still proxies to the
 // buffered /stream route — this new handler exposes the **true real-time**
 // streaming engine via /v2/listen so existing clients are untouched.
@@ -32,13 +35,15 @@ import (
 //
 // Explicit engine IDs (eou-160, nemotron-1120, unified-640, …) pass through.
 type DeepgramRealtimeHandler struct {
-	sc *sidecar.Client
-	lm *logging.LogManager
+	sc       *sidecar.Client
+	redactor *pii.Redactor
+	lm       *logging.LogManager
+	db       *gorm.DB
 }
 
 // NewDeepgramRealtimeHandler constructs the handler.
-func NewDeepgramRealtimeHandler(sc *sidecar.Client, lm *logging.LogManager) *DeepgramRealtimeHandler {
-	return &DeepgramRealtimeHandler{sc: sc, lm: lm}
+func NewDeepgramRealtimeHandler(sc *sidecar.Client, redactor *pii.Redactor, lm *logging.LogManager, db *gorm.DB) *DeepgramRealtimeHandler {
+	return &DeepgramRealtimeHandler{sc: sc, redactor: redactor, lm: lm, db: db}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -47,11 +52,14 @@ func (h *DeepgramRealtimeHandler) Upgrade() fiber.Handler {
 }
 
 type dgRealtimeSession struct {
-	requestID  string
-	ws         *websocket.Conn
-	sidecar    *ws.Conn
-	modelMeta  dgModelMeta
-	speechEndF bool
+	requestID       string
+	ws              *websocket.Conn
+	sidecar         *ws.Conn
+	modelMeta       dgModelMeta
+	speechEndF      bool
+	totalAudioBytes int
+	firstAudioAt    time.Time
+	lastResultAt    time.Time
 }
 
 func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
@@ -84,6 +92,7 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	slog.Info("[DG-RT] Session started", "request_id", requestID, "engine", model, "url", u.String())
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_STARTED", "DeepgramRealtimeStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":        "/v2/listen",
+		"ip":              c.IP(),
 		"request_id":      requestID,
 		"engine":          model,
 		"interim_results": interimResults,
@@ -135,6 +144,12 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 				return
 			}
 			if mt == websocket.BinaryMessage {
+				if len(msg) > 0 {
+					sess.totalAudioBytes += len(msg)
+					if sess.firstAudioAt.IsZero() {
+						sess.firstAudioAt = time.Now()
+					}
+				}
 				if err := sidecarConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
 					errCh <- err
 					return
@@ -162,9 +177,33 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	}()
 
 	<-errCh
+
+	// Log usage — processing time = first audio frame → last final result
+	audioDurationMs := 0
+	if sess.totalAudioBytes > 0 {
+		audioDurationMs = sess.totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+	}
+	processTimeMs := 0
+	if !sess.firstAudioAt.IsZero() && !sess.lastResultAt.IsZero() {
+		processTimeMs = int(sess.lastResultAt.Sub(sess.firstAudioAt).Milliseconds())
+	}
+	userID, _ := c.Locals("user_id").(string)
+	apiKeyID, _ := c.Locals("api_key_id").(string)
+	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_deepgram_realtime",
+		audioDurationMs, processTimeMs, false)
+
+	slog.Info("[DG-RT] Deepgram-realtime session ended", "request_id", requestID,
+		"audio_bytes", sess.totalAudioBytes, "audio_duration_ms", audioDurationMs,
+		"process_ms", processTimeMs)
+
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_ENDED", "DeepgramRealtimeEnded", slog.LevelInfo, map[string]interface{}{
-		"endpoint":   "/v2/listen",
-		"request_id": requestID,
+		"endpoint":          "/v2/listen",
+		"ip":                c.IP(),
+		"request_id":        requestID,
+		"audio_bytes":       sess.totalAudioBytes,
+		"audio_duration_ms": audioDurationMs,
+		"process_ms":        processTimeMs,
+		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
 	}))
 }
 
@@ -178,53 +217,106 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 	case "ready":
 		// Already sent Metadata on connect; nothing to do.
 	case "speech_started":
+		// Spec shape: {"type":"SpeechStarted","channel":[0],"timestamp":<float>}
 		_ = sess.ws.WriteJSON(fiber.Map{
-			"type":         "SpeechStarted",
-			"channel":      []any{map[string]any{"alternatives": []any{}, "transcript": ""}},
-			"duration":     asFloat(ev["time"]),
-			"start":        asFloat(ev["time"]),
-			"is_final":     false,
-			"speech_final": false,
-			"request_id":   sess.modelMeta.RequestID,
+			"type":      "SpeechStarted",
+			"channel":   []int{0},
+			"timestamp": asFloat(ev["time"]),
 		})
 	case "partial":
 		if !interimResults {
 			return
 		}
 		text, _ := ev["text"].(string)
+		// Redact transcript text before logging — the raw text goes to
+		// the client untouched, only the redacted form reaches Loki.
+		redactedPartial, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
+		if piiErr != nil {
+			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/v2/listen",
+				"ip":         sess.ws.IP(),
+				"text_len":   len(text),
+				"request_id": sess.requestID,
+			}, piiErr))
+		}
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":          "Results",
-			"channel_index": []any{0, 1},
+			"channel_index": []int{0, 1},
+			"duration":      0.0,
+			"start":         0.0,
 			"channel": fiber.Map{
 				"alternatives": []any{
 					fiber.Map{"transcript": text, "confidence": 0.0, "words": []any{}},
 				},
 			},
-			"is_final":     false,
-			"speech_final": false,
-			"request_id":   sess.modelMeta.RequestID,
+			"is_final":      false,
+			"speech_final":  false,
+			"metadata":      sess.modelMeta,
+			"from_finalize": false,
 		})
+		// Response-sent event → Loki (redacted). Debug level due to volume.
+		partialFields := map[string]interface{}{
+			"endpoint":     "/v2/listen",
+			"ip":           sess.ws.IP(),
+			"request_id":   sess.requestID,
+			"engine":       sess.modelMeta.ModelInfo["name"],
+			"transcript":   redactedPartial,
+			"pii_redacted": len(piiItems),
+			"is_final":     false,
+		}
+		if len(piiItems) > 0 {
+			partialFields["pii_entity_types"] = piiEntityTypes(piiItems)
+		}
+		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_PARTIAL_SENT", "DeepgramRealtimePartialSent", slog.LevelDebug, partialFields))
 	case "final":
 		text, _ := ev["text"].(string)
 		isSpeechFinal, _ := ev["speech_final"].(bool)
+		sess.lastResultAt = time.Now()
+		redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
+		if piiErr != nil {
+			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/v2/listen",
+				"ip":         sess.ws.IP(),
+				"text_len":   len(text),
+				"request_id": sess.requestID,
+			}, piiErr))
+		}
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":          "Results",
-			"channel_index": []any{0, 1},
+			"channel_index": []int{0, 1},
+			"duration":      0.0,
+			"start":         0.0,
 			"channel": fiber.Map{
 				"alternatives": []any{
 					fiber.Map{"transcript": text, "confidence": 0.0, "words": []any{}},
 				},
 			},
+			"is_final":      true,
+			"speech_final":  isSpeechFinal,
+			"metadata":      sess.modelMeta,
+			"from_finalize": false,
+		})
+		// Response-sent event → Loki (redacted transcript).
+		finalFields := map[string]interface{}{
+			"endpoint":     "/v2/listen",
+			"ip":           sess.ws.IP(),
+			"request_id":   sess.requestID,
+			"engine":       sess.modelMeta.ModelInfo["name"],
+			"transcript":   redactedFinal,
+			"pii_redacted": len(piiItems),
 			"is_final":     true,
 			"speech_final": isSpeechFinal,
-			"request_id":   sess.modelMeta.RequestID,
-		})
+		}
+		if len(piiItems) > 0 {
+			finalFields["pii_entity_types"] = piiEntityTypes(piiItems)
+		}
+		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_FINAL_SENT", "DeepgramRealtimeFinalSent", slog.LevelInfo, finalFields))
 		if isSpeechFinal {
+			// Spec shape: {"type":"UtteranceEnd","channel":[0],"last_word_end":<float>}
 			_ = sess.ws.WriteJSON(fiber.Map{
 				"type":          "UtteranceEnd",
-				"channel":       []any{map[string]any{"alternatives": []any{}, "transcript": ""}},
+				"channel":       []int{0},
 				"last_word_end": asFloat(ev["time"]),
-				"request_id":    sess.modelMeta.RequestID,
 			})
 			sess.speechEndF = true
 		}

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GoTranscribeSrv — LLM sidecar (chat, embeddings, image generation — CoreML/ANE)
+
+  OpenAI- and Anthropic-compatible inference server for Core ML LLMs, image
+  generators, and embeddings, written in Swift + Vapor (see sidecar-llm/).
+
+  LaunchAgent: starts at login (pair with auto-login for headless minis)
+  and restarts automatically if it crashes.
+
+  SETUP: replace __REPO_PATH__ with the absolute repo path, e.g.
+    sed -i '' 's|__REPO_PATH__|/Users/transcribe/gotranscribesrv|g' \
+      com.gotranscribesrv.llm-sidecar.plist
+
+  Build the release binary FIRST (much faster startup than `swift run`):
+    make llm-build   # produces sidecar-llm/.build/release/Server
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.gotranscribesrv.llm-sidecar</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__REPO_PATH__/sidecar-llm/.build/release/Server</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__REPO_PATH__/sidecar-llm</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+
+		<!-- Optional sidecar env vars. Uncomment + edit to override defaults.
+		     See sidecar-llm/docs/setup.md § "Environment variables" for the
+		     full list. Defaults (when commented out) preserve prior
+		     behavior — no breaking changes on existing deployments.
+
+		<key>PORT</key>
+		<string>8080</string>
+
+		<key>HUGGING_FACE_HUB_TOKEN</key>
+		<string></string>
+
+		<key>COREML_MAX_RESIDENT</key>
+		<string>2</string>
+
+		<key>COREML_AUTO_DOWNLOAD</key>
+		<string>true</string>
+
+		<key>COREML_PRELOAD</key>
+		<string>true</string>
+
+		<key>COREML_IMAGES</key>
+		<string>true</string>
+
+		<key>COREML_EMBEDDINGS</key>
+		<string>true</string>
+		-->
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- Restart no more than once per 10s to avoid crash-loop spinning -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>__REPO_PATH__/deploy/macos/logs/llm-sidecar.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__REPO_PATH__/deploy/macos/logs/llm-sidecar.err.log</string>
+</dict>
+</plist>

@@ -1,7 +1,7 @@
 # Production deployment — split nodes + DB/Caddy VM
 
 This setup runs the Go API server in Docker on **each Mac mini** (next to its
-native CoreML/ANE Swift sidecar), with **Postgres and Caddy on a separate
+native CoreML/ANE audio sidecar), with **Postgres and Caddy on a separate
 virtualized server**. Caddy load-balances client requests across the minis;
 every mini talks to the same database.
 
@@ -19,7 +19,7 @@ every mini talks to the same database.
    │  Mac mini 1    │ │  Mac mini 2    │ │  Mac mini N    │
    │  server :3000  │ │  server :3000  │ │  server :3000  │   ← Docker
    │  presidio      │ │  presidio      │ │  presidio      │   ← Docker
-   │  swift :8101   │ │  swift :8101   │ │  swift :8101   │   ← native (launchd)
+   │  audio :8101   │ │  audio :8101   │ │  audio :8101   │   ← native (launchd)
    └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
            └──────────────────┴──────────────────┘
                     DATABASE_URL → Postgres on DB VM
@@ -65,7 +65,7 @@ Follow `deploy/macos/README.md` for the headless boot configuration
 (power-on after outage, FileVault off, auto-login, Docker at login), then:
 
 ```bash
-make sidecar-install           # builds + installs the Swift sidecar launchd agent
+make sidecar-install           # builds + installs the audio sidecar launchd agent
 make sidecar-status            # verify it's up on :8101
 
 cp .env.node.example .env      # DB VM IP in DATABASE_URL, shared JWT_SECRET,
@@ -139,7 +139,7 @@ Everything below is ordered from "happens on its own" to "you SSH in".
 2. macOS auto-logs-in the service account (FileVault must be off).
 3. Docker Desktop/OrbStack starts at login → `server` + `presidio`
    containers start (`restart: unless-stopped`).
-4. LaunchAgent starts the Swift sidecar (:8101).
+4. LaunchAgent starts the audio sidecar (:8101).
 5. Caddy's `/health` checks pass (~10–30 s) → traffic resumes to that mini.
 
 Verify from any machine: `curl http://<mini-ip>:3000/health` and
@@ -154,7 +154,7 @@ Verify from any machine: `curl http://<mini-ip>:3000/health` and
 ```bash
 # On the mini (SSH in, or physically):
 make node-down && make node-up          # restart server + presidio
-make sidecar-restart                    # restart the Swift sidecar launchd agent
+make sidecar-restart                    # restart the audio sidecar launchd agent
 ```
 
 Caddy keeps traffic on the remaining minis while this one is down; no
@@ -192,7 +192,7 @@ make caddy-reload  # zero downtime; new upstreams gated by health checks
 
 | Check | Where | Fix |
 |---|---|---|
-| `curl http://<mini-ip>:8101/health` | mini | Swift sidecar down → `make sidecar-status` / `make sidecar-restart`; logs in `deploy/macos/logs/` |
+| `curl http://<mini-ip>:8101/health` | mini | Audio sidecar down → `make sidecar-status` / `make sidecar-restart`; logs in `deploy/macos/logs/` |
 | `docker compose -f docker-compose.node.yml ps` | mini | Containers down → `make node-up`; check `make node-logs` |
 | `curl http://<mini-ip>:3000/health` | mini | Server up but sidecar dead → fix sidecar first |
 | `curl http://<db-vm>/health` | anywhere | Caddy up but a mini missing → that mini's health check is failing; check the mini, not Caddy |
@@ -212,7 +212,7 @@ another Mac mini" below.
 git pull
 make node-migrate      # from the FIRST upgraded node only, if schema changed
 make node-up
-make swift-build && make sidecar-restart   # if the Swift sidecar changed
+make audio-build && make sidecar-restart   # if the audio sidecar changed
 ```
 
 ## Database backups

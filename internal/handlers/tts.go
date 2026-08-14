@@ -116,6 +116,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 		if err != nil {
 			h.lm.SendLog(h.lm.BuildLog("TTS_VOICE_LOAD_FAILED", "TTSVoiceLoadFailed", slog.LevelWarn, map[string]interface{}{
 				"endpoint":   "/api/v1/tts",
+				"ip":         c.IP(),
 				"voice_id":   body.VoiceID,
 				"request_id": middleware.RequestIDFromCtx(c),
 			}, err))
@@ -150,6 +151,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("TTS_FAILED", "TTSFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/api/v1/tts",
+			"ip":            c.IP(),
 			"voice":         req.Voice,
 			"voice_id":      body.VoiceID,
 			"text_length":   len(body.Text),
@@ -177,6 +179,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 
 	h.lm.SendLog(h.lm.BuildLog("TTS_COMPLETED", "TTSCompleted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":           "/api/v1/tts",
+		"ip":                 c.IP(),
 		"voice":              req.Voice,
 		"voice_id":           body.VoiceID,
 		"format":             req.Format,

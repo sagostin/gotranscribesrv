@@ -76,7 +76,7 @@ if !itnLibSubpath.isEmpty {
 }
 
 let package = Package(
-    name: "SidecarSwift",
+    name: "SidecarAudio",
     platforms: [
         .macOS(.v14),
     ],

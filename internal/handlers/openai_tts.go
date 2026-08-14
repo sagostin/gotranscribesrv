@@ -159,6 +159,7 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_REQUEST", "OpenAITTSRequest", slog.LevelInfo, map[string]interface{}{
 		"endpoint":        "/v1/audio/speech",
+		"ip":              c.IP(),
 		"model":           body.Model,
 		"backend":         backend,
 		"voice":           pocketVoice,
@@ -174,6 +175,7 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 	if err != nil {
 		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_FAILED", "OpenAITTSFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/v1/audio/speech",
+			"ip":            c.IP(),
 			"model":         body.Model,
 			"backend":       backend,
 			"voice":         pocketVoice,
@@ -203,6 +205,7 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_COMPLETED", "OpenAITTSCompleted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":           "/v1/audio/speech",
+		"ip":                 c.IP(),
 		"model":              body.Model,
 		"backend":            backendUsed,
 		"voice":              pocketVoice,

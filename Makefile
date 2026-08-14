@@ -5,11 +5,13 @@
 #
 #   Dev (single machine):
 #     make up              Postgres + Go server + Presidio (Docker)
-#     make swift-sidecar   Swift inference sidecar, native :8101 (required)
+#     make audio-sidecar   Audio inference sidecar, native :8101 (required)
+#     make llm-sidecar     LLM inference sidecar, native :8080 (optional)
 #
 #   Production (see docs/production.md):
 #     make node-up         Mac mini node: server + Presidio
-#     make sidecar-install Mac mini node: Swift sidecar auto-start via launchd
+#     make sidecar-install Mac mini node: audio sidecar auto-start via launchd
+#     make llm-install     Mac mini node: LLM sidecar auto-start via launchd
 #     make node-migrate    One-shot DB migration (first boot, one node only)
 #     make db-up           DB VM: Postgres + Caddy load balancer
 #     make db-backup       DB VM: compressed pg_dump into ./backups/
@@ -20,7 +22,8 @@
 
 .PHONY: help \
         run build test migrate lint tidy \
-        swift-sidecar swift-build swift-test \
+        audio-sidecar audio-build audio-test \
+        llm-vendor llm-sidecar llm-build llm-install llm-restart llm-uninstall llm-status \
         sidecar-install sidecar-restart sidecar-uninstall sidecar-status \
         itn-vendor itn-build itn-clean \
         up down logs \
@@ -49,17 +52,38 @@ else
   RUST_TARGET ?= x86_64-apple-darwin
 endif
 
-ITN_VENDOR_DIR  := sidecar-swift/Vendor/text-processing-rs
+ITN_VENDOR_DIR  := sidecar-audio/Vendor/text-processing-rs
 ITN_VERSION     := v0.2.2
 ITN_RELEASE     := $(ITN_VENDOR_DIR)/target/$(RUST_TARGET)/release/libtext_processing_rs.a
 ITN_TEST_FILTER := TextNormalizerTests
 
-# Swift sidecar launchd agent (production nodes — see deploy/macos/)
-SIDECAR_LABEL           := com.gotranscribesrv.swift-sidecar
+# Audio sidecar launchd agent (production nodes — see deploy/macos/).
+# The legacy `com.gotranscribesrv.swift-sidecar` label is kept during the
+# rename transition so existing deployments don't break; both plists are
+# installed by `make sidecar-install` and point at the same binary.
+SIDECAR_LABEL           := com.gotranscribesrv.audio-sidecar
 SIDECAR_PLIST           := deploy/macos/$(SIDECAR_LABEL).plist
+SIDECAR_LEGACY_LABEL    := com.gotranscribesrv.swift-sidecar
+SIDECAR_LEGACY_PLIST    := deploy/macos/$(SIDECAR_LEGACY_LABEL).plist
 SIDECAR_ROTATE_LABEL    := com.gotranscribesrv.swift-sidecar-logrotate
 SIDECAR_ROTATE_PLIST    := deploy/macos/$(SIDECAR_ROTATE_LABEL).plist
 SIDECAR_ROTATE_SCRIPT   := deploy/macos/rotate-sidecar-logs.sh
+
+# LLM sidecar vendored dependency (mirrors itn-vendor). sidecar-llm itself is
+# committed to this monorepo, but its `vendor/swift-embeddings` package is a
+# patched copy of upstream (macOS 15 platform bump + @preconcurrency imports
+# for Swift 6) and is NOT committed — `make llm-vendor` clones upstream and
+# re-applies the patches. Override the version for testing:
+#   make llm-vendor EMBEDDINGS_VERSION=0.2.0
+EMBEDDINGS_VENDOR_DIR := sidecar-llm/vendor/swift-embeddings
+EMBEDDINGS_REPO       ?= https://github.com/jkrukowski/swift-embeddings.git
+EMBEDDINGS_VERSION    ?= 0.1.0
+
+# LLM sidecar launchd agent.
+LLM_SIDECAR_LABEL       := com.gotranscribesrv.llm-sidecar
+LLM_SIDECAR_PLIST       := deploy/macos/$(LLM_SIDECAR_LABEL).plist
+LLM_SIDECAR_PORT        := 8080
+
 LAUNCHAGENTS    := $(HOME)/Library/LaunchAgents
 GUI_DOMAIN      := gui/$(shell id -u)
 
@@ -73,7 +97,8 @@ help:
 	@echo ""
 	@echo "  Dev (single machine)"
 	@echo "    up / down / logs    Postgres + Go server + Presidio (docker-compose.yml)"
-	@echo "    swift-sidecar       Swift inference sidecar, native on :8101 (required)"
+	@echo "    audio-sidecar       Audio inference sidecar, native on :8101 (required)"
+	@echo "    llm-sidecar         LLM inference sidecar, native on :8080 (optional)"
 	@echo "    run / build / test  Go backend: run natively, build bin/server, run tests"
 	@echo ""
 	@echo "  Production — Mac mini nodes (docker-compose.node.yml)"
@@ -89,15 +114,23 @@ help:
 	@echo "    db-restore          Restore: make db-restore FILE=backups/....dump"
 	@echo "    caddy-reload        Zero-downtime reload after editing Caddyfile"
 	@echo ""
-	@echo "  Swift sidecar"
-	@echo "    swift-build         Release build (.build/release/Server — used by launchd)"
-	@echo "    swift-test          Sidecar tests (ITN)"
-	@echo "    sidecar-install     Install launchd agents (auto-start at login, restart on crash, log rotation)"
-	@echo "    sidecar-restart     Restart the launchd agent (e.g. after git pull + swift-build)"
-	@echo "    sidecar-uninstall   Remove the launchd agent"
+	@echo "  Audio sidecar (CoreML/ANE — ASR, VAD, Diarization, TTS)"
+	@echo "    audio-build         Release build (.build/release/Server — used by launchd)"
+	@echo "    audio-test          Sidecar tests (ITN)"
+	@echo "    sidecar-install     Install audio sidecar launchd agents (auto-start, log rotation)"
+	@echo "    sidecar-restart     Restart the audio sidecar launchd agent"
+	@echo "    sidecar-uninstall   Remove the audio sidecar launchd agents"
 	@echo "    sidecar-status      launchd state + :8101 health check"
 	@echo ""
-	@echo "  ITN (optional Rust build — run BEFORE swift-build)"
+	@echo "  LLM sidecar (CoreML — chat, embeddings, image generation)"
+	@echo "    llm-vendor          Clone + patch swift-embeddings $(EMBEDDINGS_VERSION) into sidecar-llm/vendor (run FIRST)"
+	@echo "    llm-build           Release build (sidecar-llm/.build/release/Server)"
+	@echo "    llm-install         Install llm-sidecar launchd agent + log rotation"
+	@echo "    llm-restart         Restart the llm-sidecar launchd agent"
+	@echo "    llm-uninstall       Remove the llm-sidecar launchd agent"
+	@echo "    llm-status          launchd state + :8080 health check"
+	@echo ""
+	@echo "  ITN (optional Rust build — run BEFORE audio-build)"
 	@echo "    itn-vendor          Clone text-processing-rs $(ITN_VERSION)"
 	@echo "    itn-build           Build libtext_processing_rs.a ($(RUST_TARGET))"
 	@echo "    itn-clean           Remove Rust build artifacts"
@@ -109,7 +142,7 @@ help:
 	@echo "  Utilities"
 	@echo "    migrate             Run DB migrations and exit (native)"
 	@echo "    lint / tidy         golangci-lint / go mod tidy"
-	@echo "    clean               Remove bin/, sidecar-swift/.build, Go cache"
+	@echo "    clean               Remove bin/, sidecar-audio/.build, sidecar-llm/.build, Go cache"
 	@echo ""
 
 # ---------- Go backend ----------
@@ -131,43 +164,55 @@ lint:
 tidy:
 	go mod tidy
 
-# ---------- Swift sidecar (CoreML/ANE — ASR, VAD, Diarization, TTS) ----------
-swift-sidecar:
+# ---------- Audio sidecar (CoreML/ANE — ASR, VAD, Diarization, TTS) ----------
+audio-sidecar:
 	@echo ""
-	@echo "  🚀 Starting Swift sidecar (CoreML/ANE)"
+	@echo "  🚀 Starting audio sidecar (CoreML/ANE)"
 	@echo "  ℹ  Listening on http://localhost:8101"
 	@echo "  ℹ  ASR, VAD, Diarization, TTS via FluidAudio"
 	@echo ""
-	cd sidecar-swift && swift run Server
+	cd sidecar-audio && swift run Server
 
-swift-build:
-	cd sidecar-swift && swift build -c release
+audio-build:
+	cd sidecar-audio && swift build -c release
 
-swift-test:
+audio-test:
 	@echo ""
-	@echo "  🧪 Running Swift sidecar tests (ITN, ...)"
+	@echo "  🧪 Running audio sidecar tests (ITN, ...)"
 	@echo ""
-	cd sidecar-swift && swift test --filter $(ITN_TEST_FILTER)
+	cd sidecar-audio && swift test --filter $(ITN_TEST_FILTER)
 
-# ---------- Swift sidecar launchd agent (production nodes) ----------
-# Auto-start the Swift sidecar at login (pair with auto-login for headless
+# ---------- Audio sidecar launchd agent (production nodes) ----------
+# Auto-start the audio sidecar at login (pair with auto-login for headless
 # minis) and restart it on crash. See deploy/macos/README.md for the full
 # headless setup (pmset, FileVault, auto-login).
-sidecar-install: swift-build
+#
+# Migration: this target installs BOTH `com.gotranscribesrv.audio-sidecar`
+# (current) and `com.gotranscribesrv.swift-sidecar` (legacy shim) plists.
+# Once the new label is healthy, run `make sidecar-uninstall` to drop both,
+# then delete the legacy plist from ~/Library/LaunchAgents/ if desired.
+sidecar-install: audio-build
 	@echo ""
-	@echo "  📦 Installing $(SIDECAR_LABEL) LaunchAgent"
+	@echo "  📦 Installing audio-sidecar LaunchAgent(s)"
 	@echo "  ℹ  Repo path baked into plist: $(CURDIR)"
 	@echo ""
 	mkdir -p deploy/macos/logs $(LAUNCHAGENTS)
+	chmod +x $(SIDECAR_ROTATE_SCRIPT)
+	# New primary label
 	sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LABEL) 2>/dev/null
 	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
-	chmod +x $(SIDECAR_ROTATE_SCRIPT)
+	# Legacy shim (com.gotranscribesrv.swift-sidecar) — same binary
+	sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_LEGACY_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_LEGACY_LABEL).plist
+	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LEGACY_LABEL) 2>/dev/null
+	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_LEGACY_LABEL).plist
+	# Log rotation companion (covers both audio labels + llm)
 	sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_ROTATE_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL) 2>/dev/null
 	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
 	@echo ""
-	@echo "  ✅ Sidecar installed — starts now and at every login"
+	@echo "  ✅ Audio sidecar installed (com.gotranscribesrv.audio-sidecar)"
+	@echo "  ✅ Legacy shim installed (com.gotranscribesrv.swift-sidecar) — remove after migration"
 	@echo "  ℹ  Log rotation installed — hourly, 10m x 3 (mirrors Docker logging)"
 	@echo "  ℹ  Verify: make sidecar-status"
 	@echo "  ℹ  Logs:   deploy/macos/logs/"
@@ -175,18 +220,23 @@ sidecar-install: swift-build
 
 sidecar-restart:
 	launchctl kickstart -k $(GUI_DOMAIN)/$(SIDECAR_LABEL)
-	@echo "  ✅ Sidecar restarted"
+	@echo "  ✅ Audio sidecar restarted"
 
 sidecar-uninstall:
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LABEL)
+	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LEGACY_LABEL)
 	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL)
 	rm -f $(LAUNCHAGENTS)/$(SIDECAR_LABEL).plist
+	rm -f $(LAUNCHAGENTS)/$(SIDECAR_LEGACY_LABEL).plist
 	rm -f $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
-	@echo "  ✅ Sidecar LaunchAgents removed"
+	@echo "  ✅ Audio sidecar LaunchAgents removed (new + legacy)"
 
 sidecar-status:
-	@echo "  launchd (sidecar):"
+	@echo "  launchd (audio-sidecar):"
 	@out=$$(launchctl print $(GUI_DOMAIN)/$(SIDECAR_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
+		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (not loaded)"; fi
+	@echo "  launchd (swift-sidecar shim):"
+	@out=$$(launchctl print $(GUI_DOMAIN)/$(SIDECAR_LEGACY_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
 		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (not loaded)"; fi
 	@echo "  launchd (logrotate):"
 	@out=$$(launchctl print $(GUI_DOMAIN)/$(SIDECAR_ROTATE_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
@@ -194,6 +244,92 @@ sidecar-status:
 	@echo "  health:"
 	@out=$$(curl -sf http://localhost:8101/health 2>/dev/null); \
 		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (no response on :8101)"; fi
+
+# ---------- LLM sidecar (CoreML — chat, embeddings, image generation) ----------
+# sidecar-llm is committed to this repo, but its `vendor/swift-embeddings`
+# path-dependency is not (same pattern as itn-vendor): `make llm-vendor`
+# clones upstream and re-applies our local patches (macOS 15 platform bump +
+# @preconcurrency imports for Swift 6 strict concurrency). llm-build /
+# llm-sidecar / llm-install fail with a hint if it hasn't been vendored yet.
+
+llm-vendor:
+	@if [ ! -f "$(EMBEDDINGS_VENDOR_DIR)/Package.swift" ]; then \
+		echo "📥 Cloning swift-embeddings $(EMBEDDINGS_VERSION)..."; \
+		rm -rf $(EMBEDDINGS_VENDOR_DIR); \
+		mkdir -p sidecar-llm/vendor; \
+		git clone --depth 1 --branch $(EMBEDDINGS_VERSION) $(EMBEDDINGS_REPO) $(EMBEDDINGS_VENDOR_DIR); \
+		echo "🔧 Applying patches: macOS 15 platform bump + @preconcurrency imports"; \
+		sed -i '' 's/\.macOS(\.v14)/.macOS(.v15)/' $(EMBEDDINGS_VENDOR_DIR)/Package.swift; \
+		grep -rl --include="*.swift" "^import Tokenizers$$" $(EMBEDDINGS_VENDOR_DIR)/Sources \
+			| xargs sed -i '' 's/^import Tokenizers$$/@preconcurrency import Tokenizers/'; \
+		grep -rl --include="*.swift" "^import Hub$$" $(EMBEDDINGS_VENDOR_DIR)/Sources \
+			| xargs sed -i '' 's/^import Hub$$/@preconcurrency import Hub/'; \
+		echo "✅ swift-embeddings vendored + patched at $(EMBEDDINGS_VENDOR_DIR)"; \
+	else \
+		echo "✅ swift-embeddings already vendored at $(EMBEDDINGS_VENDOR_DIR)"; \
+	fi
+
+llm-sidecar:
+	@if [ ! -f "$(EMBEDDINGS_VENDOR_DIR)/Package.swift" ]; then \
+		echo "❌ swift-embeddings not vendored at $(EMBEDDINGS_VENDOR_DIR)"; \
+		echo "   Run: make llm-vendor"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "  🚀 Starting LLM sidecar (CoreML)"
+	@echo "  ℹ  Listening on http://localhost:$(LLM_SIDECAR_PORT)"
+	@echo "  ℹ  OpenAI/Anthropic-compatible chat + embeddings + image generation"
+	@echo ""
+	cd sidecar-llm && PORT=$(LLM_SIDECAR_PORT) swift run Server
+
+llm-build:
+	@if [ ! -f "$(EMBEDDINGS_VENDOR_DIR)/Package.swift" ]; then \
+		echo "❌ swift-embeddings not vendored at $(EMBEDDINGS_VENDOR_DIR)"; \
+		echo "   Run: make llm-vendor"; \
+		exit 1; \
+	fi
+	cd sidecar-llm && swift build -c release
+
+llm-install: llm-build
+	@echo ""
+	@echo "  📦 Installing $(LLM_SIDECAR_LABEL) LaunchAgent"
+	@echo "  ℹ  Repo path baked into plist: $(CURDIR)"
+	@echo ""
+	mkdir -p deploy/macos/logs $(LAUNCHAGENTS)
+	chmod +x $(SIDECAR_ROTATE_SCRIPT)
+	sed 's|__REPO_PATH__|$(CURDIR)|g' $(LLM_SIDECAR_PLIST) > $(LAUNCHAGENTS)/$(LLM_SIDECAR_LABEL).plist
+	-launchctl bootout $(GUI_DOMAIN)/$(LLM_SIDECAR_LABEL) 2>/dev/null
+	launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(LLM_SIDECAR_LABEL).plist
+	# Reuse the existing logrotate companion (rotates all three log pairs).
+	@if [ -f $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist ]; then \
+		echo "  ℹ  Logrotate companion already installed (covers audio + llm logs)"; \
+	else \
+		sed 's|__REPO_PATH__|$(CURDIR)|g' $(SIDECAR_ROTATE_PLIST) > $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist; \
+		launchctl bootstrap $(GUI_DOMAIN) $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist; \
+		echo "  ✅ Logrotate companion installed"; \
+	fi
+	@echo ""
+	@echo "  ✅ LLM sidecar installed — starts now and at every login"
+	@echo "  ℹ  Verify: make llm-status"
+	@echo "  ℹ  Logs:   deploy/macos/logs/llm-sidecar.{out,err}.log"
+	@echo ""
+
+llm-restart:
+	launchctl kickstart -k $(GUI_DOMAIN)/$(LLM_SIDECAR_LABEL)
+	@echo "  ✅ LLM sidecar restarted"
+
+llm-uninstall:
+	-launchctl bootout $(GUI_DOMAIN)/$(LLM_SIDECAR_LABEL)
+	rm -f $(LAUNCHAGENTS)/$(LLM_SIDECAR_LABEL).plist
+	@echo "  ✅ LLM sidecar LaunchAgent removed (logrotate companion left in place)"
+
+llm-status:
+	@echo "  launchd (llm-sidecar):"
+	@out=$$(launchctl print $(GUI_DOMAIN)/$(LLM_SIDECAR_LABEL) 2>/dev/null | grep -E "state|pid|last exit"); \
+		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (not loaded)"; fi
+	@echo "  health:"
+	@out=$$(curl -sf http://localhost:$(LLM_SIDECAR_PORT)/health 2>/dev/null); \
+		if [ -n "$$out" ]; then echo "$$out" | sed 's/^/    /'; else echo "    (no response on :$(LLM_SIDECAR_PORT))"; fi
 
 # ---------- ITN (Inverse Text Normalization) — NeMo via text-processing-rs ----------
 # Optional: builds the Rust static lib that FluidAudio's TextNormalizer dlsym()s
@@ -207,7 +343,7 @@ itn-vendor:
 	@if [ ! -f "$(ITN_VENDOR_DIR)/Cargo.toml" ]; then \
 		echo "📥 Cloning text-processing-rs $(ITN_VERSION)..."; \
 		rm -rf $(ITN_VENDOR_DIR); \
-		mkdir -p sidecar-swift/Vendor; \
+		mkdir -p sidecar-audio/Vendor; \
 		git clone --depth 1 --branch $(ITN_VERSION) https://github.com/FluidInference/text-processing-rs.git $(ITN_VENDOR_DIR); \
 	else \
 		echo "✅ text-processing-rs already vendored at $(ITN_VENDOR_DIR)"; \
@@ -226,10 +362,10 @@ itn-build:
 	cd $(ITN_VENDOR_DIR) && \
 		MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release --features ffi --target $(RUST_TARGET)
 	@echo ""
-	@echo "  ✅ Static lib built. Rebuild the swift sidecar to link it:"
-	@echo "      make swift-build"
+	@echo "  ✅ Static lib built. Rebuild the audio sidecar to link it:"
+	@echo "      make audio-build"
 	@echo "  Run tests to verify:"
-	@echo "      make swift-test"
+	@echo "      make audio-test"
 	@echo ""
 
 itn-clean:
@@ -241,7 +377,7 @@ up:
 	@echo ""
 	@echo "  ✅ Postgres + Go server + Presidio running"
 	@echo "  ℹ  API at http://localhost:3000"
-	@echo "  ℹ  Run 'make swift-sidecar' in another terminal"
+	@echo "  ℹ  Run 'make audio-sidecar' in another terminal"
 	@echo ""
 
 down:
@@ -251,14 +387,14 @@ logs:
 	$(DEV_COMPOSE) logs -f
 
 # ---------- Production: Mac mini node (docker-compose.node.yml) ----------
-# Runs on each Mac mini: Go server + Presidio in Docker, Swift sidecar
+# Runs on each Mac mini: Go server + Presidio in Docker, audio sidecar
 # native via launchd (see deploy/macos/). DB lives on the separate DB VM.
 node-up:
 	$(NODE_COMPOSE) up -d --build
 	@echo ""
 	@echo "  ✅ Node server + Presidio running"
 	@echo "  ℹ  API at http://localhost:3000 (reachable by Caddy on the DB VM)"
-	@echo "  ℹ  Swift sidecar is native — see deploy/macos/README.md"
+	@echo "  ℹ  Audio sidecar is native — see deploy/macos/README.md"
 	@echo ""
 
 node-down:
@@ -342,5 +478,5 @@ presidio-shell:
 
 # ---------- Utilities ----------
 clean:
-	rm -rf bin/ sidecar-swift/.build
+	rm -rf bin/ sidecar-audio/.build sidecar-llm/.build
 	go clean

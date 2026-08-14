@@ -7,11 +7,15 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
 
 func newModelsApp() *fiber.App {
 	app := fiber.New()
-	app.Get("/v1/models", ListModels)
+	// Empty sidecar URLs → LLMModels() returns nil and the list degrades
+	// to the static audio catalog.
+	h := NewModelsHandler(sidecar.NewClient("", "", ""))
+	app.Get("/v1/models", h.List)
 	return app
 }
 

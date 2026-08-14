@@ -231,6 +231,12 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                 switch type {
                 case "KeepAlive":
                     req.logger.info("[STREAM] KeepAlive")
+                case "Finalize":
+                    // Deepgram-compat: flush the current buffer WITHOUT closing
+                    // the session. Emits a final event tagged from_finalize so
+                    // the proxy can mark the Results accordingly.
+                    req.logger.info("[STREAM] Finalize, flushing (\(state.sampleCount) samples)")
+                    await emitFinalEvent(ws: ws, state: state, engines: engines, logger: req.logger, fromFinalize: true)
                 case "CloseStream":
                     req.logger.info("[STREAM] CloseStream, finalizing (\(state.sampleCount) samples)")
                     state.close()
@@ -247,16 +253,38 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
     }
 }
 
-/// Perform final transcription and send results.
+/// Perform final transcription, send results, then signal done and close.
 private func finalizeStream(
     ws: WebSocket, state: StreamState, engines: EngineManager, logger: Logger
+) async {
+    await emitFinalEvent(ws: ws, state: state, engines: engines, logger: logger, fromFinalize: false)
+
+    try? await ws.send(#"{"type":"done"}"#)
+    try? await ws.close()
+}
+
+/// Transcribe the buffered audio and emit a single `final` event.
+/// Used by both CloseStream (fromFinalize=false, then done+close) and
+/// Finalize (fromFinalize=true, session stays open).
+private func emitFinalEvent(
+    ws: WebSocket, state: StreamState, engines: EngineManager, logger: Logger, fromFinalize: Bool
 ) async {
     let floatSamples = state.pcmBuffer
 
     guard floatSamples.count >= minTranscribeSamples else {
         logger.info("[STREAM] Not enough audio (\(floatSamples.count) samples)")
-        try? await ws.send(#"{"type":"done"}"#)
-        try? await ws.close()
+        // Still answer a Finalize with the expected shape (empty final) so
+        // clients aren't left waiting for a response that never comes.
+        if fromFinalize {
+            let empty: [String: Any] = [
+                "type": "final", "text": "", "start": 0.0, "end": 0.0,
+                "words": [[String: Any]](), "is_final": true, "from_finalize": true
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: empty),
+               let json = String(data: data, encoding: .utf8) {
+                try? await ws.send(json)
+            }
+        }
         return
     }
 
@@ -348,7 +376,8 @@ private func finalizeStream(
             "end": audioDuration,
             "words": words,
             "is_final": true,
-            "itn_applied": itnEnabled
+            "itn_applied": itnEnabled,
+            "from_finalize": fromFinalize
         ]
         if let data = try? JSONSerialization.data(withJSONObject: finalEvent),
            let json = String(data: data, encoding: .utf8) {
@@ -358,9 +387,6 @@ private func finalizeStream(
         logger.error("[STREAM] Final transcription failed: \(error)")
         try? await ws.send(#"{"type":"error","message":"transcription failed"}"#)
     }
-
-    try? await ws.send(#"{"type":"done"}"#)
-    try? await ws.close()
 }
 
 // MARK: - Event Helpers

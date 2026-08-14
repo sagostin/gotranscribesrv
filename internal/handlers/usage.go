@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,6 +15,38 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/models"
 	"gorm.io/gorm"
 )
+
+// llmUsageMeta is the metadata JSONB shape written for llm_* usage entries
+// (see middleware.LogLLMUsage and the LLM gateway handler).
+type llmUsageMeta struct {
+	Model            string `json:"model"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+}
+
+// accumulateLLMTokens folds one usage log's LLM token counts into the
+// per-endpoint and per-model aggregates. No-op for non-LLM endpoints or
+// entries without parseable metadata.
+func accumulateLLMTokens(log models.UsageLog, byEndpoint map[string]models.EndpointUsage, byModel map[string]models.ModelUsage) {
+	if !strings.HasPrefix(log.Endpoint, "llm_") || byModel == nil {
+		return
+	}
+	var meta llmUsageMeta
+	if err := json.Unmarshal([]byte(log.Metadata), &meta); err != nil || meta.Model == "" {
+		return
+	}
+	ep := byEndpoint[log.Endpoint]
+	ep.PromptTokens += meta.PromptTokens
+	ep.CompletionTokens += meta.CompletionTokens
+	byEndpoint[log.Endpoint] = ep
+
+	mu := byModel[meta.Model]
+	mu.Requests++
+	mu.PromptTokens += meta.PromptTokens
+	mu.CompletionTokens += meta.CompletionTokens
+	mu.TotalTokens += meta.PromptTokens + meta.CompletionTokens
+	byModel[meta.Model] = mu
+}
 
 // periodResult holds the resolved period parameters.
 type periodResult struct {
@@ -112,6 +146,7 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 		From:       p.Since,
 		To:         p.Until,
 		ByEndpoint: make(map[string]models.EndpointUsage),
+		ByModel:    make(map[string]models.ModelUsage),
 	}
 
 	// Per-key aggregation
@@ -127,6 +162,8 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 		ep.AudioDurationSec += float64(log.AudioDuration) / 1000
 		summary.ByEndpoint[log.Endpoint] = ep
 
+		accumulateLLMTokens(log, summary.ByEndpoint, summary.ByModel)
+
 		// Aggregate per-key stats
 		if log.APIKeyID != nil {
 			ks, exists := keyStats[*log.APIKeyID]
@@ -135,6 +172,7 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 					KeyID:      *log.APIKeyID,
 					Label:      keyLabels[*log.APIKeyID],
 					ByEndpoint: make(map[string]models.EndpointUsage),
+					ByModel:    make(map[string]models.ModelUsage),
 				}
 				keyStats[*log.APIKeyID] = ks
 			}
@@ -146,6 +184,8 @@ func (h *UsageHandler) Summary(c *fiber.Ctx) error {
 			kep.Requests++
 			kep.AudioDurationSec += float64(log.AudioDuration) / 1000
 			ks.ByEndpoint[log.Endpoint] = kep
+
+			accumulateLLMTokens(log, ks.ByEndpoint, ks.ByModel)
 		}
 	}
 
@@ -258,6 +298,7 @@ func (h *UsageHandler) KeySummary(c *fiber.Ctx) error {
 		KeyID:      keyID,
 		Label:      apiKey.Label,
 		ByEndpoint: make(map[string]models.EndpointUsage),
+		ByModel:    make(map[string]models.ModelUsage),
 	}
 
 	for _, log := range logs {
@@ -269,6 +310,8 @@ func (h *UsageHandler) KeySummary(c *fiber.Ctx) error {
 		ep.Requests++
 		ep.AudioDurationSec += float64(log.AudioDuration) / 1000
 		ks.ByEndpoint[log.Endpoint] = ep
+
+		accumulateLLMTokens(log, ks.ByEndpoint, ks.ByModel)
 	}
 
 	return c.JSON(fiber.Map{
@@ -331,6 +374,7 @@ func (h *UsageHandler) MyUsage(c *fiber.Ctx) error {
 		KeyID:      keyID,
 		Label:      apiKey.Label,
 		ByEndpoint: make(map[string]models.EndpointUsage),
+		ByModel:    make(map[string]models.ModelUsage),
 	}
 
 	for _, log := range logs {
@@ -342,6 +386,8 @@ func (h *UsageHandler) MyUsage(c *fiber.Ctx) error {
 		ep.Requests++
 		ep.AudioDurationSec += float64(log.AudioDuration) / 1000
 		ks.ByEndpoint[log.Endpoint] = ep
+
+		accumulateLLMTokens(log, ks.ByEndpoint, ks.ByModel)
 	}
 
 	return c.JSON(fiber.Map{

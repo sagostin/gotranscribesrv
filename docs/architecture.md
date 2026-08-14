@@ -6,12 +6,11 @@ GoTranscribeSrv follows a **modular sidecar** architecture:
 
 1. **Go (Fiber)** handles everything HTTP — routing, auth, WebSocket management, usage tracking
 2. **Swift (Vapor + FluidAudio)** handles all audio AI — ASR, VAD, diarization, TTS via CoreML/Apple Neural Engine
-3. **PostgreSQL** is the only shared service across nodes
-4. **Each node is stateless and identical** — horizontal scaling is just "add another Mac Mini"
+3. **Swift (Vapor + CoreML)** handles all LLM inference — chat, completions, embeddings, image generation via CoreML/Apple Neural Engine
+4. **PostgreSQL** is the only shared service across nodes
+5. **Each node is stateless and identical** — horizontal scaling is just "add another Mac Mini"
 
 This keeps each component in the language where it's strongest: Go for API infrastructure, Swift for native Apple Silicon performance.
-
-> **Note:** the optional Python LLM sidecar (mlx-lm, Llama 3.1 8B) and the `/api/v1/process` endpoints were removed from this repo. See git history for the removed implementation.
 
 ---
 
@@ -35,8 +34,13 @@ This keeps each component in the language where it's strongest: Go for API infra
 │  │  • Watson-compat API     │  │  • POST /synthesize             │ │
 │  │  • WebSocket ASR Proxy   │  │  • POST /diarize                │ │
 │  │  • PII Redactor (Presidio)│ │  • POST /vad                     │ │
-│  │  • Sidecar HTTP Client   │──│                                  │ │
-│  └──────────┬───────────────┘  └──────────────────────────────────┘ │
+│  │  • LLM Gateway (OpenAI + │  │                                  │ │
+│  │    Anthropic proxies,     │  │  Swift — Vapor (:8080)           │ │
+│  │    per-model token usage) │  │  • Chat LLMs (CoreML/ANE)        │ │
+│  │  • Sidecar HTTP Client   │──│  • Embeddings (swift-embeddings) │ │
+│  └──────────┬───────────────┘  │  • Stable Diffusion images       │ │
+│             │                  │  • OpenAI + Anthropic dialects   │ │
+│             │                  └──────────────────────────────────┘ │
 │             │                                                       │
 │  ┌─────────────────────────────────────────────────────────────────┐ │
 │  │  Presidio Analyzer (:3000 internal / :5002 host)               │ │
@@ -84,7 +88,7 @@ This keeps each component in the language where it's strongest: Go for API infra
 
 ### Split Deployment (Recommended for Production)
 
-The Go API gateway and the inference sidecar don't need to run on the same machine. Since the sidecar is accessed via environment variables (`SWIFT_SIDECAR_URL`, `SWIFT_SIDECAR_WS_URL`), you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
+The Go API gateway and the inference sidecar don't need to run on the same machine. Since the sidecar is accessed via environment variables (`AUDIO_SIDECAR_URL`, `AUDIO_SIDECAR_WS_URL`; legacy `SWIFT_SIDECAR_*` still works), you can run the Go server on your normal server infrastructure and keep the Macs as dedicated inference nodes:
 
 ```
                     ┌──────────────────────────────────────┐
@@ -119,18 +123,18 @@ The Go API gateway and the inference sidecar don't need to run on the same machi
 > **Where does Presidio live?** By default it runs on the API server (in `docker-compose.yml` next to the Go server). PII-bearing transcript text never leaves the API server. For multi-node deployments that want to share one Presidio, see [Centralized Presidio in docs/api.md](api.md#pii-redaction).
 
 **Why split?**
-- Macs become pure inference appliances — only run `make swift-sidecar`, no Go, no Postgres
+- Macs become pure inference appliances — only run `make audio-sidecar`, no Go, no Postgres
 - API layer runs on standard commodity infra (Docker, K8s, $5/mo VPS, etc.)
 - Scale API and inference independently
 - Caddy provides automatic health checks and failover across Mac pool
 
 **Config (Go server `.env`):**
 ```bash
-SWIFT_SIDECAR_URL=https://inference.internal:443    # Caddy proxy to Mac pool
-SWIFT_SIDECAR_WS_URL=wss://inference.internal:443   # WebSocket via Caddy
+AUDIO_SIDECAR_URL=https://inference.internal:443    # Caddy proxy to Mac pool
+AUDIO_SIDECAR_WS_URL=wss://inference.internal:443   # WebSocket via Caddy
 ```
 
-**Note:** The Swift sidecar must stay on Apple Silicon — it requires CoreML (ASR, VAD, diarization, TTS engines).
+**Note:** The audio sidecar must stay on Apple Silicon — it requires CoreML (ASR, VAD, diarization, TTS engines).
 
 See the [Setup Guide](setup.md#split-deployment) for detailed configuration steps.
 

@@ -16,10 +16,11 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
+	"gorm.io/gorm"
 )
 
 // OpenAIRealtimeHandler proxies a /v1/realtime WebSocket session to the
-// Swift sidecar's /stream/realtime endpoint, translating between OpenAI's
+// audio sidecar's /stream/realtime endpoint, translating between OpenAI's
 // Realtime API event protocol and the sidecar's native JSON+PCM protocol.
 //
 // Wire protocol on this endpoint follows OpenAI's Realtime API as documented
@@ -54,11 +55,12 @@ import (
 type OpenAIRealtimeHandler struct {
 	sc *sidecar.Client
 	lm *logging.LogManager
+	db *gorm.DB
 }
 
 // NewOpenAIRealtimeHandler constructs the handler.
-func NewOpenAIRealtimeHandler(sc *sidecar.Client, lm *logging.LogManager) *OpenAIRealtimeHandler {
-	return &OpenAIRealtimeHandler{sc: sc, lm: lm}
+func NewOpenAIRealtimeHandler(sc *sidecar.Client, lm *logging.LogManager, db *gorm.DB) *OpenAIRealtimeHandler {
+	return &OpenAIRealtimeHandler{sc: sc, lm: lm, db: db}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -68,12 +70,15 @@ func (h *OpenAIRealtimeHandler) Upgrade() fiber.Handler {
 
 // realtimeSession is the per-connection state shared by the two goroutines.
 type realtimeSession struct {
-	requestID  string
-	sidecarURL string
-	ws         *websocket.Conn
-	sidecar    *ws.Conn
-	engine     string
-	itemID     string // current conversation.item.id for transcription events
+	requestID       string
+	sidecarURL      string
+	ws              *websocket.Conn
+	sidecar         *ws.Conn
+	engine          string
+	itemID          string // current conversation.item.id for transcription events
+	totalAudioBytes int
+	firstAudioAt    time.Time
+	lastResultAt    time.Time
 }
 
 func (h *OpenAIRealtimeHandler) handle(c *websocket.Conn) {
@@ -110,6 +115,7 @@ func (h *OpenAIRealtimeHandler) handle(c *websocket.Conn) {
 	slog.Info("[OA-RT] Session started", "request_id", requestID, "sidecar_url", u.String())
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_STARTED", "OpenAIRealtimeStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":    "/v1/realtime",
+		"ip":          c.IP(),
 		"request_id":  requestID,
 		"engine":      defaultEngine,
 		"encoding":    c.Query("encoding", "linear16"),
@@ -182,9 +188,33 @@ func (h *OpenAIRealtimeHandler) handle(c *websocket.Conn) {
 	}()
 
 	<-errCh
+
+	// Log usage — processing time = first audio frame → last final result
+	audioDurationMs := 0
+	if sess.totalAudioBytes > 0 {
+		audioDurationMs = sess.totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+	}
+	processTimeMs := 0
+	if !sess.firstAudioAt.IsZero() && !sess.lastResultAt.IsZero() {
+		processTimeMs = int(sess.lastResultAt.Sub(sess.firstAudioAt).Milliseconds())
+	}
+	userID, _ := c.Locals("user_id").(string)
+	apiKeyID, _ := c.Locals("api_key_id").(string)
+	middleware.LogWebSocketUsage(h.db, userID, apiKeyID, "asr_openai_realtime",
+		audioDurationMs, processTimeMs, false)
+
+	slog.Info("[OA-RT] OpenAI-realtime session ended", "request_id", requestID,
+		"audio_bytes", sess.totalAudioBytes, "audio_duration_ms", audioDurationMs,
+		"process_ms", processTimeMs)
+
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_ENDED", "OpenAIRealtimeEnded", slog.LevelInfo, map[string]interface{}{
-		"endpoint":   "/v1/realtime",
-		"request_id": requestID,
+		"endpoint":          "/v1/realtime",
+		"ip":                c.IP(),
+		"request_id":        requestID,
+		"audio_bytes":       sess.totalAudioBytes,
+		"audio_duration_ms": audioDurationMs,
+		"process_ms":        processTimeMs,
+		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
 	}))
 }
 
@@ -225,6 +255,10 @@ func (h *OpenAIRealtimeHandler) handleClientEvent(sess *realtimeSession, msg []b
 		if err != nil {
 			h.sendErr(sess.ws, "invalid_audio", "base64 decode failed")
 			return
+		}
+		sess.totalAudioBytes += len(raw)
+		if sess.firstAudioAt.IsZero() {
+			sess.firstAudioAt = time.Now()
 		}
 		if err := sess.sidecar.WriteMessage(websocket.BinaryMessage, raw); err != nil {
 			slog.Warn("[OA-RT] sidecar write failed", "error", err, "request_id", sess.requestID)
@@ -280,6 +314,7 @@ func (h *OpenAIRealtimeHandler) handleSidecarEvent(sess *realtimeSession, msg []
 		})
 	case "final":
 		text, _ := ev["text"].(string)
+		sess.lastResultAt = time.Now()
 		h.sendJSON(sess.ws, fiber.Map{
 			"type":          "conversation.item.input_audio_transcription.completed",
 			"event_id":      "evt_" + strings.ReplaceAll(uuid.New().String(), "-", ""),

@@ -4,12 +4,16 @@ This folder contains everything needed to run a Mac mini as an unattended
 GoTranscribeSrv **node** that recovers from power outages and reboots with
 **no one logging in**.
 
-Two things must start automatically after boot:
+Three things must start automatically after boot:
 
 1. **Docker containers** (Go server + Presidio) — via Docker Desktop/OrbStack
    "start at login" + `restart: unless-stopped` in `docker-compose.node.yml`.
-2. **Native sidecar** (Swift on :8101 — ASR, VAD, diarization, TTS) — via the
-   LaunchAgent in this folder. It must run natively for CoreML/ANE access.
+2. **Native audio sidecar** (Swift on :8101 — ASR, VAD, diarization, TTS) —
+   via the `com.gotranscribesrv.audio-sidecar` LaunchAgent. Must run natively
+   for CoreML/ANE access.
+3. **Native LLM sidecar** *(optional)* (Swift on :8080 — chat, embeddings,
+   image generation) — via the `com.gotranscribesrv.llm-sidecar` LaunchAgent.
+   Same CoreML/ANE path; install only on nodes that need LLM inference.
 
 > The DB VM (Postgres + Caddy) is a separate machine — see
 > `docker-compose.db.yml` and `docs/production.md`.
@@ -64,14 +68,14 @@ make sidecar-status     # verify: launchd state + :8101 health check
 Day-to-day management:
 
 ```bash
-make sidecar-restart    # restart after `git pull && make swift-build`
+make sidecar-restart    # restart after `git pull && make audio-build`
 make sidecar-uninstall  # remove the agents entirely
 ```
 
 ### Logs and rotation
 
 The sidecar's launchd stdout/stderr go to flat files in
-`deploy/macos/logs/` (`swift-sidecar.out.log`, `swift-sidecar.err.log`).
+`deploy/macos/logs/` (`audio-sidecar.{out,err}.log`; legacy shim writes to `swift-sidecar.{out,err}.log`).
 launchd itself never rotates these, so `make sidecar-install` also installs
 a companion agent (`com.gotranscribesrv.swift-sidecar-logrotate`) that runs
 `rotate-sidecar-logs.sh` hourly and at load. Rotation is copy-truncate
@@ -91,7 +95,7 @@ Notes:
   `~/Library/LaunchAgents/` — the repo copy keeps its `__REPO_PATH__`
   placeholder, so re-running the target after moving the repo just works.
 - If you ever need the manual equivalent (no Makefile), the steps the target
-  performs are: `make swift-build`, `sed 's|__REPO_PATH__|<repo>|g'` the
+  performs are: `make audio-build`, `sed 's|__REPO_PATH__|<repo>|g'` the
   plist into `~/Library/LaunchAgents/`, then
   `launchctl bootstrap gui/$(id -u) <plist>`.
 
@@ -113,6 +117,31 @@ flip a knob:
 See `docs/setup.md` § "Real-time streaming ASR engine" and
 "TTS backend selection" for the full matrix.
 
+### LLM sidecar (optional)
+
+If this node also serves LLM inference (chat, embeddings, image generation):
+
+```bash
+make llm-build         # release build (first time only, then after `git pull`)
+make llm-install       # install launchd agent on :8080
+make llm-status        # verify: launchd state + :8080 health check
+```
+
+Day-to-day:
+
+```bash
+make llm-restart       # restart after `git pull && make llm-build`
+make llm-uninstall     # remove the agent entirely
+```
+
+Logs land in `deploy/macos/logs/llm-sidecar.{out,err}.log` (the same logrotate
+companion handles them). The LLM sidecar shares the same logrotate agent as
+the audio sidecar — if you already ran `make sidecar-install`, no extra
+logrotate install is needed.
+
+See `sidecar-llm/README.md` and `sidecar-llm/docs/` for end-to-end coverage of
+the LLM sidecar (model registry, runtimes, env vars, endpoints).
+
 ## 4. Start the node stack
 
 ```bash
@@ -126,7 +155,7 @@ make node-up                # builds + starts server + presidio
 1. `sudo reboot` — do **not** log in via console; give it a few minutes.
 2. From another machine: `curl http://<mini-ip>:3000/health` → OK (Docker +
    containers came up).
-3. `curl http://<mini-ip>:8101/health` (Swift sidecar) → OK (LaunchAgent ran).
+3. `curl http://<mini-ip>:8101/health` (Audio sidecar) → OK (LaunchAgent ran).
 4. `curl http://<caddy-ip>/health` → OK (Caddy re-added the node after its
    health checks passed).
 5. Pull the plug (or `sudo pmset` schedule a power event), restore power —

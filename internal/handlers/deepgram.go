@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"time"
@@ -20,14 +22,15 @@ import (
 )
 
 // DeepgramHandler handles the Deepgram-compatible streaming endpoint.
-// WS /v1/listen — proxies to the Swift sidecar's /stream WebSocket,
+// WS /v1/listen — proxies to the audio sidecar's /stream WebSocket,
 // translating between Deepgram's protocol and the internal protocol.
 //
-// NOTE: Session-end logs currently do NOT include transcript text
-// (only audio bytes / duration / process time). If transcript text is
-// added to SESSION_ENDED in the future, it MUST be run through the
-// PII redactor before being added to BuildLog's AdditionalData — see
-// internal/handlers/{asr,whisper,watson}.go for the pattern.
+// NOTE: Transcript text is only ever added to Loki events AFTER PII
+// redaction (DEEPGRAM_PARTIAL_SENT / DEEPGRAM_FINAL_SENT) — see the
+// partial/final cases below and internal/handlers/{asr,whisper,watson}.go
+// for the pattern. Session-end logs deliberately do NOT include
+// transcript text (only audio bytes / duration / process time); if that
+// ever changes, the text MUST go through the redactor first.
 type DeepgramHandler struct {
 	sidecar    *sidecar.Client
 	redactor   *pii.Redactor
@@ -79,12 +82,14 @@ type dgWord struct {
 }
 
 type dgMetadata struct {
-	Type      string            `json:"type"`
-	RequestID string            `json:"request_id"`
-	Created   string            `json:"created"`
-	Duration  float64           `json:"duration"`
-	Channels  int               `json:"channels"`
-	ModelInfo map[string]string `json:"model_info"`
+	Type           string            `json:"type"`
+	TransactionKey string            `json:"transaction_key"`
+	RequestID      string            `json:"request_id"`
+	SHA256         string            `json:"sha256"`
+	Created        string            `json:"created"`
+	Duration       float64           `json:"duration"`
+	Channels       int               `json:"channels"`
+	ModelInfo      map[string]string `json:"model_info"`
 }
 
 type dgModelMeta struct {
@@ -93,19 +98,20 @@ type dgModelMeta struct {
 	ModelUUID string            `json:"model_uuid"`
 }
 
-// sidecarStreamEvent represents a JSON event from the Swift sidecar /stream WebSocket.
+// sidecarStreamEvent represents a JSON event from the audio sidecar /stream WebSocket.
 type sidecarStreamEvent struct {
-	Type    string         `json:"type"`
-	Text    string         `json:"text,omitempty"`
-	Start   float64        `json:"start,omitempty"`
-	End     float64        `json:"end,omitempty"`
-	Words   []sidecar.Word `json:"words,omitempty"`
-	IsFinal bool           `json:"is_final,omitempty"`
-	Message string         `json:"message,omitempty"`
+	Type         string         `json:"type"`
+	Text         string         `json:"text,omitempty"`
+	Start        float64        `json:"start,omitempty"`
+	End          float64        `json:"end,omitempty"`
+	Words        []sidecar.Word `json:"words,omitempty"`
+	IsFinal      bool           `json:"is_final,omitempty"`
+	FromFinalize bool           `json:"from_finalize,omitempty"`
+	Message      string         `json:"message,omitempty"`
 }
 
 // handle proxies WebSocket frames between the Deepgram-compatible client and
-// the Swift sidecar's /stream endpoint, translating the event protocol.
+// the audio sidecar's /stream endpoint, translating the event protocol.
 func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	defer c.Close()
 
@@ -132,21 +138,26 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		ModelUUID: uuid.New().String(),
 	}
 
-	// Send Deepgram Metadata event on connection open
+	// Send Deepgram Metadata event on connection open. transaction_key is
+	// "deprecated" upstream; sha256 is included for strict-schema clients
+	// (hash of the request id — Deepgram hashes request internals, clients
+	// treat it as opaque).
 	meta := dgMetadata{
-		Type:      "Metadata",
-		RequestID: requestID,
-		Created:   time.Now().UTC().Format(time.RFC3339),
-		Duration:  0,
-		Channels:  1,
-		ModelInfo: modelMeta.ModelInfo,
+		Type:           "Metadata",
+		TransactionKey: "deprecated",
+		RequestID:      requestID,
+		SHA256:         fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
+		Created:        time.Now().UTC().Format(time.RFC3339),
+		Duration:       0,
+		Channels:       1,
+		ModelInfo:      modelMeta.ModelInfo,
 	}
 	if err := c.WriteJSON(meta); err != nil {
 		slog.Error("failed to send Metadata event", "error", err, "request_id", requestID)
 		return
 	}
 
-	// Connect to Swift sidecar /stream WebSocket
+	// Connect to audio sidecar /stream WebSocket
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
 	if err != nil {
@@ -180,6 +191,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		slog.Error("failed to connect to sidecar /stream WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_CONNECT_FAILED", "DeepgramConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/v1/listen",
+			"ip":         c.IP(),
 			"request_id": requestID,
 			"url":        u.String(),
 		}, err))
@@ -196,6 +208,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_STARTED", "DeepgramSessionStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":        "/v1/listen",
+		"ip":              c.IP(),
 		"request_id":      requestID,
 		"interim_results": interimResults,
 		"language":        c.Query("language", "en"),
@@ -229,6 +242,15 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 						switch ctrlType {
 						case "KeepAlive":
 							slog.Info("[DG] KeepAlive from client", "request_id", requestID)
+							continue
+						case "Finalize":
+							// Deepgram Finalize: flush the stream and answer
+							// with a Results event carrying from_finalize=true.
+							// The sidecar transcribes the buffered audio and
+							// emits a final event WITHOUT closing the session.
+							slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
+							_ = sidecarConn.WriteMessage(ws.TextMessage,
+								[]byte(`{"type":"Finalize"}`))
 							continue
 						case "CloseStream":
 							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
@@ -293,7 +315,15 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			case "partial":
 				// Redact transcript text before logging — partials
 				// fire on every interim result, so this matters.
-				redactedPartial, _, _ := h.redactor.RedactText(context.Background(), evt.Text)
+				redactedPartial, piiItems, piiErr := h.redactor.RedactText(context.Background(), evt.Text)
+				if piiErr != nil {
+					h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+						"endpoint":   "/v1/listen",
+						"ip":         c.IP(),
+						"text_len":   len(evt.Text),
+						"request_id": requestID,
+					}, piiErr))
+				}
 				slog.Info("[DG] Sidecar partial result", "text", redactedPartial, "request_id", requestID)
 				if !interimResults {
 					slog.Info("[DG] Skipping partial (interim_results=false)", "request_id", requestID)
@@ -304,10 +334,34 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					errCh <- err
 					return
 				}
-				slog.Info("[DG] Sent Deepgram partial Results to client", "request_id", requestID)
+				// Response-sent event → Loki. Transcript is PII-redacted;
+				// partials ship at debug level due to their volume.
+				partialFields := map[string]interface{}{
+					"endpoint":     "/v1/listen",
+					"ip":           c.IP(),
+					"request_id":   requestID,
+					"transcript":   redactedPartial,
+					"pii_redacted": len(piiItems),
+					"word_count":   len(evt.Words),
+					"duration":     dgEvt.Duration,
+					"start":        dgEvt.Start,
+					"is_final":     false,
+				}
+				if len(piiItems) > 0 {
+					partialFields["pii_entity_types"] = piiEntityTypes(piiItems)
+				}
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_PARTIAL_SENT", "DeepgramPartialSent", slog.LevelDebug, partialFields))
 
 			case "final":
-				redactedFinal, _, _ := h.redactor.RedactText(context.Background(), evt.Text)
+				redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), evt.Text)
+				if piiErr != nil {
+					h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+						"endpoint":   "/v1/listen",
+						"ip":         c.IP(),
+						"text_len":   len(evt.Text),
+						"request_id": requestID,
+					}, piiErr))
+				}
 				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID)
 				dgEvt := buildDGResults(evt, true, true, modelMeta)
 				if err := c.WriteJSON(dgEvt); err != nil {
@@ -315,7 +369,24 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					return
 				}
 				lastResultAt = time.Now()
-				slog.Info("[DG] Sent Deepgram final Results to client", "request_id", requestID)
+				// Response-sent event → Loki. Transcript is PII-redacted.
+				finalFields := map[string]interface{}{
+					"endpoint":      "/v1/listen",
+					"ip":            c.IP(),
+					"request_id":    requestID,
+					"transcript":    redactedFinal,
+					"pii_redacted":  len(piiItems),
+					"word_count":    len(evt.Words),
+					"duration":      dgEvt.Duration,
+					"start":         dgEvt.Start,
+					"is_final":      true,
+					"speech_final":  dgEvt.SpeechFinal,
+					"from_finalize": dgEvt.FromFinalize,
+				}
+				if len(piiItems) > 0 {
+					finalFields["pii_entity_types"] = piiEntityTypes(piiItems)
+				}
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_FINAL_SENT", "DeepgramFinalSent", slog.LevelInfo, finalFields))
 
 			case "ready":
 				slog.Info("[DG] Sidecar ready", "request_id", requestID)
@@ -325,6 +396,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Error("[DG] Sidecar error", "message", evt.Message, "request_id", requestID)
 				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ERROR", "DeepgramSessionError", slog.LevelError, map[string]interface{}{
 					"endpoint":   "/v1/listen",
+					"ip":         c.IP(),
 					"request_id": requestID,
 				}, evt.Message))
 				_ = c.WriteJSON(fiber.Map{"type": "Error", "message": evt.Message})
@@ -368,6 +440,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ENDED", "DeepgramSessionEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/v1/listen",
+		"ip":                c.IP(),
 		"request_id":        requestID,
 		"audio_bytes":       totalAudioBytes,
 		"audio_duration_ms": audioDurationMs,
@@ -429,6 +502,6 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 			},
 		},
 		Metadata:     meta,
-		FromFinalize: false,
+		FromFinalize: evt.FromFinalize,
 	}
 }

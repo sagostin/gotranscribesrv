@@ -1,7 +1,7 @@
 import FluidAudio
 import Vapor
 
-/// GoTranscribeSrv — Swift Inference Sidecar
+/// GoTranscribeSrv — Audio Inference Sidecar
 ///
 /// HTTP server providing ASR, VAD, diarization, and TTS endpoints
 /// powered by FluidAudio (CoreML/Apple Neural Engine).
@@ -53,7 +53,7 @@ vadRoutes(app, engines: engines)
 diarizeRoutes(app, engines: engines)
 ttsRoutes(app, engines: engines)
 
-print("🎙  Swift sidecar listening on \(host):\(port)")
+print("🎙  Audio sidecar listening on \(host):\(port)")
 print("   POST /transcribe      — ASR (+ optional diarization)")
 print("   WS   /stream          — streaming ASR (buffered, legacy protocol)")
 print("   WS   /stream/realtime — true streaming ASR (EOU/Nemotron/Unified + VAD turn events)")

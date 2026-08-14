@@ -1,16 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  GoTranscribeSrv — Swift sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+  GoTranscribeSrv — Audio sidecar (legacy shim LaunchAgent).
+
+  This plist is kept during the rename transition so existing deployments
+  don't break. It now points at the same binary as the new
+  com.gotranscribesrv.audio-sidecar plist (sidecar-audio/.build/release/Server).
+
+  `make sidecar-install` bootstraps BOTH labels. Once the audio-sidecar agent
+  is healthy, run `make sidecar-uninstall` (which removes both) and delete the
+  legacy plist from ~/Library/LaunchAgents/.
+
+  Original purpose: Audio sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE).
   LaunchAgent: starts at login (pair with auto-login for headless minis)
   and restarts automatically if it crashes.
 
   SETUP: replace __REPO_PATH__ with the absolute repo path, e.g.
     sed -i '' 's|__REPO_PATH__|/Users/transcribe/gotranscribesrv|g' \
       com.gotranscribesrv.swift-sidecar.plist
-
-  Build the release binary FIRST (much faster startup than `swift run`):
-    make swift-build   # produces sidecar-swift/.build/release/Server
 -->
 <plist version="1.0">
 <dict>
@@ -19,11 +26,11 @@
 
 	<key>ProgramArguments</key>
 	<array>
-		<string>__REPO_PATH__/sidecar-swift/.build/release/Server</string>
+		<string>__REPO_PATH__/sidecar-audio/.build/release/Server</string>
 	</array>
 
 	<key>WorkingDirectory</key>
-	<string>__REPO_PATH__/sidecar-swift</string>
+	<string>__REPO_PATH__/sidecar-audio</string>
 
 	<key>EnvironmentVariables</key>
 	<dict>

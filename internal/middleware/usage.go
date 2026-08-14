@@ -3,6 +3,7 @@ package middleware
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -41,6 +42,49 @@ func LogWebSocketUsage(db *gorm.DB, userID, apiKeyID, endpoint string, audioDura
 		slog.Error("ws usage: failed to write usage log", "error", result.Error, "endpoint", endpoint)
 	} else {
 		slog.Debug("ws usage: logged", "endpoint", endpoint, "audio_ms", audioDurationMs, "process_ms", processTimeMs)
+	}
+}
+
+// LogLLMUsage writes a UsageLog entry directly for LLM gateway requests whose
+// token counts are only known after the response stream completes (SSE
+// streaming). Token counts and the model id ride in the Metadata JSONB —
+// no schema migration required. endpoint is e.g. "llm_chat", "llm_messages".
+func LogLLMUsage(db *gorm.DB, userID, apiKeyID, endpoint, model string, promptTokens, completionTokens, processTimeMs int, streamed bool) {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		slog.Warn("llm usage: invalid user_id, skipping log", "user_id", userID)
+		return
+	}
+
+	meta, _ := json.Marshal(map[string]interface{}{
+		"model":             model,
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      promptTokens + completionTokens,
+		"stream":            streamed,
+	})
+
+	log := models.UsageLog{
+		UserID:      uid,
+		Endpoint:    endpoint,
+		ProcessTime: processTimeMs,
+		Metadata:    string(meta),
+	}
+
+	if apiKeyID != "" {
+		if akID, err := uuid.Parse(apiKeyID); err == nil {
+			log.APIKeyID = &akID
+		}
+	}
+
+	metrics.RecordLLMUsage(endpoint, model, promptTokens, completionTokens, processTimeMs)
+
+	if result := db.Create(&log); result.Error != nil {
+		slog.Error("llm usage: failed to write usage log", "error", result.Error, "endpoint", endpoint)
+	} else {
+		slog.Debug("llm usage: logged", "endpoint", endpoint, "model", model,
+			"prompt_tokens", promptTokens, "completion_tokens", completionTokens,
+			"process_ms", processTimeMs)
 	}
 }
 
@@ -252,8 +296,20 @@ func (ut *UsageTracker) flushUsage(batch []models.UsageLog) {
 	if len(batch) == 0 {
 		return
 	}
-	// Update Prometheus ASR metrics for each entry
+	// Update Prometheus metrics for each entry
 	for _, log := range batch {
+		if strings.HasPrefix(log.Endpoint, "llm_") {
+			// LLM entries carry model + token counts in the metadata JSONB.
+			var meta struct {
+				Model            string `json:"model"`
+				PromptTokens     int    `json:"prompt_tokens"`
+				CompletionTokens int    `json:"completion_tokens"`
+			}
+			if err := json.Unmarshal([]byte(log.Metadata), &meta); err == nil {
+				metrics.RecordLLMUsage(log.Endpoint, meta.Model, meta.PromptTokens, meta.CompletionTokens, log.ProcessTime)
+			}
+			continue
+		}
 		metrics.RecordASRUsage(log.Endpoint, log.AudioDuration, log.ProcessTime, log.Diarized)
 	}
 	result := ut.db.Create(&batch)
@@ -312,6 +368,11 @@ func slogArgsToMap(args []any) map[string]interface{} {
 func classifyEndpoint(c *fiber.Ctx) string {
 	// Allow handlers to override the endpoint classification (e.g. for streaming variants)
 	if override, ok := c.Locals("endpoint_override").(string); ok && override != "" {
+		// "-" is the sentinel for "handler logs usage itself" (e.g. LLM SSE
+		// streaming, where token counts only exist after the handler returns).
+		if override == "-" {
+			return ""
+		}
 		return override
 	}
 
@@ -331,6 +392,16 @@ func classifyEndpoint(c *fiber.Ctx) string {
 		return "tts"
 	case path == "/api/v1/voices/clone":
 		return "voice_clone"
+	case path == "/v1/chat/completions":
+		return "llm_chat"
+	case path == "/v1/completions":
+		return "llm_completion"
+	case path == "/v1/embeddings":
+		return "llm_embeddings"
+	case path == "/v1/images/generations":
+		return "llm_images"
+	case path == "/v1/messages":
+		return "llm_messages"
 	default:
 		return ""
 	}

@@ -1,10 +1,15 @@
 #!/bin/bash
-# rotate-sidecar-logs.sh — size-based rotation for the Swift sidecar's
-# launchd flat-file logs (deploy/macos/logs/swift-sidecar.{out,err}.log).
+# rotate-sidecar-logs.sh — size-based rotation for the GoTranscribeSrv
+# sidecars' launchd flat-file logs (deploy/macos/logs/*.log).
 #
 # Runs hourly (and once at load) via the companion LaunchAgent
 # com.gotranscribesrv.swift-sidecar-logrotate, installed by
-# `make sidecar-install`.
+# `make sidecar-install` (audio) and `make llm-install` (llm).
+#
+# Rotates:
+#   - swift-sidecar.{out,err}.log  (legacy audio-sidecar shim — transition)
+#   - audio-sidecar.{out,err}.log   (current audio sidecar)
+#   - llm-sidecar.{out,err}.log     (LLM sidecar)
 #
 # Copy-truncate, NOT mv: launchd holds the log files open with O_APPEND
 # for the life of the sidecar process. Moving the file out from under it
@@ -14,7 +19,7 @@
 #
 # Policy mirrors the Docker x-logging anchor in docker-compose*.yml
 # (json-file, max-size 10m, max-file 3): worst case on disk is
-# 2 files x 10 MB x (1 active + 3 archives) = 80 MB.
+# 2 files x 10 MB x (1 active + 3 archives) = 80 MB per sidecar.
 
 set -euo pipefail
 
@@ -59,5 +64,15 @@ rotate_one() {
 }
 
 LIMIT=$(to_bytes "$MAX_SIZE")
+
+# Audio sidecar — current label
+rotate_one "$LOG_DIR/audio-sidecar.out.log" "$LIMIT"
+rotate_one "$LOG_DIR/audio-sidecar.err.log" "$LIMIT"
+
+# Audio sidecar — legacy shim (com.gotranscribesrv.swift-sidecar)
 rotate_one "$LOG_DIR/swift-sidecar.out.log" "$LIMIT"
 rotate_one "$LOG_DIR/swift-sidecar.err.log" "$LIMIT"
+
+# LLM sidecar
+rotate_one "$LOG_DIR/llm-sidecar.out.log" "$LIMIT"
+rotate_one "$LOG_DIR/llm-sidecar.err.log" "$LIMIT"

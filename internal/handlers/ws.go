@@ -91,6 +91,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 		slog.Error("failed to connect to sidecar WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("WS_ASR_CONNECT_FAILED", "WSASRConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/ws/asr",
+			"ip":         c.IP(),
 			"request_id": requestID,
 		}, err))
 		_ = c.WriteJSON(fiber.Map{"type": "error", "message": "transcription service unavailable"})
@@ -104,6 +105,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("WS_ASR_SESSION_STARTED", "WSASRSessionStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":   "/ws/asr",
+		"ip":         c.IP(),
 		"language":   c.Query("language", "en"),
 		"diarize":    c.Query("diarize", "false") == "true",
 		"itn":        itnEnabled(c, h.defaultITN),
@@ -178,6 +180,7 @@ func (h *WSHandler) handle(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("WS_ASR_SESSION_ENDED", "WSASRSessionEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/ws/asr",
+		"ip":                c.IP(),
 		"audio_bytes":       totalAudioBytes,
 		"audio_duration_ms": audioDurationMs,
 		"process_ms":        processTimeMs,

@@ -2,7 +2,7 @@ import XCTest
 @testable import FluidAudio
 @testable import ITNHelpers
 
-/// Tests for FluidAudio's TextNormalizer — the ITN engine the swift-sidecar
+/// Tests for FluidAudio's TextNormalizer — the ITN engine the audio-sidecar
 /// wires into both /transcribe and /stream. These cover the cases the user
 /// originally reported ("one two five O" -> "1250") and a wider regression
 /// set so future changes don't quietly break the simple cases.
@@ -350,7 +350,7 @@ final class ITNPreprocessorTests: XCTestCase {
 /// that exercises every ITN category at once, so a regression in any
 /// tagger (or in how they interact) shows up here.
 ///
-/// Run with `make swift-test` or `swift test --filter ITNPipelineTests`.
+/// Run with `make audio-test` or `swift test --filter ITNPipelineTests`.
 final class ITNPipelineTests: XCTestCase {
 
     private let itn = TextNormalizer.shared

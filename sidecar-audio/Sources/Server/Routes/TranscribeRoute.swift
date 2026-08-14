@@ -136,7 +136,7 @@ private func handleTranscribe(req: Request, engines: EngineManager) async throws
         let nativeLoaded = itn.isNativeAvailable ? "ne" : "swift-passthrough"
         // Always print the before/after pair to stdout, in addition to
         // the structured logger, so it's easy to spot in sidecar logs
-        // and `make swift-sidecar` output.
+        // and `make audio-sidecar` output.
         print("─[ITN \(nativeLoaded)]────────────────────────────")
         print("  before: \"\(result.text)\"")
         print("  after : \"\(normalizedText)\"")

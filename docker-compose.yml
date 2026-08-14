@@ -6,7 +6,7 @@
 #
 # Usage:
 #   make up              # Start Postgres + Go server
-#   make swift-sidecar   # Start native Swift sidecar (separate terminal)
+#   make audio-sidecar   # Start native audio sidecar (separate terminal)
 # ============================================================
 
 # ── Logging defaults ──────────────────────────────────────
@@ -58,9 +58,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-CHANGE_THIS_TO_A_RANDOM_64_CHAR_STRING}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
-      # Swift sidecar runs natively on the host for CoreML/ANE acceleration
-      SWIFT_SIDECAR_URL: ${SWIFT_SIDECAR_URL:-http://host.docker.internal:8101}
-      SWIFT_SIDECAR_WS_URL: ${SWIFT_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
+      # Audio sidecar runs natively on the host for CoreML/ANE acceleration
+      AUDIO_SIDECAR_URL: ${AUDIO_SIDECAR_URL:-http://host.docker.internal:8101}
+      AUDIO_SIDECAR_WS_URL: ${AUDIO_SIDECAR_WS_URL:-ws://host.docker.internal:8101}
       # PII redaction — Presidio analyzer runs in the compose stack.
       # To centralize, override PRESIDIO_ANALYZER_URL with an external endpoint.
       ENABLE_PII: ${ENABLE_PII:-true}

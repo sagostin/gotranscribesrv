@@ -179,6 +179,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		slog.ErrorContext(c.UserContext(), "Watson transcription failed", "error", err, "content_type", rawContentType)
 		h.lm.SendLog(h.lm.BuildLog("WATSON_RECOGNIZE_FAILED", "WatsonRecognizeFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":     "/v1/recognize",
+			"ip":           c.IP(),
 			"content_type": rawContentType,
 			"body_size":    len(audioBytes),
 			"request_id":   middleware.RequestIDFromCtx(c),
@@ -195,12 +196,14 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 	if piiErr != nil {
 		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
 			"endpoint":   "/v1/recognize",
+			"ip":         c.IP(),
 			"text_len":   len(result.Text),
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, piiErr))
 	}
 	completedFields := map[string]interface{}{
 		"endpoint":      "/v1/recognize",
+		"ip":            c.IP(),
 		"content_type":  rawContentType,
 		"audio_ms":      int(result.Duration * 1000),
 		"asr_ms":        result.ProcessTimeMs,
@@ -239,7 +242,7 @@ func (h *WatsonHandler) Upgrade() fiber.Handler {
 }
 
 // handleStream proxies WebSocket frames between a Watson-compatible client and
-// the Swift sidecar's /stream endpoint, translating the event protocol.
+// the audio sidecar's /stream endpoint, translating the event protocol.
 func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	defer c.Close()
 
@@ -258,7 +261,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 	speakerLabels := c.Query("speaker_labels", "false") == "true"
 	interimResults := c.Query("interim_results", "true") == "true"
 
-	// Connect to Swift sidecar /stream WebSocket
+	// Connect to audio sidecar /stream WebSocket
 	sidecarURL := h.sidecar.StreamURL()
 	u, err := url.Parse(sidecarURL)
 	if err != nil {
@@ -292,6 +295,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 		slog.Error("[Watson] failed to connect to sidecar /stream WebSocket", "error", err, "request_id", requestID)
 		h.lm.SendLog(h.lm.BuildLog("WATSON_CONNECT_FAILED", "WatsonConnectFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/v1/recognize",
+			"ip":         c.IP(),
 			"request_id": requestID,
 		}, err))
 		_ = c.WriteJSON(fiber.Map{"error": "transcription service unavailable"})
@@ -306,6 +310,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("WATSON_SESSION_STARTED", "WatsonSessionStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":        "/v1/recognize",
+		"ip":              c.IP(),
 		"request_id":      requestID,
 		"interim_results": interimResults,
 		"timestamps":      timestamps,
@@ -385,6 +390,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				slog.Error("[Watson] Failed to forward audio to sidecar", "error", err, "request_id", requestID)
 				h.lm.SendLog(h.lm.BuildLog("WATSON_FORWARD_FAILED", "WatsonForwardFailed", slog.LevelError, map[string]interface{}{
 					"endpoint":   "/v1/recognize",
+					"ip":         c.IP(),
 					"request_id": requestID,
 				}, err))
 				errCh <- err
@@ -447,6 +453,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				slog.Error("[Watson] Sidecar error", "message", evt.Message, "request_id", requestID)
 				h.lm.SendLog(h.lm.BuildLog("WATSON_SIDECAR_ERROR", "WatsonSidecarError", slog.LevelError, map[string]interface{}{
 					"endpoint":   "/v1/recognize",
+					"ip":         c.IP(),
 					"request_id": requestID,
 				}, evt.Message))
 				_ = c.WriteJSON(fiber.Map{"error": evt.Message})
@@ -492,6 +499,7 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 
 	h.lm.SendLog(h.lm.BuildLog("WATSON_SESSION_ENDED", "WatsonSessionEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/v1/recognize",
+		"ip":                c.IP(),
 		"request_id":        requestID,
 		"audio_bytes":       totalAudioBytes,
 		"audio_duration_ms": audioDurationMs,

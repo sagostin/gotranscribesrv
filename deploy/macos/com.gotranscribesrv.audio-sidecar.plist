@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GoTranscribeSrv — Audio sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+  LaunchAgent: starts at login (pair with auto-login for headless minis)
+  and restarts automatically if it crashes.
+
+  SETUP: replace __REPO_PATH__ with the absolute repo path, e.g.
+    sed -i '' 's|__REPO_PATH__|/Users/transcribe/gotranscribesrv|g' \
+      com.gotranscribesrv.audio-sidecar.plist
+
+  Build the release binary FIRST (much faster startup than `swift run`):
+    make audio-build   # produces sidecar-audio/.build/release/Server
+
+  Migration: this LaunchAgent replaces com.gotranscribesrv.swift-sidecar.
+  `make sidecar-install` installs both labels during the transition; once the
+  audio-sidecar agent is healthy, run `make sidecar-uninstall` and remove the
+  legacy plist from ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.gotranscribesrv.audio-sidecar</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__REPO_PATH__/sidecar-audio/.build/release/Server</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__REPO_PATH__/sidecar-audio</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+
+		<!-- Optional sidecar env vars. Uncomment + edit to override defaults.
+		     See docs/api.md § "Configuration env vars" and docs/setup.md for
+		     the full list. Defaults (when commented out) preserve prior
+		     behavior — no breaking changes on existing deployments.
+
+		<key>SIDECAR_REALTIME_ENGINE</key>
+		<string>eou-320</string>
+
+		<key>SIDECAR_TTS_DEFAULT_BACKEND</key>
+		<string>pocket</string>
+
+		<key>SIDECAR_TTS_STREAM_BACKEND</key>
+		<string>pocket</string>
+		-->
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- Restart no more than once per 10s to avoid crash-loop spinning -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>__REPO_PATH__/deploy/macos/logs/audio-sidecar.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__REPO_PATH__/deploy/macos/logs/audio-sidecar.err.log</string>
+</dict>
+</plist>

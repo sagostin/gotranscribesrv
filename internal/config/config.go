@@ -21,9 +21,31 @@ type Config struct {
 	JWTAccessTTL  time.Duration
 	JWTRefreshTTL time.Duration
 
-	// Swift Sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
-	SwiftSidecarURL   string
-	SwiftSidecarWSURL string
+	// Audio Sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE).
+	// Backward-compat: SWIFT_SIDECAR_URL / SWIFT_SIDECAR_WS_URL are still
+	// honored as fallbacks during the rename from `swift-sidecar` to
+	// `audio-sidecar`. New deployments should set AUDIO_SIDECAR_URL /
+	// AUDIO_SIDECAR_WS_URL.
+	AudioSidecarURL   string
+	AudioSidecarWSURL string
+
+	// LLM Sidecar (chat, completions, embeddings, image generation —
+	// CoreML/ANE, OpenAI + Anthropic API dialects). The Go server proxies
+	// the sidecar's /v1/* routes with auth, rate limiting, and per-model
+	// token usage tracking.
+	LLMSidecarURL string
+	EnableLLM     bool
+
+	// Realtime speech-to-speech (WS /v1/realtime S2S mode — ASR → LLM → TTS
+	// orchestrated by the Go server; see docs/realtime.md). Disabled by
+	// default; clients select S2S by connecting with ?model=gpt-realtime*.
+	// Transcription sessions on the same endpoint are always available.
+	RealtimeS2SEnabled       bool
+	RealtimeS2SModel         string  // LLM model id on the LLM sidecar
+	RealtimeS2SVoice         string  // PocketTTS voice for spoken responses
+	RealtimeS2SMaxTokens     int     // per-turn response cap
+	RealtimeS2STemperature   float64 // LLM sampling temperature
+	RealtimeS2SInterruptions bool    // barge-in: user speech cancels the response
 
 	// Models
 	ASRModel          string
@@ -38,7 +60,7 @@ type Config struct {
 	TTSDefaultBackend string
 
 	// ITN (Inverse Text Normalization) — spoken-form ASR -> written form
-	// ("one two five O" -> "1250"). Applied in the Swift sidecar. Default on.
+	// ("one two five O" -> "1250"). Applied in the audio sidecar. Default on.
 	EnableITN bool
 
 	// Rate Limits
@@ -97,8 +119,18 @@ func Load() *Config {
 		JWTAccessTTL:  parseDuration("JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL: parseDuration("JWT_REFRESH_TTL", 168*time.Hour),
 
-		SwiftSidecarURL:   envOrDefault("SWIFT_SIDECAR_URL", "http://127.0.0.1:8101"),
-		SwiftSidecarWSURL: envOrDefault("SWIFT_SIDECAR_WS_URL", "ws://127.0.0.1:8101"),
+		AudioSidecarURL:   envOrDefault("AUDIO_SIDECAR_URL", envOrDefault("SWIFT_SIDECAR_URL", "http://127.0.0.1:8101")),
+		AudioSidecarWSURL: envOrDefault("AUDIO_SIDECAR_WS_URL", envOrDefault("SWIFT_SIDECAR_WS_URL", "ws://127.0.0.1:8101")),
+
+		LLMSidecarURL: envOrDefault("LLM_SIDECAR_URL", "http://127.0.0.1:8080"),
+		EnableLLM:     envOrDefault("ENABLE_LLM", "true") == "true",
+
+		RealtimeS2SEnabled:       envOrDefault("REALTIME_S2S_ENABLED", "false") == "true",
+		RealtimeS2SModel:         envOrDefault("REALTIME_S2S_MODEL", "mistral-7b-int4"),
+		RealtimeS2SVoice:         envOrDefault("REALTIME_S2S_VOICE", "default"),
+		RealtimeS2SMaxTokens:     envOrDefaultInt("REALTIME_S2S_MAX_TOKENS", 300),
+		RealtimeS2STemperature:   envOrDefaultFloat("REALTIME_S2S_TEMPERATURE", 0.7),
+		RealtimeS2SInterruptions: envOrDefault("REALTIME_S2S_INTERRUPTIONS", "true") == "true",
 
 		ASRModel:          envOrDefault("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3"),
 		ASRRuntime:        envOrDefault("ASR_RUNTIME", "mlx"),

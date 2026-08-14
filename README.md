@@ -11,14 +11,16 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 | Feature | Details |
 |---------|---------|
 | **Real-Time Streaming ASR** | Two layers: (1) buffered pseudo-streaming on `/ws/asr`, `/v1/listen`, `/v1/recognize` (full-buffer re-transcribe every ~2 s); (2) **true streaming** with cache-aware encoder states and turn-taking events on `/v2/listen` (Deepgram-compat), `/v1/realtime` (OpenAI-compat), and `/stream/realtime` (native). Eight streaming engines: Parakeet EOU 120M (English + built-in EOU), Nemotron 0.6B (English), Parakeet Unified 0.6B (multilingual, 25 EU languages). |
+| **Realtime Speech-to-Speech** | Full OpenAI Realtime S2S on `/v1/realtime` (opt-in: `REALTIME_S2S_ENABLED=true`, connect with `?model=gpt-realtime`): ASR → LLM → streaming TTS orchestrated by the Go server, EOU turn-taking, barge-in, client-side tool calling. See [docs/realtime.md](docs/realtime.md). |
 | **File Upload ASR** | Single file or chunked upload; returns full transcript with timestamps |
 | **Whisper-Compatible API** | Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint |
 | **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` WebSocket endpoint |
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS (with per-user stored voice cloning + 17 built-in system voices) and Kokoro (multilingual EN/Mandarin/JP, higher quality), 24 kHz output. Default backend selectable per-endpoint; streaming TTS is PocketTTS-only. |
+| **LLM Gateway** | OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`) and Anthropic-compatible (`/v1/messages`) endpoints proxied to the LLM sidecar (CoreML/ANE) with auth, rate limiting, and per-model token usage tracking. SSE streaming passthrough. |
 | **User Authentication** | JWT access/refresh tokens + API key support |
-| **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint |
+| **Usage Tracking** | Per-user metering: audio duration, processing time, endpoint, per-model LLM token totals |
 | **Rate Limiting** | Per-user, in-memory sliding window |
 | **Inverse Text Normalization (ITN)** | Optional spoken→written form (e.g. "five dollars" → "$5.00"); `ENABLE_ITN=true`; per-request override via `?itn=false` |
 | **Admin / Enterprise API** | User management, customer API key issuance, global usage rollup (`/api/v1/admin/*`, enterprise tier) |
@@ -55,7 +57,7 @@ Each node runs:
 - **Presidio Analyzer** *(optional, on by default)* — PII detection for log redaction (mcr.microsoft.com/presidio-analyzer). See "PII Redaction" below.
 - Communication: HTTP/WebSocket on localhost between all components
 
-**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` env vars — no code changes needed.
+**Split deployment (recommended for production):** The Go API server can run on standard server infrastructure (Docker, K8s, VPS) while the Macs serve as dedicated inference nodes behind a Caddy reverse proxy. Sidecar URLs are fully configurable via `AUDIO_SIDECAR_URL` / `AUDIO_SIDECAR_WS_URL` env vars — no code changes needed. (Legacy `SWIFT_SIDECAR_URL` / `SWIFT_SIDECAR_WS_URL` still work as fallbacks.)
 
 **Multi-node production (Mac mini fleet + separate DB/Caddy VM):** Ready-made compose files — `docker-compose.node.yml` (server + Presidio per mini), `docker-compose.db.yml` (Postgres + Caddy load balancer), a `Caddyfile` with health-checked least-connection balancing, and `deploy/macos/` for headless auto-boot after power outages. See [docs/production.md](docs/production.md).
 
@@ -85,7 +87,7 @@ See [docs/api.md → PII Redaction](docs/api.md#pii-redaction) for the full conf
 
 ### Option A: Docker + Native Sidecar (Recommended)
 
-Docker runs PostgreSQL and the Go API server. The Swift sidecar runs natively on the Mac for CoreML/ANE access.
+Docker runs PostgreSQL and the Go API server. The audio sidecar runs natively on the Mac for CoreML/ANE access.
 
 ```bash
 git clone https://github.com/sagostin/gotranscribesrv.git
@@ -96,11 +98,11 @@ cp .env.example .env
 # Terminal 1 — Postgres + Go API
 make up
 
-# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS) — required
-make swift-sidecar       # Builds & serves on :8101
+# Terminal 2 — Audio sidecar (ASR, VAD, diarization, TTS) — required
+make audio-sidecar       # Builds & serves on :8101
 ```
 
-> **Want ITN (spoken→written form conversion, on by default)?** You must build the Rust static lib and rebuild the Swift sidecar **before** `make swift-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default) for the 3-step sequence.
+> **Want ITN (spoken→written form conversion, on by default)?** You must build the Rust static lib and rebuild the audio sidecar **before** `make audio-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default) for the 3-step sequence.
 
 On first boot, an admin user is automatically created with a **random password** and API key printed to the console:
 ```
@@ -119,14 +121,14 @@ git clone https://github.com/sagostin/gotranscribesrv.git
 cd gotranscribesrv
 cp .env.example .env     # Edit DB credentials, JWT secret
 
-# Start Swift sidecar (downloads models on first run)
-make swift-sidecar &     # Loads CoreML models, serves on :8101
+# Start audio sidecar (downloads models on first run)
+make audio-sidecar &     # Loads CoreML models, serves on :8101
 
 # Start Go backend
 make run                 # Starts Go backend, runs migrations, seeds admin (:3000)
 ```
 
-> **For ITN (on by default):** Run `make itn-vendor && make itn-build && make swift-build` **before** `make swift-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default).
+> **For ITN (on by default):** Run `make itn-vendor && make itn-build && make audio-build` **before** `make audio-sidecar`. See [Optional Components → ITN](#inverse-text-normalization-itn--on-by-default).
 
 ### Test It
 
@@ -160,11 +162,11 @@ curl -X POST http://localhost:3000/api/v1/tts \
 
 The core stack — ASR, VAD, diarization, TTS, auth, usage tracking — runs out of the box. One optional component adds capability at the cost of extra build steps:
 
-- **ITN** — spoken→written form conversion. *On by default* in `.env`, but requires a one-time Rust build before the Swift sidecar will link it. Skip the build and the sidecar still runs; ITN is just a no-op.
+- **ITN** — spoken→written form conversion. *On by default* in `.env`, but requires a one-time Rust build before the audio sidecar will link it. Skip the build and the sidecar still runs; ITN is just a no-op.
 
 ### Inverse Text Normalization (ITN) — *on by default*
 
-The Swift sidecar post-processes ASR output to convert spoken-form into written form:
+The audio sidecar post-processes ASR output to convert spoken-form into written form:
 
 | Spoken (ASR raw) | Written (ITN output) |
 |---|---|
@@ -178,9 +180,9 @@ The Swift sidecar post-processes ASR output to convert spoken-form into written 
   - REST: `itn=false` form field
   - WebSocket: `?itn=false` query param
 
-**Build prerequisite — must run *before* `make swift-sidecar`:**
+**Build prerequisite — must run *before* `make audio-sidecar`:**
 
-ITN links a Rust static library (`libtext_processing_rs.a`) into the Swift sidecar at compile time. If you skip this and start the sidecar anyway, ITN is a no-op passthrough and ASR will return spoken-form output.
+ITN links a Rust static library (`libtext_processing_rs.a`) into the audio sidecar at compile time. If you skip this and start the sidecar anyway, ITN is a no-op passthrough and ASR will return spoken-form output.
 
 ```bash
 # 1. Vendor text-processing-rs (clones from GitHub if not present; no-op if already vendored)
@@ -189,23 +191,32 @@ make itn-vendor
 # 2. Build the Rust static lib (requires Rust toolchain — `brew install rust` on Apple Silicon)
 make itn-build
 
-# 3. Rebuild the Swift sidecar to link the static lib
-make swift-build
+# 3. Rebuild the audio sidecar to link the static lib
+make audio-build
 
 # 4. (Optional) Verify the ITN tests pass
-make swift-test
+make audio-test
 
 # 5. Now start the sidecar with ITN linked
-make swift-sidecar
+make audio-sidecar
 ```
 
 > **Why this is a separate step:** The Rust toolchain (`cargo`) is a hard build-time dependency for ITN. By making it opt-in, users who only need raw ASR don't need to install Rust. The Makefile targets auto-detect Apple Silicon vs Intel (`RUST_TARGET`) and clone the correct repo (`v0.2.2`).
 
-> **If `make itn-build` fails or you skip it:** The Swift sidecar still builds and runs, but ITN is silently disabled — `ENABLE_ITN=true` becomes a no-op. The sidecar logs a warning at startup.
+> **If `make itn-build` fails or you skip it:** The audio sidecar still builds and runs, but ITN is silently disabled — `ENABLE_ITN=true` becomes a no-op. The sidecar logs a warning at startup.
 
-### LLM Transcript Processing — *removed*
+### LLM Inference (sidecar-llm)
 
-The LLM transcript-processing feature (Python mlx-lm sidecar, Llama 3.1 8B, `POST /api/v1/process`) **has been fully removed** — sidecar, endpoints, metrics, and log events. This project now focuses on the transcription pipeline (ASR, VAD, diarization, TTS). See git history if you need the old implementation.
+A separate Swift/Vapor sidecar (`sidecar-llm/`, port 8080) serves chat LLMs (Mistral 7B, Gemma 4 via coreml-llm, …), embeddings, and Stable Diffusion image generation on CoreML/ANE, speaking **OpenAI** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/models`) and **Anthropic** (`/v1/messages`) dialects natively. The Go server proxies those same paths with auth, rate limiting, and per-model token usage tracking — point unmodified OpenAI/Anthropic SDKs at the Go server. Management (download/load/unload/status) is proxied under `/api/v1/admin/llm/models/:id/*` (admin only).
+
+**Build prerequisite — run once before `make llm-sidecar` / `make llm-build`:** sidecar-llm depends on a patched copy of [swift-embeddings](https://github.com/jkrukowski/swift-embeddings) (macOS 15 platform bump + `@preconcurrency` imports for Swift 6), vendored into `sidecar-llm/vendor/` like ITN's text-processing-rs:
+
+```bash
+make llm-vendor    # Clone swift-embeddings 0.1.0 + apply patches — first time only
+make llm-sidecar   # Run on :8080
+```
+
+See [sidecar-llm/README.md](sidecar-llm/README.md) for details.
 
 ---
 
@@ -221,7 +232,12 @@ The LLM transcript-processing feature (Python mlx-lm sidecar, Llama 3.1 8B, `POS
 | `POST` | `/api/v1/auth/logout` | Invalidate refresh token |
 | `POST` | `/api/v1/asr` | Transcribe uploaded audio file |
 | `POST` | `/v1/audio/transcriptions` | OpenAI Whisper-compatible endpoint |
-| `GET`  | `/v1/models` | OpenAI-compatible model listing (STT, TTS) |
+| `GET`  | `/v1/models` | OpenAI-compatible model listing (STT, TTS, LLM) |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible LLM chat (SSE streaming) |
+| `POST` | `/v1/completions` | OpenAI-compatible legacy completions |
+| `POST` | `/v1/embeddings` | OpenAI-compatible embeddings |
+| `POST` | `/v1/images/generations` | OpenAI-compatible image generation |
+| `POST` | `/v1/messages` | Anthropic-compatible messages (SSE streaming) |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |
@@ -247,6 +263,10 @@ The LLM transcript-processing feature (Python mlx-lm sidecar, Llama 3.1 8B, `POS
 | `GET`  | `/api/v1/admin/users/:id/keys` | List user's API keys (enterprise tier) |
 | `DELETE` | `/api/v1/admin/users/:id/keys/:keyId` | Revoke user's API key (enterprise tier) |
 | `GET`  | `/api/v1/admin/usage` | Global usage across all users (enterprise tier) |
+| `GET`  | `/api/v1/admin/llm/models/:id/status` | LLM model status (admin) |
+| `POST` | `/api/v1/admin/llm/models/:id/download` | Download LLM model (admin) |
+| `POST` | `/api/v1/admin/llm/models/:id/load` | Load/warm LLM model (admin) |
+| `POST` | `/api/v1/admin/llm/models/:id/unload` | Unload LLM model (admin) |
 
 Full reference: [docs/api.md](docs/api.md)
 
@@ -307,8 +327,8 @@ gotranscribesrv/
 │   ├── middleware/               # Auth, usage tracking, rate limiting
 │   ├── handlers/                 # Route handlers: asr, auth, whisper, deepgram, watson, tts, voices, process, usage, keys, admin, ws
 │   ├── metrics/                  # Prometheus collectors + middleware
-│   └── sidecar/                  # HTTP/WS client for the Swift sidecar
-├── sidecar-swift/                # Swift inference sidecar (CoreML/ANE)
+│   └── sidecar/                  # HTTP/WS client for the audio sidecar
+├── sidecar-audio/                # Audio inference sidecar (CoreML/ANE)
 │   ├── Package.swift             # SPM manifest (Vapor + FluidAudio)
 │   └── Sources/
 │       ├── Server/
@@ -317,7 +337,18 @@ gotranscribesrv/
 │       │   ├── AudioConverter.swift  # Format detect + resample → 16 kHz mono PCM
 │       │   └── Routes/               # Transcribe, Stream, VAD, Diarize, TTS, Health
 │       └── ITNHelpers/           # Inverse text normalization (TextNormalizer)
-├── deploy/macos/                 # Headless node setup (launchd plist + guide)
+├── sidecar-llm/                  # LLM inference sidecar (CoreML — chat, embeddings, images); vendor/ deps via `make llm-vendor`
+│   ├── Package.swift             # SPM manifest (Vapor + swift-transformers + CoreML-LLM)
+│   ├── models.json               # Model registry
+│   ├── Sources/
+│   │   ├── ModelRuntime/         # registry, HF downloader, compile cache, runner
+│   │   ├── Tooling/              # Tool-call parser
+│   │   ├── ImageRuntime/         # Stable Diffusion pipeline
+│   │   ├── EmbeddingRuntime/     # swift-embeddings-backed embeddings
+│   │   ├── ExternalRuntime/      # CoreML-LLM backend for bespoke chat repos
+│   │   └── App/                  # Vapor routes, OpenAI + Anthropic DTOs, SSE
+│   └── docs/                     # Setup, configuration, endpoints, operations
+├── deploy/macos/                 # Headless node setup (launchd plists + guides)
 ├── scripts/                      # Operational scripts
 ├── docs/                         # Architecture, API, setup, pricing, cost analysis
 ├── .env.example
@@ -348,6 +379,7 @@ gotranscribesrv/
 | Document | Description |
 |----------|-------------|
 | [docs/api.md](docs/api.md) | Full API reference: auth, ASR, TTS, voices, usage, admin, error format, rate limits |
+| [docs/realtime.md](docs/realtime.md) | OpenAI Realtime API: transcription & speech-to-speech modes, latency budget, client-side tool calling |
 | [docs/architecture.md](docs/architecture.md) | System design, data flow, model pipeline, memory layout, scaling strategy |
 | [docs/setup.md](docs/setup.md) | Detailed setup, environment variables, deployment topologies, 16 GB Mac Mini notes |
 | [docs/production.md](docs/production.md) | Multi-node production: Mac mini fleet + separate DB/Caddy VM, headless boot, scaling runbook |

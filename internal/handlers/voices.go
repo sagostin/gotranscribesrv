@@ -122,6 +122,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_STARTED", "VoiceCloneStarted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":   "/api/v1/voices/clone",
+		"ip":         c.IP(),
 		"user_id":    userID.String(),
 		"name":       name,
 		"file_size":  file.Size,
@@ -136,6 +137,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		errMsg := err.Error()
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_FAILED", "VoiceCloneFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":      "/api/v1/voices/clone",
+			"ip":            c.IP(),
 			"user_id":       userID.String(),
 			"name":          name,
 			"file_size":     file.Size,
@@ -163,6 +165,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	if err := os.MkdirAll(userDir, 0755); err != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DIR_ERROR", "VoiceCloneDirError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/voices/clone",
+			"ip":         c.IP(),
 			"user_id":    userID.String(),
 			"name":       name,
 			"path":       userDir,
@@ -181,6 +184,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	if err := os.WriteFile(absPath, embedding, 0644); err != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_WRITE_ERROR", "VoiceCloneWriteError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/voices/clone",
+			"ip":         c.IP(),
 			"user_id":    userID.String(),
 			"name":       name,
 			"path":       absPath,
@@ -212,6 +216,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		_ = os.Remove(absPath)
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DB_ERROR", "VoiceCloneDBError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/voices/clone",
+			"ip":         c.IP(),
 			"user_id":    userID.String(),
 			"name":       name,
 			"voice_id":   voiceID.String(),
@@ -233,6 +238,7 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 
 	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_COMPLETED", "VoiceCloneCompleted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/api/v1/voices/clone",
+		"ip":                c.IP(),
 		"user_id":           userID.String(),
 		"voice_id":          voiceID.String(),
 		"name":              name,
@@ -275,6 +281,7 @@ func (h *VoiceHandler) List(c *fiber.Ctx) error {
 	if result := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&voices); result.Error != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_LIST_DB_ERROR", "VoiceListDBError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/voices",
+			"ip":         c.IP(),
 			"user_id":    userID.String(),
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, result.Error))
@@ -399,6 +406,7 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 	if result := h.db.Delete(&voice); result.Error != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_DELETE_DB_ERROR", "VoiceDeleteDBError", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/api/v1/voices/:id",
+			"ip":         c.IP(),
 			"user_id":    userID.String(),
 			"voice_id":   voiceID.String(),
 			"request_id": middleware.RequestIDFromCtx(c),

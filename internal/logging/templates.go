@@ -31,6 +31,12 @@ func (lm *LogManager) LoadTemplates() {
 		"DeepgramSessionEnded":   "Deepgram-compat session ended",
 		"DeepgramSessionError":   "Deepgram-compat session error: %v",
 		"DeepgramConnectFailed":  "Deepgram-compat sidecar connect failed: %v",
+		// Transcript fields on *_SENT events are PII-redacted before
+		// the event is built — never log raw sidecar text.
+		"DeepgramPartialSent":         "Deepgram-compat partial result sent",
+		"DeepgramFinalSent":           "Deepgram-compat final result sent",
+		"DeepgramRealtimePartialSent": "Deepgram-realtime partial result sent",
+		"DeepgramRealtimeFinalSent":   "Deepgram-realtime final result sent",
 
 		// ── Watson-compatible ASR ───────────────────────────────
 		"WatsonRecognizeReceived":  "Watson-compat POST /v1/recognize received",

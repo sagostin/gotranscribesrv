@@ -42,6 +42,7 @@ type UsageSummary struct {
 	TotalProcessTimeSec   float64                  `json:"total_processing_time_sec"`
 	ByEndpoint            map[string]EndpointUsage `json:"by_endpoint"`
 	ByKey                 []KeyUsageSummary        `json:"by_key"`
+	ByModel               map[string]ModelUsage    `json:"by_model,omitempty"`
 }
 
 // KeyUsageSummary holds per-API-key usage stats.
@@ -52,12 +53,24 @@ type KeyUsageSummary struct {
 	TotalAudioDurationSec float64                  `json:"total_audio_duration_sec"`
 	TotalProcessTimeSec   float64                  `json:"total_processing_time_sec"`
 	ByEndpoint            map[string]EndpointUsage `json:"by_endpoint"`
+	ByModel               map[string]ModelUsage    `json:"by_model,omitempty"`
 }
 
 // EndpointUsage holds per-endpoint stats.
 type EndpointUsage struct {
 	Requests         int64   `json:"requests"`
-	AudioDurationSec float64 `json:"audio_duration_sec"`
+	AudioDurationSec float64 `json:"audio_duration_sec,omitempty"`
+	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64   `json:"completion_tokens,omitempty"`
+}
+
+// ModelUsage holds per-LLM-model token stats, aggregated from the
+// metadata JSONB of llm_* usage entries.
+type ModelUsage struct {
+	Requests         int64 `json:"requests"`
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
 }
 
 // UsageHistoryResponse is the paginated usage history.

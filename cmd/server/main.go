@@ -102,9 +102,10 @@ func main() {
 	go middleware.CleanupBlacklist(db.DB)
 
 	// Create sidecar client:
-	// Swift sidecar (ASR, VAD, diarization, TTS — CoreML/ANE)
+	// Audio sidecar (ASR, VAD, diarization, TTS — CoreML/ANE)
+	// LLM sidecar (chat, completions, embeddings, images — CoreML/ANE)
 	sc := sidecar.NewClient(
-		cfg.SwiftSidecarURL, cfg.SwiftSidecarWSURL,
+		cfg.AudioSidecarURL, cfg.AudioSidecarWSURL, cfg.LLMSidecarURL,
 	)
 
 	// PII redactor — wraps the Presidio analyzer service and applies
@@ -165,7 +166,7 @@ func main() {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders: "Authorization,Content-Type,X-API-Key",
+		AllowHeaders: "Authorization,Content-Type,X-API-Key,anthropic-version,anthropic-dangerous-direct-browser-access",
 	}))
 
 	// Prometheus metrics middleware (before auth so all requests are instrumented)
@@ -198,8 +199,11 @@ func main() {
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	watsonHandler := handlers.NewWatsonHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
-	openaiRealtimeHandler := handlers.NewOpenAIRealtimeHandler(sc, logManager)
-	deepgramRealtimeHandler := handlers.NewDeepgramRealtimeHandler(sc, logManager)
+	openaiRealtimeHandler := handlers.NewOpenAIRealtimeHandler(sc, logManager, db.DB)
+	openaiRealtimeS2SHandler := handlers.NewOpenAIRealtimeS2SHandler(sc, logManager, db.DB, cfg)
+	deepgramRealtimeHandler := handlers.NewDeepgramRealtimeHandler(sc, redactor, logManager, db.DB)
+	modelsHandler := handlers.NewModelsHandler(sc)
+	llmHandler := handlers.NewLLMHandler(sc, db.DB, logManager)
 
 	// === Health ===
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -269,6 +273,9 @@ func main() {
 	app.Get("/v2/listen", deepgramRealtimeHandler.Upgrade())
 
 	// OpenAI Realtime-style streaming (true streaming ASR).
+	// Two session modes share this endpoint (see docs/realtime.md):
+	//   transcription  — default; gpt-4o-transcribe / gpt-4o-realtime* models
+	//   speech-to-speech — ?model=gpt-realtime* + REALTIME_S2S_ENABLED=true
 	app.Use("/v1/realtime", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.InfoContext(c.UserContext(), "OpenAI Realtime WebSocket upgrade request", "path", "/v1/realtime", "remote", c.IP())
@@ -278,7 +285,12 @@ func main() {
 			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
 		})
 	})
-	app.Get("/v1/realtime", openaiRealtimeHandler.Upgrade())
+	app.Get("/v1/realtime", func(c *fiber.Ctx) error {
+		if cfg.RealtimeS2SEnabled && handlers.IsS2SModel(c.Query("model")) {
+			return openaiRealtimeS2SHandler.Upgrade()(c)
+		}
+		return openaiRealtimeHandler.Upgrade()(c)
+	})
 
 	// Watson-compatible streaming (WebSocket only — POST /v1/recognize is in the authed group below)
 	app.Use("/v1/recognize", func(c *fiber.Ctx) error {
@@ -318,7 +330,7 @@ func main() {
 	authed.Post("/api/v1/asr", asrHandler.TranscribeFile)
 
 	// Whisper-compatible
-	authed.Get("/v1/models", handlers.ListModels)
+	authed.Get("/v1/models", modelsHandler.List)
 	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)
 
 	// Watson-compatible
@@ -329,6 +341,16 @@ func main() {
 
 	// OpenAI-compatible TTS (POST /v1/audio/speech)
 	authed.Post("/v1/audio/speech", openaiTTSHandler.Speech)
+
+	// LLM gateway (OpenAI + Anthropic dialects, proxied to the LLM sidecar
+	// with auth, rate limiting, and per-model token usage tracking)
+	if cfg.EnableLLM {
+		authed.Post("/v1/chat/completions", llmHandler.ChatCompletions)
+		authed.Post("/v1/completions", llmHandler.Completions)
+		authed.Post("/v1/embeddings", llmHandler.Embeddings)
+		authed.Post("/v1/images/generations", llmHandler.Images)
+		authed.Post("/v1/messages", llmHandler.Messages)
+	}
 
 	// Voice Management
 	authed.Post("/api/v1/voices/clone", voiceHandler.Clone)
@@ -400,6 +422,14 @@ func main() {
 
 	// Global usage
 	admin.Get("/usage", adminHandler.GlobalUsageSummary)
+
+	// LLM model management (proxied to the LLM sidecar)
+	if cfg.EnableLLM {
+		admin.Get("/llm/models/:id/status", llmHandler.ModelStatus)
+		admin.Post("/llm/models/:id/download", llmHandler.ModelDownload)
+		admin.Post("/llm/models/:id/load", llmHandler.ModelLoad)
+		admin.Post("/llm/models/:id/unload", llmHandler.ModelUnload)
+	}
 
 	// === Graceful Shutdown ===
 	quit := make(chan os.Signal, 1)

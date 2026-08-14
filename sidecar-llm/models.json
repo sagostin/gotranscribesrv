@@ -1,0 +1,83 @@
+{
+  "settings": {
+    "autoDownload": true,
+    "preload": true,
+    "features": {
+      "images": true,
+      "embeddings": true
+    }
+  },
+  "models": [
+    {
+      "id": "mistral-7b-int4",
+      "kind": "chat",
+      "repo": "apple/mistral-coreml",
+      "include": ["StatefulMistral7BInstructInt4.mlpackage/*"],
+      "packageName": "StatefulMistral7BInstructInt4.mlpackage",
+      "tokenizerRepo": "mistralai/Mistral-7B-Instruct-v0.3",
+      "preload": true,
+      "maxNewTokens": 512,
+      "notes": "Official Apple conversion. Stateful KV cache (fast multi-turn), Int4, ~4GB. Known-good baseline; supports function calling."
+    },
+    {
+      "id": "mistral-7b-fp16",
+      "kind": "chat",
+      "repo": "apple/mistral-coreml",
+      "include": ["StatefulMistral7BInstructFP16.mlpackage/*"],
+      "packageName": "StatefulMistral7BInstructFP16.mlpackage",
+      "tokenizerRepo": "mistralai/Mistral-7B-Instruct-v0.3",
+      "preload": false,
+      "maxNewTokens": 512,
+      "notes": "FP16 variant, ~14GB download. Higher quality, more RAM."
+    },
+    {
+      "id": "qwen3-1.7b-w8",
+      "kind": "chat",
+      "repo": "groxaxo/qwen3-1.7b-coreml-int8",
+      "runtime": "standard",
+      "include": ["Qwen3-1.7B-Base-TopK64-W8.mlpackage/*"],
+      "packageName": "Qwen3-1.7B-Base-TopK64-W8.mlpackage",
+      "tokenizerRepo": "Qwen/Qwen3-1.7B-Base",
+      "preload": false,
+      "maxNewTokens": 512,
+      "notes": "Stateful top-k output variant (served via the top-k adapter). ~2GB. Small and fast; good second chat model. Base model — use /v1/completions or expect immediate EOS with chat templates."
+    },
+    {
+      "id": "gemma-4-E2B",
+      "kind": "chat",
+      "repo": "mlboydaisuke/gemma-4-E2B-coreml",
+      "runtime": "coreml-llm",
+      "include": [],
+      "preload": false,
+      "maxNewTokens": 256,
+      "notes": "Gemma 4 E2B (multimodal text+image+audio). Served via the CoreML-LLM external backend. Text-only on this endpoint; tools not supported here."
+    },
+    {
+      "id": "sd-1.5",
+      "kind": "image",
+      "repo": "apple/coreml-stable-diffusion-v1-5-palettized",
+      "include": ["original/compiled/*"],
+      "imageSize": 512,
+      "preload": false,
+      "notes": "Stable Diffusion 1.5, 6-bit palettized, compiled variant (~2GB). 512x512, a few seconds per image on Apple Silicon."
+    },
+    {
+      "id": "sdxl",
+      "kind": "image",
+      "repo": "apple/coreml-stable-diffusion-xl-base",
+      "include": ["original/compiled/*"],
+      "imageSize": 1024,
+      "preload": false,
+      "notes": "SDXL 1024x1024. Large download (~5GB+), slower generation, better quality."
+    },
+    {
+      "id": "all-minilm-l6-v2",
+      "kind": "embedding",
+      "repo": "sentence-transformers/all-MiniLM-L6-v2",
+      "include": [],
+      "architecture": "bert",
+      "preload": false,
+      "notes": "384-dim sentence embeddings, ~90MB. Loaded from safetensors via swift-embeddings (no conversion needed)."
+    }
+  ]
+}

@@ -187,13 +187,13 @@ Transcribe an uploaded audio file.
 
 ### GET `/v1/models` (OpenAI-Compatible)
 
-Lists the models this server advertises, following the OpenAI `/v1/models` schema. Includes both OpenAI-branded mock IDs (so unmodified OpenAI SDKs can look up a known model) and the real on-device engines actually doing the work.
+Lists the models this server advertises, following the OpenAI `/v1/models` schema. The list merges the static STT/TTS catalog (OpenAI-branded mock IDs so unmodified SDKs find a known model, plus the real on-device audio engines) with the **live LLM sidecar registry** — chat, embedding, and image entries carry extra fields (`kind`, `runtime`, `status`, `repo`). If the LLM sidecar is unreachable, the list degrades to the static audio catalog.
 
 **Request:** No body. Auth required (Bearer token or API key).
 
 | Query | Type | Description |
 |-------|------|-------------|
-| `owned_by` | string | Optional. Return only entries whose `owned_by` matches (e.g. `openai`, `nvidia`, `kyutai`, `meta`). |
+| `owned_by` | string | Optional. Return only entries whose `owned_by` matches (e.g. `openai`, `nvidia`, `kyutai`, `local`). |
 
 **Response — `200 OK`:**
 
@@ -202,14 +202,16 @@ Lists the models this server advertises, following the OpenAI `/v1/models` schem
   "object": "list",
   "data": [
     { "id": "whisper-1", "object": "model", "created": 1677649200, "owned_by": "openai" },
-    { "id": "gpt-4o-transcribe", "object": "model", "created": 1742000000, "owned_by": "openai" },
-    { "id": "gpt-4o-mini-transcribe", "object": "model", "created": 1742000000, "owned_by": "openai" },
-    { "id": "gpt-4o-transcribe-diarize", "object": "model", "created": 1742000000, "owned_by": "openai" },
     { "id": "parakeet-tdt-v3-coreml", "object": "model", "created": 1735689600, "owned_by": "nvidia" },
-    { "id": "tts-1", "object": "model", "created": 1696280400, "owned_by": "openai" },
-    { "id": "tts-1-hd", "object": "model", "created": 1696280400, "owned_by": "openai" },
-    { "id": "gpt-4o-mini-tts", "object": "model", "created": 1736380800, "owned_by": "openai" },
-    { "id": "pocket-tts-1", "object": "model", "created": 1735603200, "owned_by": "kyutai" }
+    { "id": "pocket-tts-1", "object": "model", "created": 1735603200, "owned_by": "kyutai" },
+    {
+      "id": "mistral-7b-int4", "object": "model", "created": 0, "owned_by": "local",
+      "kind": "chat", "runtime": "standard", "status": "ready", "repo": "apple/mistral-coreml"
+    },
+    {
+      "id": "all-minilm-l6-v2", "object": "model", "created": 0, "owned_by": "local",
+      "kind": "embedding", "runtime": "standard", "status": "ready"
+    }
   ]
 }
 ```
@@ -783,6 +785,11 @@ The Go proxies (`/v2/listen` Deepgram-compat, `/v1/realtime` OpenAI-compat) tran
 
 OpenAI Realtime-style WebSocket proxy. This endpoint implements the **input-transcription half** of the Realtime API — LLM/TTS stays in your existing service; we only emit user-side transcription events. Wire-compatible with the OpenAI Python SDK's `RealtimeClient`.
 
+> **Speech-to-speech + tools:** connect with `?model=gpt-realtime` (any
+> `gpt-realtime*` name) and `REALTIME_S2S_ENABLED=true` to get a full
+> speech-to-speech session — ASR → LLM → TTS with barge-in and client-side
+> function calling. Spec: [docs/realtime.md](realtime.md).
+
 **Connect:** `WS /v1/realtime?encoding=linear16&sample_rate=16000`
 
 **Client → server events handled:**
@@ -826,7 +833,7 @@ Deepgram Nova-compatible WebSocket proxy using the real-time engine. Distinct fr
 
 ### Sidecar endpoints (direct, no Go proxy)
 
-For clients that don't need JWT auth or quota tracking, the Swift sidecar exposes the underlying streaming endpoints directly:
+For clients that don't need JWT auth or quota tracking, the audio sidecar exposes the underlying streaming endpoints directly:
 
 - `WS /stream/realtime` — native JSON+PCM protocol (see below). Engine selectable via `?engine=`.
 - `POST /synthesize?backend=kokoro` — Kokoro TTS, no LLM.
@@ -1086,11 +1093,68 @@ Delete a custom voice and remove the stored embedding.
 Speaker diarization is available as part of the ASR endpoint by setting `diarize=true`.
 See [`POST /api/v1/asr`](#post-apiv1asr) above.
 
-Diarization is handled by the Swift sidecar using the Sortformer model (end-to-end neural, up to 4 speakers) running on CoreML/ANE.
+Diarization is handled by the audio sidecar using the Sortformer model (end-to-end neural, up to 4 speakers) running on CoreML/ANE.
 
 > **Note:** Standalone speaker detection (without transcription) is not supported.
 > The Sortformer diarizer requires transcript word/segment timestamps to produce
 > meaningful per-speaker results.
+
+---
+
+## LLM Gateway (OpenAI + Anthropic-Compatible)
+
+The Go server proxies the LLM sidecar's native API surface, adding auth (JWT or API key), per-tier rate limiting, and **per-model token usage tracking**. Request and response bodies pass through verbatim — point unmodified OpenAI or Anthropic SDKs at this server. Enabled via `ENABLE_LLM=true` + `LLM_SIDECAR_URL` (default `http://127.0.0.1:8080`).
+
+| Route | Dialect | Streaming |
+|-------|---------|-----------|
+| `POST /v1/chat/completions` | OpenAI chat | SSE (`stream: true`) |
+| `POST /v1/completions` | OpenAI legacy | SSE |
+| `POST /v1/embeddings` | OpenAI | — |
+| `POST /v1/images/generations` | OpenAI | — |
+| `POST /v1/messages` | Anthropic Messages | SSE (`stream: true`) |
+
+**Auth:** standard gateway auth — `Authorization: Bearer <jwt-or-gtx_key>` or `X-API-Key: gtx_...`. Anthropic SDK users pass their `gtx_...` key as `api_key` (the SDK's `x-api-key` header is accepted).
+
+**Usage tracking:** every request writes a `usage_logs` row whose `metadata` JSONB carries `{"model", "prompt_tokens", "completion_tokens", "total_tokens", "stream"}`. Token counts are extracted from the response (non-streaming) or tee'd from the terminal SSE frames (streaming — OpenAI finish-chunk `usage`; Anthropic `message_start`/`message_delta`). Aggregates appear in `/api/v1/usage/summary` under `by_endpoint` (`llm_chat`, `llm_completion`, `llm_embeddings`, `llm_images`, `llm_messages`) and per-model under `by_model`.
+
+**Examples:**
+
+```bash
+# OpenAI SDK-compatible chat (streaming)
+curl -N http://localhost:3000/v1/chat/completions \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"mistral-7b-int4","stream":true,"messages":[{"role":"user","content":"Hi"}]}'
+
+# Anthropic SDK-compatible messages
+curl http://localhost:3000/v1/messages \
+  -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"mistral-7b-int4","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:3000/v1", api_key="gtx_live_...")
+print(client.chat.completions.create(model="mistral-7b-int4",
+      messages=[{"role": "user", "content": "Hi"}]).choices[0].message.content)
+
+import anthropic
+acl = anthropic.Anthropic(base_url="http://localhost:3000", api_key="gtx_live_...")
+print(acl.messages.create(model="mistral-7b-int4", max_tokens=50,
+      messages=[{"role": "user", "content": "Hi"}]).content[0].text)
+```
+
+**Error passthrough:** upstream errors keep the sidecar's OpenAI-style envelope (`{"error": {"message", "type", "code"}}`) and status code. Gateway-side failures use the same shape (e.g. `502 {"error": {"type": "server_error", "message": "LLM service unavailable"}}`).
+
+**Admin model management** (admin users only):
+
+| Route | Proxies to sidecar |
+|-------|--------------------|
+| `GET /api/v1/admin/llm/models/:id/status` | `GET /models/:id/status` |
+| `POST /api/v1/admin/llm/models/:id/download` | `POST /models/:id/download` |
+| `POST /api/v1/admin/llm/models/:id/load` | `POST /models/:id/load` |
+| `POST /api/v1/admin/llm/models/:id/unload` | `POST /models/:id/unload` |
+
+> **Known gaps:** legacy `/v1/completions` *streaming* and `coreml-llm` runtime responses don't carry usage on the wire — those rows log zero tokens.
 
 ---
 
@@ -1116,7 +1180,12 @@ Aggregated usage stats for the authenticated user.
   "by_endpoint": {
     "asr": {"requests": 1200, "audio_duration_sec": 28000},
     "asr_stream": {"requests": 600, "audio_duration_sec": 7200},
-    "tts": {"requests": 47, "audio_duration_sec": 1220}
+    "tts": {"requests": 47, "audio_duration_sec": 1220},
+    "llm_chat": {"requests": 91, "prompt_tokens": 40211, "completion_tokens": 8830}
+  },
+  "by_model": {
+    "mistral-7b-int4": {"requests": 80, "prompt_tokens": 35800, "completion_tokens": 7900, "total_tokens": 43700},
+    "all-minilm-l6-v2": {"requests": 11, "prompt_tokens": 4411, "completion_tokens": 0, "total_tokens": 4411}
   },
   "by_key": [
     {
@@ -1653,8 +1722,8 @@ A flat lookup for callers — which models / engines exist, what audio formats e
 
 | Env var                          | Default | Where read   | Effect                                                                 |
 |----------------------------------|---------|--------------|------------------------------------------------------------------------|
-| `SWIFT_SIDECAR_URL`              | `http://127.0.0.1:8101` | Go       | Sidecar REST base URL.                                                 |
-| `SWIFT_SIDECAR_WS_URL`           | `ws://127.0.0.1:8101`  | Go       | Sidecar WebSocket base URL.                                            |
+| `AUDIO_SIDECAR_URL`              | `http://127.0.0.1:8101` | Go       | Audio sidecar REST base URL. (`SWIFT_SIDECAR_URL` still works as a fallback.) |
+| `AUDIO_SIDECAR_WS_URL`           | `ws://127.0.0.1:8101`  | Go       | Audio sidecar WebSocket base URL. (`SWIFT_SIDECAR_WS_URL` still works as a fallback.) |
 | `AUDIO_SIDECAR_PORT`             | `8101`  | Sidecar      | HTTP listen port.                                                      |
 | `AUDIO_SIDECAR_HOST`             | `0.0.0.0` | Sidecar    | HTTP listen host.                                                      |
 | `SIDECAR_REALTIME_ENGINE`        | `eou-320` | Sidecar     | Default streaming engine for `/stream/realtime`, `/v2/listen`, `/v1/realtime`. |
@@ -1664,6 +1733,12 @@ A flat lookup for callers — which models / engines exist, what audio formats e
 | `ENABLE_ITN`                     | `true`  | Go + Sidecar | Spoken-form → written-form normalization (numbers, dates, etc.).       |
 | `ENABLE_DIARIZATION`             | `true`  | Go + Sidecar | Sortformer diarization in `/api/v1/asr` (inline).                      |
 | `ENABLE_TTS`                     | `true`  | Go + Sidecar | TTS feature flag (server-wide).                                        |
+| `REALTIME_S2S_ENABLED`           | `false` | Go           | Speech-to-speech mode on `WS /v1/realtime` (`?model=gpt-realtime*`). Requires the LLM sidecar. See [docs/realtime.md](realtime.md). |
+| `REALTIME_S2S_MODEL`             | `mistral-7b-int4` | Go | LLM model (sidecar-llm registry id) for S2S turns.           |
+| `REALTIME_S2S_VOICE`             | `default` | Go        | PocketTTS voice for S2S spoken responses.                              |
+| `REALTIME_S2S_MAX_TOKENS`        | `300`   | Go           | Per-turn response token cap.                                           |
+| `REALTIME_S2S_TEMPERATURE`       | `0.7`   | Go           | LLM sampling temperature.                                              |
+| `REALTIME_S2S_INTERRUPTIONS`     | `true`  | Go           | Barge-in: user speech cancels the in-flight response.                  |
 
 Verify sidecar env values via `/health.config`:
 

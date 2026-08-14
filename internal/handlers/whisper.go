@@ -214,6 +214,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	if asrErr != nil {
 		h.lm.SendLog(h.lm.BuildLog("WHISPER_FAILED", "WhisperFailed", slog.LevelError, map[string]interface{}{
 			"endpoint":   "/v1/audio/transcriptions",
+			"ip":         c.IP(),
 			"filename":   file.Filename,
 			"file_size":  file.Size,
 			"model":      model,
@@ -271,12 +272,14 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 	if piiErr != nil {
 		h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
 			"endpoint":   "/v1/audio/transcriptions",
+			"ip":         c.IP(),
 			"text_len":   len(result.Text),
 			"request_id": middleware.RequestIDFromCtx(c),
 		}, piiErr))
 	}
 	completedFields := map[string]interface{}{
 		"endpoint":        "/v1/audio/transcriptions",
+		"ip":              c.IP(),
 		"filename":        file.Filename,
 		"file_size":       file.Size,
 		"model":           model,

@@ -3,9 +3,12 @@
 <!--
   GoTranscribeSrv — sidecar log rotation companion.
 
-  Runs rotate-sidecar-logs.sh hourly (and once at load) so
-  deploy/macos/logs/swift-sidecar.{out,err}.log can never fill the disk.
-  Installed by `make sidecar-install` alongside the sidecar agent.
+  Runs rotate-sidecar-logs.sh hourly (and once at load) so the launchd
+  flat-file logs in deploy/macos/logs/ can never fill the disk. Rotates:
+    - swift-sidecar.{out,err}.log  (legacy audio-sidecar shim — transition)
+    - audio-sidecar.{out,err}.log   (current audio sidecar)
+    - llm-sidecar.{out,err}.log     (LLM sidecar)
+  Installed by `make sidecar-install` (audio) and `make llm-install`.
 -->
 <plist version="1.0">
 <dict>

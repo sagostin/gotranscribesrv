@@ -2,7 +2,7 @@
 
 ## Quick Start (Docker + Native Sidecar)
 
-The fastest way to get running. Docker handles PostgreSQL and the Go API server. The Swift sidecar runs natively on the Mac for CoreML/ANE access.
+The fastest way to get running. Docker handles PostgreSQL and the Go API server. The audio sidecar runs natively on the Mac for CoreML/ANE access.
 
 ```bash
 cp .env.example .env
@@ -12,11 +12,11 @@ cp .env.example .env
 make up
 docker compose logs -f server   # Watch for admin credentials
 
-# Terminal 2 — Swift sidecar (ASR, VAD, diarization, TTS)
-make swift-sidecar              # Builds & serves on :8101
+# Terminal 2 — Audio sidecar (ASR, VAD, diarization, TTS)
+make audio-sidecar              # Builds & serves on :8101
 ```
 
-This starts PostgreSQL and the Go backend in Docker, while the Swift sidecar runs natively for CoreML/ANE access. On first boot, an admin user and API key are printed to the console.
+This starts PostgreSQL and the Go backend in Docker, while the audio sidecar runs natively for CoreML/ANE access. On first boot, an admin user and API key are printed to the console.
 
 ---
 
@@ -73,11 +73,12 @@ JWT_SECRET=generate-a-random-64-char-string-here
 JWT_ACCESS_TTL=15m
 JWT_REFRESH_TTL=168h
 
-# Swift Sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
-SWIFT_SIDECAR_URL=http://localhost:8101
-SWIFT_SIDECAR_WS_URL=ws://localhost:8101
+# Audio Sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+# Backward-compat: SWIFT_SIDECAR_URL / SWIFT_SIDECAR_WS_URL still work.
+AUDIO_SIDECAR_URL=http://localhost:8101
+AUDIO_SIDECAR_WS_URL=ws://localhost:8101
 
-# Models (Swift sidecar auto-downloads on first run)
+# Models (audio sidecar auto-downloads on first run)
 ENABLE_DIARIZATION=true
 ENABLE_TTS=true
 
@@ -109,7 +110,7 @@ RATE_LIMIT_ENTERPRISE=0  # 0 = unlimited
 # Logging
 LOG_LEVEL=info
 
-# ASR model (Swift sidecar auto-downloads)
+# ASR model (audio sidecar auto-downloads)
 ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 ```
 
@@ -117,19 +118,19 @@ ASR_MODEL=mlx-community/parakeet-tdt-0.6b-v3
 
 ---
 
-### 3. Start the Swift Sidecar
+### 3. Start the Audio Sidecar
 
-The Swift sidecar handles all audio AI — ASR, VAD, diarization, and TTS — via CoreML and the Apple Neural Engine.
+The audio sidecar handles all audio AI — ASR, VAD, diarization, and TTS — via CoreML and the Apple Neural Engine.
 
 ```bash
 # Build and run (models auto-download on first launch):
-make swift-sidecar
+make audio-sidecar
 # 🚀 Initializing FluidAudio engines (CoreML/ANE)...
 # ✅ ASR engine loaded (Parakeet TDT v3, ANE)
 # ✅ VAD engine loaded (Silero, ANE)
 # ✅ Diarizer loaded (Sortformer, ANE)
 # ✅ TTS engine loaded (PocketTTS, ANE)
-# 🎙  Swift sidecar listening on 0.0.0.0:8101
+# 🎙  Audio sidecar listening on 0.0.0.0:8101
 ```
 
 Verify it's running:
@@ -145,20 +146,20 @@ curl http://localhost:8101/health
 
 #### Optional: enable full NeMo ITN (spoken → written form)
 
-By default, the Swift sidecar logs `📝 ITN: Swift fallback (libnemo_text_processing not linked — passthrough)`. Without the optional native library, ITN is a no-op — spoken numbers like "twelve dollars" pass through unchanged. To enable real NeMo ITN (98.6% compatibility with NVIDIA's NeMo test suite, 7 languages):
+By default, the audio sidecar logs `📝 ITN: Swift fallback (libnemo_text_processing not linked — passthrough)`. Without the optional native library, ITN is a no-op — spoken numbers like "twelve dollars" pass through unchanged. To enable real NeMo ITN (98.6% compatibility with NVIDIA's NeMo test suite, 7 languages):
 
 ```bash
 # One-time setup: builds a ~10 MB static lib from the Rust port of NeMo.
 # Requires the Rust toolchain (brew install rust on macOS).
 make itn-build    # ~5s incremental, ~30s cold
-make swift-build  # relink the sidecar to pick up the lib
-make swift-test   # 12 tests, including a real-NeMo smoke test
+make audio-build  # relink the sidecar to pick up the lib
+make audio-test   # 12 tests, including a real-NeMo smoke test
 ```
 
 Verify the link took effect:
 
 ```bash
-make swift-sidecar
+make audio-sidecar
 # 📝 ITN: NeMo library loaded (version=text-processing-rs-0.2.2)
 ```
 
@@ -387,7 +388,7 @@ curl -s http://localhost:3000/api/v1/usage/summary \
 
 ### Services
 
-Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer. The Swift sidecar runs natively on the host for CoreML/ANE access.
+Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer. The audio sidecar runs natively on the host for CoreML/ANE access.
 
 | Service | Image | Port | Notes |
 |---------|-------|------|-------|
@@ -395,8 +396,8 @@ Docker Compose runs PostgreSQL, the Go API server, and the Presidio PII analyzer
 | `server` | Custom (Go, alpine) | 3000 | Waits for healthy db + presidio-analyzer |
 | `presidio-analyzer` | mcr.microsoft.com/presidio-analyzer:latest | 5002→3000 | spaCy `en_core_web_lg` + REST `/analyze`. Bundled with the analyzer; no model download on first start. `start_period: 60s` because spaCy cold-loads. |
 
-The Go server connects to the native Swift sidecar via `host.docker.internal`:
-- Swift sidecar: `http://host.docker.internal:8101`
+The Go server connects to the native audio sidecar via `host.docker.internal`:
+- Audio sidecar: `http://host.docker.internal:8101`
 
 The Presidio container is on the same docker network as `server`, so it uses `http://presidio-analyzer:3000` internally (no `host.docker.internal` needed). The `5002` host port is exposed only so you can `curl http://localhost:5002/health` for sanity-checking.
 
@@ -406,8 +407,8 @@ The Presidio container is on the same docker network as `server`, so it uses `ht
 # Start Postgres + Go server (run the sidecar separately)
 make up
 
-# Start the Swift sidecar in a separate terminal:
-make swift-sidecar       # Terminal 2 — ASR, VAD, diarization, TTS
+# Start the audio sidecar in a separate terminal:
+make audio-sidecar       # Terminal 2 — ASR, VAD, diarization, TTS
 
 docker compose logs -f server   # Watch Go server logs (admin creds here)
 docker compose down              # Stop Docker services
@@ -419,7 +420,7 @@ docker compose down -v           # Stop + delete volumes (⚠️ data loss)
 ## Multi-Node Deployment
 
 There are two approaches for multi-node deployments:
-- **Co-located** — Go + Swift on every Mac Mini (simpler, all-in-one)
+- **Co-located** — Go + audio sidecar on every Mac Mini (simpler, all-in-one)
 - **Split** — Go API on normal server infra, Macs as pure inference nodes (recommended)
 
 For a complete production walkthrough of the co-located approach (compose files, headless boot, shared DB VM with Caddy), see [docs/production.md](production.md).
@@ -453,14 +454,14 @@ Run the Go API gateway on your normal server infrastructure and keep Macs as ded
 
 #### 1. Mac Minis (Inference Only)
 
-Each Mac runs the Swift sidecar:
+Each Mac runs the audio sidecar:
 
 ```bash
 git clone https://github.com/yourorg/gotranscribesrv.git
 cd gotranscribesrv
 
-# Start Swift sidecar (models auto-download on first run)
-make swift-sidecar       # ASR, VAD, diarization, TTS on :8101
+# Start audio sidecar (models auto-download on first run)
+make audio-sidecar       # ASR, VAD, diarization, TTS on :8101
 ```
 
 Verify each Mac is serving:
@@ -506,11 +507,11 @@ Run the Go server anywhere — Docker, K8s, VPS, bare metal:
 
 ```bash
 # .env on the Go server
-SWIFT_SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
-SWIFT_SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
+AUDIO_SIDECAR_URL=http://inference.internal:80       # Caddy proxy to Mac pool
+AUDIO_SIDECAR_WS_URL=ws://inference.internal:80      # WebSocket via Caddy
 # Or with TLS:
-# SWIFT_SIDECAR_URL=https://inference.internal:443
-# SWIFT_SIDECAR_WS_URL=wss://inference.internal:443
+# AUDIO_SIDECAR_URL=https://inference.internal:443
+# AUDIO_SIDECAR_WS_URL=wss://inference.internal:443
 
 DATABASE_URL=postgres://user:pass@db-host:5432/transcribesrv?sslmode=disable
 JWT_SECRET=your-shared-secret
@@ -524,9 +525,9 @@ make run   # or: docker compose up server db
 #### Architecture Diagram
 
 ```
-  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (Swift :8101)
-              on VPS/K8s         ↗   → Mac Mini 2 (Swift :8101)
-                           LB  ↗    → Mac Mini 3 (Swift :8101)
+  Clients → Go API (:3000)  → Caddy → Mac Mini 1 (Audio :8101)
+              on VPS/K8s         ↗   → Mac Mini 2 (Audio :8101)
+                           LB  ↗    → Mac Mini 3 (Audio :8101)
                     ↓
               PostgreSQL
 ```
@@ -546,16 +547,24 @@ migrate:          # Run GORM migrations only
 lint:             # golangci-lint
 tidy:             # go mod tidy
 
-# Swift sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
-swift-sidecar:    # Build & run Swift sidecar on :8101
-swift-build:      # Build Swift sidecar in release mode
-swift-test:       # Sidecar tests (ITN)
-sidecar-install:  # Install launchd agent (auto-start at login — prod nodes)
-sidecar-restart:  # Restart the launchd agent
-sidecar-uninstall:# Remove the launchd agent
+# Audio sidecar (ASR, VAD, Diarization, TTS — CoreML/ANE)
+audio-sidecar:    # Build & run audio sidecar on :8101
+audio-build:      # Build audio sidecar in release mode
+audio-test:       # Sidecar tests (ITN)
+sidecar-install:  # Install audio launchd agent (auto-start at login — prod nodes)
+sidecar-restart:  # Restart the audio launchd agent
+sidecar-uninstall:# Remove the audio launchd agents
 sidecar-status:   # launchd state + :8101 health check
 
-# ITN (optional Rust build — run BEFORE swift-build)
+# LLM sidecar (chat, embeddings, image generation — CoreML)
+llm-sidecar:      # Build & run LLM sidecar on :8080
+llm-build:        # Build LLM sidecar in release mode
+llm-install:      # Install LLM launchd agent (auto-start at login — prod nodes)
+llm-restart:      # Restart the LLM launchd agent
+llm-uninstall:    # Remove the LLM launchd agent
+llm-status:       # launchd state + :8080 health check
+
+# ITN (optional Rust build — run BEFORE audio-build)
 itn-vendor:       # Clone text-processing-rs
 itn-build:        # Build libtext_processing_rs.a
 itn-clean:        # Remove Rust build artifacts
@@ -578,7 +587,7 @@ db-restore:       # Restore: make db-restore FILE=backups/....dump
 caddy-reload:     # Zero-downtime Caddy reload after Caddyfile edits
 
 # Utilities
-clean:            # Remove bin/, sidecar-swift/.build
+clean:            # Remove bin/, sidecar-audio/.build, sidecar-llm/.build
 help:             # List all targets (also the default: bare `make`)
 ```
 
@@ -668,12 +677,13 @@ ENABLE_DIARIZATION=true
 |-------|---------|
 | Swift build fails | Ensure Xcode 16+ and Swift 6.0+ (`swift --version`) |
 | `CUDA not available` | Expected — we use CoreML/ANE, not CUDA |
-| Swift model download slow | Models download from HuggingFace on first run (~2 GB). Set `HF_HUB_CACHE` to a fast SSD |
-| `ASR engine not loaded` | Check Swift sidecar logs — CoreML model may have failed to download |
-| Port 8101 in use | Change `AUDIO_SIDECAR_PORT` env var for Swift sidecar |
+| Audio model download slow | Models download from HuggingFace on first run (~2 GB). Set `HF_HUB_CACHE` to a fast SSD |
+| `ASR engine not loaded` | Check audio sidecar logs — CoreML model may have failed to download |
+| Port 8101 in use | Change `AUDIO_SIDECAR_PORT` env var for the audio sidecar |
+| Port 8080 in use | Change `PORT` env var for the LLM sidecar (or override `LLM_SIDECAR_PORT` in the Makefile) |
 | Port 3000 in use | Change `PORT` in `.env` |
 | PostgreSQL connection refused | Check `brew services list` for postgres status |
-| Sidecar health check fails | Ensure Swift sidecar is running on port 8101 |
+| Sidecar health check fails | Ensure audio sidecar is running on port 8101 |
 | Out of memory on 16 GB | Move PostgreSQL to an external host, reduce concurrent streams |
 | Admin credentials lost | Delete all users from DB and restart — seed runs again |
-| `PocketTTS model not initialized` | Check Swift sidecar logs — TTS model may have failed to download |
+| `PocketTTS model not initialized` | Check audio sidecar logs — TTS model may have failed to download |
