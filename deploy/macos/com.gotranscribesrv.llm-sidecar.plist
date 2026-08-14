@@ -42,6 +42,13 @@
 		<key>PORT</key>
 		<string>8080</string>
 
+		LLM_SIDECAR_HOST: HTTP listen host. Defaults to 0.0.0.0 so the
+		Docker server container can reach the sidecar via
+		host.docker.internal (same posture as the audio sidecar). Set to
+		127.0.0.1 to restrict to loopback.
+		<key>LLM_SIDECAR_HOST</key>
+		<string>0.0.0.0</string>
+
 		<key>HUGGING_FACE_HUB_TOKEN</key>
 		<string></string>
 

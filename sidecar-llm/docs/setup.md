@@ -22,9 +22,14 @@ Build output goes to `.build/`. No Xcode project file is needed; the
 ## Run
 
 ```bash
-swift run Server             # serves on http://127.0.0.1:8080
+swift run Server             # serves on http://0.0.0.0:8080 (reachable via 127.0.0.1)
 PORT=8081 swift run Server   # alternate port
 ```
+
+The server binds `0.0.0.0` by default (override with `LLM_SIDECAR_HOST`) so
+the Docker `server` container can reach it via `host.docker.internal:8080` —
+same posture as the audio sidecar. Set `LLM_SIDECAR_HOST=127.0.0.1` to
+restrict it to loopback.
 
 The server reads `models.json` from the current working directory on every
 start, then listens for HTTP. Background preloads kick off once the port is
@@ -50,6 +55,7 @@ swift run Server 2>&1 | tee /tmp/llm-sidecar.log
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `8080` | TCP port for the HTTP listener. |
+| `LLM_SIDECAR_HOST` | `0.0.0.0` | HTTP listen host. `0.0.0.0` lets Docker reach the sidecar via `host.docker.internal`; set `127.0.0.1` to restrict to loopback. |
 | `HUGGING_FACE_HUB_TOKEN` | — | Bearer token for gated repos (e.g. `google/gemma-*`). Passed to `HubApi`. |
 | `COREML_MAX_RESIDENT` | `2` | LRU cap for simultaneously loaded chat models (`standard` runtime). Used models stay resident until evicted. |
 | `COREML_AUTO_DOWNLOAD` | from `models.json` (`true`) | Disable with `0`/`false`/`no`/`off` to make un-downloaded models fail requests with 409. |

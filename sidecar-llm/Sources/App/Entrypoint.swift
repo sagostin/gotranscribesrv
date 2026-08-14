@@ -54,6 +54,12 @@ enum Entrypoint {
         if let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "") {
             app.http.server.configuration.port = port
         }
+        // Bind all interfaces by default so Docker (host.docker.internal) can
+        // reach the sidecar — same default as the audio sidecar's
+        // AUDIO_SIDECAR_HOST. Set LLM_SIDECAR_HOST=127.0.0.1 to restrict to
+        // loopback.
+        app.http.server.configuration.hostname =
+            ProcessInfo.processInfo.environment["LLM_SIDECAR_HOST"] ?? "0.0.0.0"
 
         try routes(app, context: ServerContext(
             settings: settings, manager: manager, images: images,

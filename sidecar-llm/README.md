@@ -28,7 +28,7 @@ make llm-sidecar        # debug run on :8080 (PORT env to override)
 
 # Or directly inside this folder:
 swift build
-swift run Server        # serves on http://127.0.0.1:8080 (PORT env to override)
+swift run Server        # binds 0.0.0.0:8080 (PORT / LLM_SIDECAR_HOST env to override)
 ```
 
 On first run the default chat model (`mistral-7b-int4`, ~4 GB) downloads in the

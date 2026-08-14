@@ -1726,6 +1726,7 @@ A flat lookup for callers — which models / engines exist, what audio formats e
 | `AUDIO_SIDECAR_WS_URL`           | `ws://127.0.0.1:8101`  | Go       | Audio sidecar WebSocket base URL. (`SWIFT_SIDECAR_WS_URL` still works as a fallback.) |
 | `AUDIO_SIDECAR_PORT`             | `8101`  | Sidecar      | HTTP listen port.                                                      |
 | `AUDIO_SIDECAR_HOST`             | `0.0.0.0` | Sidecar    | HTTP listen host.                                                      |
+| `LLM_SIDECAR_HOST`               | `0.0.0.0` | LLM sidecar | HTTP listen host. `0.0.0.0` lets the Docker `server` container reach the sidecar via `host.docker.internal`; set `127.0.0.1` to restrict to loopback. |
 | `SIDECAR_REALTIME_ENGINE`        | `eou-320` | Sidecar     | Default streaming engine for `/stream/realtime`, `/v2/listen`, `/v1/realtime`. |
 | `SIDECAR_TTS_DEFAULT_BACKEND`    | `pocket` | Sidecar      | Default backend for `/synthesize` when `?backend=` isn't sent. Back-compat for Go `/api/v1/tts`. |
 | `SIDECAR_TTS_STREAM_BACKEND`     | `pocket` | Sidecar      | Default backend for `/synthesize/stream`. Anything other than `pocket` is rejected with a startup warning (Kokoro streaming unsupported in FluidAudio 0.15.5). |

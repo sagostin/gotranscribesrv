@@ -5,7 +5,7 @@
 ```bash
 swift build                   # compile everything
 swift test                    # 15 unit tests (parser, prompt rendering, registry)
-swift run Server              # serves on http://127.0.0.1:8080 (PORT to override)
+swift run Server              # binds 0.0.0.0:8080 (PORT / LLM_SIDECAR_HOST to override)
 PORT=8081 .build/debug/Server # alternate port
 ```
 
