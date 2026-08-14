@@ -18,7 +18,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/server cmd/server/main.go
 # ── Runtime ─────────────────────────────────────────────────
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+# ffmpeg: transcodes TTS PCM → mp3/opus/flac/aac for the OpenAI-compatible
+# /v1/audio/speech endpoint (see internal/audio). Without it those formats
+# return 501.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 
 WORKDIR /app
 COPY --from=builder /bin/server .

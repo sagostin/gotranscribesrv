@@ -61,6 +61,29 @@ func (lm *LogManager) LoadTemplates() {
 		"TTSVoiceLoadFailed": "TTS failed to load stored voice: %v",
 		"TTSSidecarError":    "TTS sidecar returned non-200: %v",
 
+		// ── OpenAI-compatible TTS ───────────────────────────────
+		"OpenAITTSRequest":         "OpenAI-compat TTS request received",
+		"OpenAITTSCompleted":       "OpenAI-compat TTS synthesis completed",
+		"OpenAITTSFailed":          "OpenAI-compat TTS synthesis failed: %v",
+		"OpenAITTSTranscodeFailed": "OpenAI-compat TTS audio transcode failed: %v",
+
+		// ── LLM gateway (OpenAI + Anthropic dialects) ───────────
+		// Content (prompts/completions) is NEVER logged — metadata
+		// only: model, sizes, token counts, timings, tool names.
+		"LLMRequestReceived":     "LLM request received",
+		"LLMRequestCompleted":    "LLM request completed",
+		"LLMStreamStarted":       "LLM stream started",
+		"LLMStreamProgress":      "LLM stream in progress",
+		"LLMStreamCompleted":     "LLM stream completed",
+		"LLMStreamAborted":       "LLM stream aborted: %v",
+		"LLMUpstreamRejected":    "LLM sidecar rejected request: %v",
+		"LLMSidecarUnavailable":  "LLM sidecar unavailable: %v",
+		"ResponsesPersistFailed": "Responses state persist failed: %v",
+
+		// ── Conversations API (Responses state) ─────────────────
+		"ConversationCreated": "Conversation created",
+		"ConversationDBError": "Conversation DB error: %v",
+
 		// ── Voice cloning ───────────────────────────────────────
 		"VoiceCloneStarted":    "Voice clone started",
 		"VoiceCloneCompleted":  "Voice clone completed",

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	audioenc "github.com/shaunagostinho/gotranscribesrv/internal/audio"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
@@ -32,10 +33,12 @@ import (
 // `voice` is forwarded to the sidecar as-is (PocketTTS IDs like "alba"/"jane"
 // or Kokoro IDs like "af_heart"/"zf_001").
 //
-// `response_format` controls content-type and (for "pcm") strips the WAV header.
-// "wav" (default), "pcm" are supported here. "mp3"/"opus"/"flac" return 501 —
-// the sidecar emits 24 kHz mono 16-bit PCM; transcoding to those formats is
-// not yet wired in.
+// `response_format` controls the output encoding. "wav" (default) and "pcm"
+// are served from the sidecar bytes directly (pcm strips the WAV header);
+// "mp3"/"opus"/"flac"/"aac" are transcoded from the PCM via ffmpeg with
+// fixed, server-chosen quality settings (see internal/audio) — clients
+// cannot request arbitrary bitrates. When ffmpeg is not installed those
+// formats return 501 with a clear message.
 type OpenAITTSHandler struct {
 	sidecar        *sidecar.Client
 	lm             *logging.LogManager
@@ -108,12 +111,16 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 
 	backend := openAIModelToBackend(body.Model, h.defaultBackend)
 
-	// Format support — wav/pcm only; mp3/opus/flac rejected with a clear
-	// message instead of silently returning the wrong format.
+	// Format support — wav/pcm are served from the sidecar bytes directly;
+	// mp3/opus/flac/aac are transcoded from the PCM via ffmpeg with fixed
+	// quality settings (see internal/audio). When ffmpeg isn't installed,
+	// compressed formats fall back to a clear 501 rather than silently
+	// returning the wrong format.
 	format := strings.ToLower(body.ResponseFormat)
 	var (
 		outCT       string
 		stripWavHdr bool
+		transcode   bool
 	)
 	switch format {
 	case "wav":
@@ -121,14 +128,18 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 	case "pcm":
 		outCT = "audio/L16; rate=24000; channels=1"
 		stripWavHdr = true
-	case "mp3", "opus", "flac":
-		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "UNSUPPORTED_FORMAT",
-				"message": fmt.Sprintf("response_format=%q not yet implemented — sidecar emits 24 kHz mono PCM; use wav or pcm", format),
-				"status":  501,
-			},
-		})
+	case "mp3", "opus", "flac", "aac":
+		if !audioenc.Available() {
+			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "UNSUPPORTED_FORMAT",
+					"message": fmt.Sprintf("response_format=%q requires ffmpeg for transcoding, which is not installed on this server; use wav or pcm", format),
+					"status":  501,
+				},
+			})
+		}
+		outCT = audioenc.ContentType(format)
+		transcode = true
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fiber.Map{
@@ -192,15 +203,46 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		})
 	}
 
-	// Strip 44-byte WAV header for raw PCM output
-	if stripWavHdr && len(audio) > 44 {
-		audio = audio[44:]
+	// Strip 44-byte WAV header for raw PCM output and for transcode input
+	// (ffmpeg reads raw s16le, not the WAV wrapper).
+	pcmBytes := len(audio)
+	if (stripWavHdr || transcode) && len(audio) > audioenc.WAVHeaderLen {
+		audio = audio[audioenc.WAVHeaderLen:]
+	}
+	pcmBytes = len(audio)
+
+	// Duration is computed from the PCM length — after transcoding the
+	// byte count no longer maps linearly to time.
+	outputDurationMs := 0
+	if pcmBytes > 0 {
+		// 24 kHz, 16-bit, mono = 48000 bytes/sec
+		outputDurationMs = pcmBytes * 1000 / audioenc.BytesPerSec
 	}
 
-	outputDurationMs := 0
-	if len(audio) > 0 {
-		// 24 kHz, 16-bit, mono = 48000 bytes/sec
-		outputDurationMs = len(audio) * 1000 / 48000
+	transcodeMs := 0
+	if transcode {
+		tcStart := time.Now()
+		encoded, err := audioenc.TranscodePCM(audio, format)
+		transcodeMs = int(time.Since(tcStart).Milliseconds())
+		if err != nil {
+			h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_TRANSCODE_FAILED", "OpenAITTSTranscodeFailed", slog.LevelWarn, map[string]interface{}{
+				"endpoint":        "/v1/audio/speech",
+				"ip":              c.IP(),
+				"model":           body.Model,
+				"backend":         backendUsed,
+				"response_format": format,
+				"input_length":    len(body.Input),
+				"request_id":      middleware.RequestIDFromCtx(c),
+			}, err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "TRANSCODE_FAILED",
+					"message": fmt.Sprintf("failed to encode response_format=%q", format),
+					"status":  500,
+				},
+			})
+		}
+		audio = encoded
 	}
 
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_COMPLETED", "OpenAITTSCompleted", slog.LevelInfo, map[string]interface{}{
@@ -214,6 +256,7 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		"output_bytes":       len(audio),
 		"output_duration_ms": outputDurationMs,
 		"synth_time_ms":      int(synthDuration.Milliseconds()),
+		"transcode_time_ms":  transcodeMs,
 		"request_id":         middleware.RequestIDFromCtx(c),
 	}))
 

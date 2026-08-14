@@ -122,14 +122,25 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 
 	var peek requestPeek
 	if err := json.Unmarshal(body, &peek); err != nil {
-		return llmError(c, fiber.StatusBadRequest, "invalid_request_error", "malformed JSON body")
+		return llmError(c, fiber.StatusBadRequest, "invalid_request_error", "malformed JSON body", "invalid_json")
 	}
 	if peek.Model == "" {
-		return llmError(c, fiber.StatusBadRequest, "invalid_request_error", "model is required")
+		return llmError(c, fiber.StatusBadRequest, "invalid_request_error", "model is required", "model_required")
 	}
 
-	slog.DebugContext(c.UserContext(), "proxying LLM request",
-		"endpoint", endpoint, "model", peek.Model, "stream", peek.Stream)
+	userID, _ := c.Locals("user_id").(string)
+	apiKeyID, _ := c.Locals("api_key_id").(string)
+	requestID := middleware.RequestIDFromCtx(c)
+
+	h.lm.SendLog(h.lm.BuildLog("LLM_REQUEST_RECEIVED", "LLMRequestReceived", slog.LevelInfo, map[string]interface{}{
+		"endpoint":   endpoint,
+		"model":      peek.Model,
+		"stream":     peek.Stream,
+		"user_id":    userID,
+		"api_key_id": apiKeyID,
+		"body_bytes": len(body),
+		"request_id": requestID,
+	}))
 
 	// Cancellable upstream context — canceled when the response is fully
 	// forwarded or the client disconnects mid-stream. NOTE: no defer here —
@@ -140,8 +151,14 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 	resp, err := h.sc.ProxyLLM(ctx, fiber.MethodPost, path, body, strings.TrimPrefix(endpoint, "llm_"))
 	if err != nil {
 		cancel()
-		slog.WarnContext(c.UserContext(), "llm sidecar unavailable", "endpoint", endpoint, "error", err)
-		return llmError(c, fiber.StatusBadGateway, "server_error", "LLM service unavailable")
+		h.lm.SendLog(h.lm.BuildLog("LLM_SIDECAR_UNAVAILABLE", "LLMSidecarUnavailable", slog.LevelError, map[string]interface{}{
+			"endpoint":   endpoint,
+			"model":      peek.Model,
+			"user_id":    userID,
+			"api_key_id": apiKeyID,
+			"request_id": requestID,
+		}, err))
+		return llmError(c, fiber.StatusBadGateway, "server_error", "LLM service unavailable", "sidecar_unavailable")
 	}
 
 	// ── Non-streaming ─────────────────────────────────────────────
@@ -150,7 +167,7 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 		defer cancel()
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return llmError(c, fiber.StatusBadGateway, "server_error", "failed to read LLM response")
+			return llmError(c, fiber.StatusBadGateway, "server_error", "failed to read LLM response", "sidecar_read_error")
 		}
 
 		if resp.StatusCode == fiber.StatusOK {
@@ -162,8 +179,20 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 				"total_tokens":      prompt + completion,
 				"stream":            false,
 			})
+			h.lm.SendLog(h.lm.BuildLog("LLM_REQUEST_COMPLETED", "LLMRequestCompleted", slog.LevelInfo, map[string]interface{}{
+				"endpoint":          endpoint,
+				"model":             peek.Model,
+				"status":            resp.StatusCode,
+				"prompt_tokens":     prompt,
+				"completion_tokens": completion,
+				"total_tokens":      prompt + completion,
+				"process_ms":        int(time.Since(start).Milliseconds()),
+				"user_id":           userID,
+				"api_key_id":        apiKeyID,
+				"request_id":        requestID,
+			}))
 		} else {
-			logUpstreamError(c, endpoint, peek.Model, resp.StatusCode, respBody)
+			h.logUpstreamError(endpoint, peek.Model, userID, apiKeyID, requestID, resp.StatusCode, respBody)
 		}
 		// Non-2xx: the usage middleware's failure path logs a RequestLog;
 		// the sidecar's OpenAI-style error envelope passes through verbatim.
@@ -177,9 +206,17 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 		defer resp.Body.Close()
 		defer cancel()
 		respBody, _ := io.ReadAll(resp.Body)
-		logUpstreamError(c, endpoint, peek.Model, resp.StatusCode, respBody)
+		h.logUpstreamError(endpoint, peek.Model, userID, apiKeyID, requestID, resp.StatusCode, respBody)
 		return passthrough(c, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 	}
+
+	h.lm.SendLog(h.lm.BuildLog("LLM_STREAM_STARTED", "LLMStreamStarted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":   endpoint,
+		"model":      peek.Model,
+		"user_id":    userID,
+		"api_key_id": apiKeyID,
+		"request_id": requestID,
+	}))
 
 	// Usage for streams is only known after the handler returns, so the
 	// handler logs it directly at stream end; the "-" sentinel tells the
@@ -188,9 +225,6 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 
 	// Capture everything the stream writer needs BEFORE returning —
 	// Fiber recycles the Ctx once the handler exits.
-	userID, _ := c.Locals("user_id").(string)
-	apiKeyID, _ := c.Locals("api_key_id").(string)
-	requestID := middleware.RequestIDFromCtx(c)
 	model := peek.Model
 
 	c.Set("Content-Type", "text/event-stream")
@@ -202,25 +236,66 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 		defer resp.Body.Close()
 		defer cancel()
 
-		usage := teeSSE(resp.Body, w, dialect, cancel)
+		usage := teeSSE(resp.Body, w, dialect, cancel, h.streamProgressLogger(endpoint, model, userID, apiKeyID, requestID))
 
 		processMs := int(time.Since(start).Milliseconds())
 		middleware.LogLLMUsage(h.db, userID, apiKeyID, endpoint, model,
 			usage.prompt, usage.completion, processMs, true)
 
-		h.lm.SendLog(h.lm.BuildLog("LLM_STREAM_COMPLETED", "LLMStreamCompleted", slog.LevelInfo, map[string]interface{}{
+		fields := map[string]interface{}{
 			"endpoint":          endpoint,
 			"model":             model,
 			"prompt_tokens":     usage.prompt,
 			"completion_tokens": usage.completion,
 			"process_ms":        processMs,
+			"ttft_ms":           usage.ttftMs,
+			"chunks":            usage.chunks,
+			"chars":             usage.chars,
+			"outcome":           usage.outcome,
+			"user_id":           userID,
+			"api_key_id":        apiKeyID,
 			"request_id":        requestID,
-		}))
+		}
+		if len(usage.toolCalls) > 0 {
+			fields["tool_calls"] = strings.Join(usage.toolCalls, ",")
+		}
+		if usage.outcome == streamCompleted {
+			h.lm.SendLog(h.lm.BuildLog("LLM_STREAM_COMPLETED", "LLMStreamCompleted", slog.LevelInfo, fields))
+		} else {
+			h.lm.SendLog(h.lm.BuildLog("LLM_STREAM_ABORTED", "LLMStreamAborted", slog.LevelWarn, fields, usage.outcome))
+		}
 	})
 	return nil
 }
 
-// streamUsage accumulates token counts tee'd from an SSE stream.
+// streamProgressLogger returns a throttled progress callback invoked by
+// teeSSE every streamProgressEvery chunks, for in-flight visibility of
+// long streams. Debug level — enable per-deployment when needed.
+func (h *LLMHandler) streamProgressLogger(endpoint, model, userID, apiKeyID, requestID string) func(chunks, chars int) {
+	return func(chunks, chars int) {
+		h.lm.SendLog(h.lm.BuildLog("LLM_STREAM_PROGRESS", "LLMStreamProgress", slog.LevelDebug, map[string]interface{}{
+			"endpoint":   endpoint,
+			"model":      model,
+			"chunks":     chunks,
+			"chars":      chars,
+			"user_id":    userID,
+			"api_key_id": apiKeyID,
+			"request_id": requestID,
+		}))
+	}
+}
+
+// streamOutcome classifies how an SSE stream ended, for Loki visibility.
+type streamOutcome string
+
+const (
+	streamCompleted          streamOutcome = "completed"           // terminal frame seen
+	streamClientDisconnected streamOutcome = "client_disconnected" // client write failed mid-stream
+	streamUpstreamEOF        streamOutcome = "upstream_eof"        // EOF with no terminal frame — truncated
+)
+
+// streamUsage accumulates token counts and stream telemetry tee'd from an
+// SSE stream. Metadata only — never message content (PII).
 type streamUsage struct {
 	prompt     int
 	completion int
@@ -228,30 +303,57 @@ type streamUsage struct {
 	// that emit one (Responses API response.completed) so the handler can
 	// persist it after the stream ends.
 	responseJSON []byte
+	outcome      streamOutcome
+	ttftMs       int      // time to first frame
+	chunks       int      // data: frames forwarded
+	chars        int      // delta text characters forwarded
+	toolCalls    []string // tool/function names invoked (deduped, order of first sight)
+	terminal     bool     // terminal frame observed (usage chunk, [DONE], response.completed, message_stop)
 }
 
+// streamProgressEvery is the chunk interval at which teeSSE invokes the
+// optional progress callback (LLM_STREAM_PROGRESS, debug level).
+const streamProgressEvery = 50
+
 // teeSSE copies an SSE stream from src to w frame by frame, flushing after
-// every line, while parsing data: payloads for usage stats. cancel is called
-// if the client disconnects (write error) so the upstream request aborts.
-func teeSSE(src io.Reader, w *bufio.Writer, dialect llmDialect, cancel context.CancelFunc) streamUsage {
-	var usage streamUsage
+// every line, while parsing data: payloads for usage stats and stream
+// telemetry. cancel is called if the client disconnects (write error) so
+// the upstream request aborts. progress (may be nil) fires every
+// streamProgressEvery chunks.
+func teeSSE(src io.Reader, w *bufio.Writer, dialect llmDialect, cancel context.CancelFunc, progress func(chunks, chars int)) streamUsage {
+	start := time.Now()
+	usage := streamUsage{outcome: streamUpstreamEOF}
 	reader := bufio.NewReader(src)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if usage.chunks == 0 && usage.ttftMs == 0 {
+				usage.ttftMs = int(time.Since(start).Milliseconds())
+			}
 			if payload, ok := sseDataPayload(line); ok {
+				usage.chunks++
 				parseStreamUsage(dialect, payload, &usage)
+				if progress != nil && usage.chunks%streamProgressEvery == 0 {
+					progress(usage.chunks, usage.chars)
+				}
+			} else if sseIsDone(line) {
+				usage.terminal = true
 			}
 			if _, werr := w.Write(line); werr != nil {
 				cancel() // client gone — abort upstream
+				usage.outcome = streamClientDisconnected
 				return usage
 			}
 			if ferr := w.Flush(); ferr != nil {
 				cancel()
+				usage.outcome = streamClientDisconnected
 				return usage
 			}
 		}
 		if err != nil {
+			if usage.terminal {
+				usage.outcome = streamCompleted
+			}
 			return usage // EOF or upstream error — stream over
 		}
 	}
@@ -270,41 +372,107 @@ func sseDataPayload(line []byte) ([]byte, bool) {
 	return []byte(payload), true
 }
 
+// sseIsDone reports whether the line is the OpenAI terminal "data: [DONE]".
+func sseIsDone(line []byte) bool {
+	s := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(s, "data:") {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(s, "data:")) == "[DONE]"
+}
+
+// noteToolCall records a tool/function name on first sight (deduped).
+func (u *streamUsage) noteToolCall(name string) {
+	if name == "" {
+		return
+	}
+	for _, n := range u.toolCalls {
+		if n == name {
+			return
+		}
+	}
+	u.toolCalls = append(u.toolCalls, name)
+}
+
 // parseStreamUsage updates usage from one SSE data payload according to
-// the response dialect.
+// the response dialect. Tracks token counts, delta-text volume, tool-call
+// names, and whether a terminal frame was observed.
 func parseStreamUsage(dialect llmDialect, payload []byte, usage *streamUsage) {
 	switch dialect {
 	case dialectOpenAI:
-		// Terminal chat chunk carries the full usage object.
+		// Terminal chat chunk carries the full usage object; text arrives
+		// as choices[].delta.content; tool names on the first fragment of
+		// each streamed tool call.
 		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Function struct {
+							Name string `json:"name"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
 			Usage *struct {
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal(payload, &chunk) == nil && chunk.Usage != nil {
-			usage.prompt = chunk.Usage.PromptTokens
-			usage.completion = chunk.Usage.CompletionTokens
-		}
-	case dialectResponses:
-		// Terminal response.completed event carries the full response object.
-		var ev struct {
-			Type     string          `json:"type"`
-			Response json.RawMessage `json:"response"`
-		}
-		if json.Unmarshal(payload, &ev) != nil || ev.Type != "response.completed" {
+		if json.Unmarshal(payload, &chunk) != nil {
 			return
 		}
-		usage.responseJSON = ev.Response
-		var r struct {
-			Usage *struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
-			} `json:"usage"`
+		for _, ch := range chunk.Choices {
+			usage.chars += len(ch.Delta.Content)
+			for _, tc := range ch.Delta.ToolCalls {
+				usage.noteToolCall(tc.Function.Name)
+			}
 		}
-		if json.Unmarshal(ev.Response, &r) == nil && r.Usage != nil {
-			usage.prompt = r.Usage.InputTokens
-			usage.completion = r.Usage.OutputTokens
+		if chunk.Usage != nil {
+			usage.prompt = chunk.Usage.PromptTokens
+			usage.completion = chunk.Usage.CompletionTokens
+			usage.terminal = true
+		}
+	case dialectResponses:
+		// Terminal response.completed event carries the full response
+		// object; text arrives via response.output_text.delta; tool names
+		// via response.output_item.added function_call items.
+		var ev struct {
+			Type     string          `json:"type"`
+			Delta    string          `json:"delta"`
+			Item     json.RawMessage `json:"item"`
+			Response json.RawMessage `json:"response"`
+		}
+		if json.Unmarshal(payload, &ev) != nil {
+			return
+		}
+		switch ev.Type {
+		case "response.output_text.delta":
+			usage.chars += len(ev.Delta)
+		case "response.output_item.added":
+			var item struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(ev.Item, &item) == nil && item.Type == "function_call" {
+				usage.noteToolCall(item.Name)
+			}
+		case "response.completed", "response.failed", "response.incomplete":
+			usage.terminal = true
+			if ev.Type != "response.completed" {
+				return
+			}
+			usage.responseJSON = ev.Response
+			var r struct {
+				Usage *struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal(ev.Response, &r) == nil && r.Usage != nil {
+				usage.prompt = r.Usage.InputTokens
+				usage.completion = r.Usage.OutputTokens
+			}
 		}
 	case dialectAnthropic:
 		var ev struct {
@@ -317,6 +485,14 @@ func parseStreamUsage(dialect llmDialect, payload []byte, usage *streamUsage) {
 			Usage struct {
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
 		}
 		if json.Unmarshal(payload, &ev) != nil {
 			return
@@ -324,8 +500,16 @@ func parseStreamUsage(dialect llmDialect, payload []byte, usage *streamUsage) {
 		switch ev.Type {
 		case "message_start":
 			usage.prompt = ev.Message.Usage.InputTokens
+		case "content_block_start":
+			if ev.ContentBlock.Type == "tool_use" {
+				usage.noteToolCall(ev.ContentBlock.Name)
+			}
+		case "content_block_delta":
+			usage.chars += len(ev.Delta.Text)
 		case "message_delta":
 			usage.completion = ev.Usage.OutputTokens
+		case "message_stop":
+			usage.terminal = true
 		}
 	}
 }
@@ -383,14 +567,23 @@ func upstreamErrorSummary(body []byte) (errType, message, code string) {
 	return "", "", ""
 }
 
-// logUpstreamError warns with the sidecar's rejection reason so a 4xx/5xx
-// passthrough is diagnosable from gateway logs alone (the usage middleware
-// only records the status + code, not the message).
-func logUpstreamError(c *fiber.Ctx, endpoint, model string, status int, body []byte) {
+// logUpstreamError ships an LLM_UPSTREAM_REJECTED event to Loki with the
+// sidecar's rejection reason so a 4xx/5xx passthrough is diagnosable from
+// Loki alone (the usage middleware's REQUEST_FAILED only records the
+// status + code, not the message).
+func (h *LLMHandler) logUpstreamError(endpoint, model, userID, apiKeyID, requestID string, status int, body []byte) {
 	errType, message, code := upstreamErrorSummary(body)
-	slog.WarnContext(c.UserContext(), "llm sidecar rejected request",
-		"endpoint", endpoint, "model", model, "status", status,
-		"error_type", errType, "error_code", code, "error_message", message)
+	h.lm.SendLog(h.lm.BuildLog("LLM_UPSTREAM_REJECTED", "LLMUpstreamRejected", slog.LevelWarn, map[string]interface{}{
+		"endpoint":      endpoint,
+		"model":         model,
+		"status":        status,
+		"error_type":    errType,
+		"error_code":    code,
+		"error_message": message,
+		"user_id":       userID,
+		"api_key_id":    apiKeyID,
+		"request_id":    requestID,
+	}, message))
 }
 
 // passthrough writes an upstream response to the client unchanged.
@@ -402,13 +595,20 @@ func passthrough(c *fiber.Ctx, status int, contentType string, body []byte) erro
 }
 
 // llmError renders an OpenAI-style error envelope (matches the sidecar's
-// own error shape so clients see one consistent format).
-func llmError(c *fiber.Ctx, status int, errType, message string) error {
+// own error shape so clients see one consistent format). An optional
+// machine-readable code (e.g. "model_required") is surfaced in the
+// envelope so the usage middleware's REQUEST_FAILED event carries a
+// non-empty error_code for gateway-generated failures.
+func llmError(c *fiber.Ctx, status int, errType, message string, code ...string) error {
+	var codeVal interface{}
+	if len(code) > 0 && code[0] != "" {
+		codeVal = code[0]
+	}
 	return c.Status(status).JSON(fiber.Map{
 		"error": fiber.Map{
 			"message": message,
 			"type":    errType,
-			"code":    nil,
+			"code":    codeVal,
 		},
 	})
 }

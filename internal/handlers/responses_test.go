@@ -27,7 +27,7 @@ func TestTeeSSE_ResponsesUsage(t *testing.T) {
 
 	var out bytes.Buffer
 	w := bufio.NewWriter(&out)
-	usage := teeSSE(strings.NewReader(stream), w, dialectResponses, context.CancelFunc(func() {}))
+	usage := teeSSE(strings.NewReader(stream), w, dialectResponses, context.CancelFunc(func() {}), nil)
 
 	if out.String() != stream {
 		t.Errorf("stream was not passed through verbatim\ngot:  %q\nwant: %q", out.String(), stream)

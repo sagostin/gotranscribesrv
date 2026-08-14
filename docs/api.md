@@ -930,7 +930,7 @@ OpenAI TTS-compatible endpoint. Maps OpenAI's `model` / `voice` names onto our b
 | `model` | string | no | `tts-1` / `tts-1-hd` / `gpt-4o-mini-tts` → PocketTTS; `kokoro` / `kokoro-82m` → Kokoro. Unrecognized / omitted models fall back to Go `TTS_DEFAULT_BACKEND` (default `kokoro`). (default: empty → server default) |
 | `voice` | string | no | OpenAI voice name (`alloy`, `ash`, `coral`, …) — mapped to PocketTTS when backend is pocket; pass Kokoro-native IDs (`af_heart`, `zf_001`, …) when backend is kokoro (default: `"alloy"`) |
 | `input` | string | yes | Text to synthesize (max 5,000 chars) |
-| `response_format` | string | no | `"wav"` (24 kHz mono PCM) or `"pcm"` (raw 24 kHz Int16 LE, WAV header stripped). `mp3`/`opus`/`flac` return 501 — not yet wired up. (default: `"wav"`) |
+| `response_format` | string | no | `"wav"` (24 kHz mono PCM), `"pcm"` (raw 24 kHz Int16 LE, WAV header stripped), or `"mp3"` / `"opus"` / `"flac"` / `"aac"` — transcoded via ffmpeg with fixed server-chosen quality settings (clients cannot request arbitrary bitrates). Compressed formats return 501 when ffmpeg is not installed on the server. (default: `"wav"`) |
 | `speed` | number | no | Playback speed 0.25–4.0 (default: 1.0) |
 
 **OpenAI voice → PocketTTS mapping:** alloy→jane, ash→charles, ballad→mary, coral→eve, echo→alba, sage→george, shimmer→anna, verse→michael, onyx→paul, nova→vera, fable→jean. **Kokoro voices pass through** unchanged (`af_heart`, `bf_emma`, `zf_001`, …).
@@ -1665,6 +1665,35 @@ Every request that hits the API server produces structured log events. The full 
 | `PII_REDACTOR_ERROR` | `PIIRedactorError` | handlers | PII analyzer unreachable / errored (fail-closed trigger) |
 | `RATE_LIMITED` | (HTTP 429) | middleware | Rate limit rejections, also via `gotranscribesrv_rate_limit_rejections_total` |
 
+### LLM gateway events (chat / completions / embeddings / images / messages / responses)
+
+Every LLM request leaves a correlated trail in Loki — filter on `{endpoint=~"llm_.*"}` and follow a single request via its `request_id`. **Content is never logged** (no prompts, completions, or tool arguments) — metadata only: model, sizes, token counts, timings, tool names.
+
+| Type | Level | When | Key fields |
+|---|---|---|---|
+| `LLM_REQUEST_RECEIVED` | info | every LLM request, before proxying | `endpoint`, `model`, `stream`, `body_bytes`, `user_id`, `api_key_id`, `request_id` (+ `conversation_id`, `previous_response_id`, `history_items` for `/v1/responses`) |
+| `LLM_REQUEST_COMPLETED` | info | non-streaming success | + `status`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `process_ms` |
+| `LLM_STREAM_STARTED` | info | sidecar accepted, SSE begun | received fields |
+| `LLM_STREAM_PROGRESS` | debug | every 50 chunks mid-stream | `chunks`, `chars` |
+| `LLM_STREAM_COMPLETED` | info | terminal frame seen | + `ttft_ms`, `chunks`, `chars`, `tool_calls`, token counts, `process_ms`, `outcome=completed` |
+| `LLM_STREAM_ABORTED` | warn | stream ended without a terminal frame | same fields, `outcome=client_disconnected` (client went away) or `upstream_eof` (sidecar truncated the stream) |
+| `LLM_UPSTREAM_REJECTED` | warn | sidecar returned 4xx/5xx | `status`, `error_type`, `error_code` (e.g. `model_not_found`), `error_message` |
+| `LLM_SIDECAR_UNAVAILABLE` | error | sidecar unreachable → 502 | `model`, `error` |
+| `RESPONSES_PERSIST_FAILED` | warn | Responses state (response record / conversation items) failed to save — later `previous_response_id` turns will 404 | `stage`, `response_id`, `conversation_id`, `error` |
+| `CONVERSATION_CREATED` | info | `POST /v1/conversations` success | `conversation_id`, `initial_items` |
+| `CONVERSATION_DB_ERROR` | warn | conversations CRUD DB failure | `operation`, `conversation_id`, `error` |
+| `OPENAI_TTS_TRANSCODE_FAILED` | warn | ffmpeg encode of `response_format=mp3/opus/flac/aac` failed | `response_format`, `error` |
+
+Gateway-generated 4xxs (`invalid_json`, `model_required`, `conversation_not_found`, `response_not_found`, `sidecar_unavailable`) also carry a machine `code` in the error envelope, which the middleware's `REQUEST_FAILED` event picks up as `error_code`.
+
+| Question | Loki query |
+|---|---|
+| Trace one chat request end-to-end | `{endpoint=~"llm_.*"} \| json \| request_id="<id>"` |
+| Streams the sidecar truncated | `{type="LLM_STREAM_ABORTED"} \| json \| outcome="upstream_eof"` |
+| Unknown-model rejections | `{type="LLM_UPSTREAM_REJECTED"} \| json \| error_code="model_not_found"` |
+| Broken Responses chaining | `{type="RESPONSES_PERSIST_FAILED"}` |
+| Slowest first-token streams | `{type="LLM_STREAM_COMPLETED"} \| json \| ttft_ms > 5000` |
+
 ### Where to find things
 
 | Question | Loki query |
@@ -1741,7 +1770,7 @@ A flat lookup for callers — which models / engines exist, what audio formats e
 | `POST /synthesize` (sidecar)             | PocketTTS (default) or Kokoro via `?backend=` | JSON `{text, voice, voice_id?, voice_ref?, speed, format}` | WAV (full 44-byte header, 16-bit PCM mono)   | 24 kHz             | Voice cloning (PocketTTS) — `voice_id` / `voice_ref` rejected when `?backend=kokoro`. |
 | `POST /synthesize/stream` (sidecar)      | PocketTTS only (locked)             | JSON `{text, voice}`                 | **Streaming** raw Int16 little-endian L16 frames, 80 ms each (1920 samples/frame), `Transfer-Encoding: chunked` | 24 kHz             | `Content-Type: audio/L16; rate=24000; channels=1`. Wrap with your own WAV header if you need a `.wav`. `?backend=kokoro` → 501 (Kokoro has no streaming API in FluidAudio 0.15.5). |
 | `POST /api/v1/tts` (Go, legacy)          | PocketTTS only                      | JSON `{text, voice, voice_id?, voice_ref?, speed, format}` | WAV (full header)                            | 24 kHz             | Back-compat — always PocketTTS, voice cloning supported. |
-| `POST /v1/audio/speech` (Go, OpenAI)     | PocketTTS or Kokoro via `model=`     | JSON `{model, voice, input, response_format, speed}` | WAV (full header) **or** raw L16 (`response_format=pcm`) | 24 kHz             | Default backend is `kokoro` (Go env `TTS_DEFAULT_BACKEND=kokoro`). Explicit `model=tts-1`/`tts-1-hd`/`gpt-4o-mini-tts` pins to PocketTTS. `response_format=mp3`/`opus`/`flac` → 501. |
+| `POST /v1/audio/speech` (Go, OpenAI)     | PocketTTS or Kokoro via `model=`     | JSON `{model, voice, input, response_format, speed}` | WAV (full header), raw L16 (`response_format=pcm`), or ffmpeg-transcoded `mp3`/`opus`/`flac`/`aac` | 24 kHz             | Default backend is `kokoro` (Go env `TTS_DEFAULT_BACKEND=kokoro`). Explicit `model=tts-1`/`tts-1-hd`/`gpt-4o-mini-tts` pins to PocketTTS. Compressed formats → 501 when ffmpeg is absent. |
 
 ### Voice IDs / names — quick lookup
 
