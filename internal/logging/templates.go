@@ -75,6 +75,12 @@ func (lm *LogManager) LoadTemplates() {
 		// logs would be too chatty for Loki on long responses).
 		"RTS2STTSStreamFailed": "Realtime S2S TTS stream failed: %v",
 
+		// ── ElevenLabs-compatible TTS ───────────────────────────
+		"ElevenLabsTTSRequest":          "ElevenLabs-compat TTS request received",
+		"ElevenLabsTTSCompleted":        "ElevenLabs-compat TTS synthesis completed",
+		"ElevenLabsTTSFailed":           "ElevenLabs-compat TTS synthesis failed: %v",
+		"ElevenLabsTTSValidationFailed": "ElevenLabs-compat TTS request validation failed",
+
 		// ── LLM gateway (OpenAI + Anthropic dialects) ───────────
 		// Content (prompts/completions) is NEVER logged — metadata
 		// only: model, sizes, token counts, timings, tool names.

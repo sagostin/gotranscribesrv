@@ -37,10 +37,15 @@ type AuthConfig struct {
 // custom headers cannot be set.
 func NewAuthMiddleware(cfg AuthConfig) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// 1. Check for API key header (X-API-Key)
-		apiKey := c.Get("X-API-Key")
-		if apiKey != "" {
+		// 1. Check for API key headers:
+		//    - X-API-Key   → native clients
+		//    - xi-api-key  → ElevenLabs-compatible clients (their SDKs send
+		//      this header on every request)
+		if apiKey := c.Get("X-API-Key"); apiKey != "" {
 			return authenticateAPIKey(c, cfg.DB, cfg.LogManager, apiKey)
+		}
+		if xiKey := c.Get("xi-api-key"); xiKey != "" {
+			return authenticateAPIKey(c, cfg.DB, cfg.LogManager, xiKey)
 		}
 
 		// 2. Check Authorization header:

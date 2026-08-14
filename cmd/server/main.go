@@ -200,6 +200,7 @@ func main() {
 	go voiceHandler.SyncVoiceStorage()
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
 	openaiTTSHandler := handlers.NewOpenAITTSHandler(sc, logManager, cfg.TTSDefaultBackend)
+	elevenlabsHandler := handlers.NewElevenLabsHandler(sc, voiceHandler, logManager, cfg.TTSDefaultBackend)
 	usageHandler := handlers.NewUsageHandler(db.DB)
 	keysHandler := handlers.NewKeysHandler(db.DB)
 	watsonHandler := handlers.NewWatsonHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
@@ -335,7 +336,15 @@ func main() {
 	authed.Post("/api/v1/asr", asrHandler.TranscribeFile)
 
 	// Whisper-compatible
-	authed.Get("/v1/models", modelsHandler.List)
+	// GET /v1/models is shared between OpenAI and ElevenLabs clients:
+	// ElevenLabs SDKs always send xi-api-key, so requests carrying it get
+	// the ElevenLabs model list shape; everything else gets OpenAI's.
+	authed.Get("/v1/models", func(c *fiber.Ctx) error {
+		if c.Get("xi-api-key") != "" {
+			return elevenlabsHandler.Models(c)
+		}
+		return modelsHandler.List(c)
+	})
 	authed.Post("/v1/audio/transcriptions", whisperHandler.Transcriptions)
 
 	// Watson-compatible
@@ -346,6 +355,15 @@ func main() {
 
 	// OpenAI-compatible TTS (POST /v1/audio/speech)
 	authed.Post("/v1/audio/speech", openaiTTSHandler.Speech)
+
+	// ElevenLabs-compatible TTS + voice management
+	authed.Post("/v1/text-to-speech/:voice_id", elevenlabsHandler.Convert)
+	authed.Post("/v1/text-to-speech/:voice_id/stream", elevenlabsHandler.ConvertStream)
+	authed.Get("/v1/voices", elevenlabsHandler.ListVoicesV1)
+	authed.Get("/v2/voices", elevenlabsHandler.ListVoicesV2)
+	authed.Get("/v1/voices/:voice_id", elevenlabsHandler.GetVoice)
+	authed.Post("/v1/voices/add", elevenlabsHandler.AddVoice)
+	authed.Delete("/v1/voices/:voice_id", elevenlabsHandler.DeleteVoice)
 
 	// LLM gateway (OpenAI + Anthropic dialects, proxied to the LLM sidecar
 	// with auth, rate limiting, and per-model token usage tracking)

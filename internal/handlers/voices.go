@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -62,18 +64,6 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	}
 	description := c.FormValue("description")
 
-	// Check name uniqueness for this user
-	var existing models.Voice
-	if result := h.db.Where("user_id = ? AND name = ?", userID, name).First(&existing); result.Error == nil {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "VOICE_EXISTS",
-				"message": fmt.Sprintf("Voice named %q already exists", name),
-				"status":  409,
-			},
-		})
-	}
-
 	// Read uploaded audio file
 	file, err := c.FormFile("audio")
 	if err != nil {
@@ -120,39 +110,78 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		})
 	}
 
+	voice, audioDurationMs, cloneMs, opErr := h.cloneVoiceCore(c.UserContext(), userID, name, description, audioBytes, file.Size, "/api/v1/voices/clone", c.IP(), middleware.RequestIDFromCtx(c))
+	if opErr != nil {
+		return c.Status(opErr.httpStatus).JSON(fiber.Map{
+			"error": fiber.Map{
+				"code":    opErr.code,
+				"message": opErr.msg,
+				"status":  opErr.httpStatus,
+			},
+		})
+	}
+
+	// Set audio_duration_ms for the usage middleware (actual audio duration)
+	c.Locals("audio_duration_ms", audioDurationMs)
+
+	c.Locals("usage_meta", map[string]interface{}{
+		"voice_name":        name,
+		"embedding_size":    voice.SizeBytes,
+		"audio_size":        file.Size,
+		"clone_time_ms":     cloneMs,
+		"audio_duration_ms": audioDurationMs,
+	})
+
+	return c.Status(fiber.StatusCreated).JSON(voice.ToResponse())
+}
+
+// voiceOpError carries an HTTP-mappable failure from the voice storage core.
+type voiceOpError struct {
+	httpStatus int
+	code       string
+	msg        string
+}
+
+// cloneVoiceCore is the dialect-independent voice-cloning pipeline shared by
+// the native POST /api/v1/voices/clone and the ElevenLabs-compatible
+// POST /v1/voices/add: name-uniqueness check, sidecar embedding extraction,
+// local file write, and DB record (with the embedding blob for multi-node
+// sharing). Loki events are emitted from here so both dialects log
+// identically. Returns the voice, source-audio duration, clone latency.
+func (h *VoiceHandler) cloneVoiceCore(ctx context.Context, userID uuid.UUID, name, description string, audioBytes []byte, fileSize int64, endpoint, ip, requestID string) (*models.Voice, int, int, *voiceOpError) {
+	// Check name uniqueness for this user
+	var existing models.Voice
+	if result := h.db.Where("user_id = ? AND name = ?", userID, name).First(&existing); result.Error == nil {
+		return nil, 0, 0, &voiceOpError{fiber.StatusConflict, "VOICE_EXISTS", fmt.Sprintf("Voice named %q already exists", name)}
+	}
+
 	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_STARTED", "VoiceCloneStarted", slog.LevelInfo, map[string]interface{}{
-		"endpoint":   "/api/v1/voices/clone",
-		"ip":         c.IP(),
+		"endpoint":   endpoint,
+		"ip":         ip,
 		"user_id":    userID.String(),
 		"name":       name,
-		"file_size":  file.Size,
-		"request_id": middleware.RequestIDFromCtx(c),
+		"file_size":  fileSize,
+		"request_id": requestID,
 	}))
 
 	// Send to sidecar to extract voice embedding
 	cloneStart := time.Now()
-	embedding, audioDurationMs, err := h.sidecar.CloneVoice(c.UserContext(), audioBytes, file.Filename)
-	cloneDuration := time.Since(cloneStart)
+	embedding, audioDurationMs, err := h.sidecar.CloneVoice(ctx, audioBytes, "audio")
+	cloneMs := int(time.Since(cloneStart).Milliseconds())
 	if err != nil {
 		errMsg := err.Error()
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_FAILED", "VoiceCloneFailed", slog.LevelError, map[string]interface{}{
-			"endpoint":      "/api/v1/voices/clone",
-			"ip":            c.IP(),
+			"endpoint":      endpoint,
+			"ip":            ip,
 			"user_id":       userID.String(),
 			"name":          name,
-			"file_size":     file.Size,
-			"clone_time_ms": int(cloneDuration.Milliseconds()),
-			"request_id":    middleware.RequestIDFromCtx(c),
+			"file_size":     fileSize,
+			"clone_time_ms": cloneMs,
+			"request_id":    requestID,
 		}, err))
 		// If the sidecar returned a specific error (e.g. audio too long/short),
 		// forward the actual message to the client
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "CLONE_FAILED",
-				"message": errMsg,
-				"status":  422,
-			},
-		})
+		return nil, 0, cloneMs, &voiceOpError{fiber.StatusUnprocessableEntity, "CLONE_FAILED", errMsg}
 	}
 
 	// Create voice record
@@ -161,42 +190,30 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	absPath := filepath.Join(h.voicesDir, relPath)
 
 	// Ensure user directory exists
-	userDir := filepath.Join(h.voicesDir, userID.String())
-	if err := os.MkdirAll(userDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DIR_ERROR", "VoiceCloneDirError", slog.LevelError, map[string]interface{}{
-			"endpoint":   "/api/v1/voices/clone",
-			"ip":         c.IP(),
+			"endpoint":   endpoint,
+			"ip":         ip,
 			"user_id":    userID.String(),
 			"name":       name,
-			"path":       userDir,
-			"request_id": middleware.RequestIDFromCtx(c),
+			"path":       filepath.Dir(absPath),
+			"request_id": requestID,
 		}, err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "STORAGE_ERROR",
-				"message": "Failed to create voice storage",
-				"status":  500,
-			},
-		})
+		return nil, 0, cloneMs, &voiceOpError{fiber.StatusInternalServerError, "STORAGE_ERROR", "Failed to create voice storage"}
 	}
 
-	// Write embedding to disk
+	// Write embedding to disk (per-node cache; the DB blob below is the
+	// source of truth for multi-node sharing)
 	if err := os.WriteFile(absPath, embedding, 0644); err != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_WRITE_ERROR", "VoiceCloneWriteError", slog.LevelError, map[string]interface{}{
-			"endpoint":   "/api/v1/voices/clone",
-			"ip":         c.IP(),
+			"endpoint":   endpoint,
+			"ip":         ip,
 			"user_id":    userID.String(),
 			"name":       name,
 			"path":       absPath,
-			"request_id": middleware.RequestIDFromCtx(c),
+			"request_id": requestID,
 		}, err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "STORAGE_ERROR",
-				"message": "Failed to store voice embedding",
-				"status":  500,
-			},
-		})
+		return nil, 0, cloneMs, &voiceOpError{fiber.StatusInternalServerError, "STORAGE_ERROR", "Failed to store voice embedding"}
 	}
 
 	audioDurationSec := float64(audioDurationMs) / 1000.0
@@ -216,51 +233,34 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 		// Clean up the file if DB insert fails
 		_ = os.Remove(absPath)
 		h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_DB_ERROR", "VoiceCloneDBError", slog.LevelError, map[string]interface{}{
-			"endpoint":   "/api/v1/voices/clone",
-			"ip":         c.IP(),
+			"endpoint":   endpoint,
+			"ip":         ip,
 			"user_id":    userID.String(),
 			"name":       name,
 			"voice_id":   voiceID.String(),
-			"request_id": middleware.RequestIDFromCtx(c),
+			"request_id": requestID,
 		}, result.Error))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "DB_ERROR",
-				"message": "Failed to save voice record",
-				"status":  500,
-			},
-		})
+		return nil, 0, cloneMs, &voiceOpError{fiber.StatusInternalServerError, "DB_ERROR", "Failed to save voice record"}
 	}
 
-	slog.InfoContext(c.UserContext(), "voice cloned successfully",
+	slog.Info("voice cloned successfully",
 		"voice_id", voiceID, "user_id", userID, "name", name,
-		"embedding_size", len(embedding), "clone_time_ms", cloneDuration.Milliseconds(),
+		"embedding_size", len(embedding), "clone_time_ms", cloneMs,
 		"audio_duration_ms", audioDurationMs)
 
 	h.lm.SendLog(h.lm.BuildLog("VOICE_CLONE_COMPLETED", "VoiceCloneCompleted", slog.LevelInfo, map[string]interface{}{
-		"endpoint":          "/api/v1/voices/clone",
-		"ip":                c.IP(),
+		"endpoint":          endpoint,
+		"ip":                ip,
 		"user_id":           userID.String(),
 		"voice_id":          voiceID.String(),
 		"name":              name,
 		"embedding_bytes":   len(embedding),
-		"clone_time_ms":     int(cloneDuration.Milliseconds()),
+		"clone_time_ms":     cloneMs,
 		"audio_duration_ms": audioDurationMs,
-		"request_id":        middleware.RequestIDFromCtx(c),
+		"request_id":        requestID,
 	}))
 
-	// Set audio_duration_ms for the usage middleware (actual audio duration)
-	c.Locals("audio_duration_ms", audioDurationMs)
-
-	c.Locals("usage_meta", map[string]interface{}{
-		"voice_name":        name,
-		"embedding_size":    len(embedding),
-		"audio_size":        file.Size,
-		"clone_time_ms":     int(cloneDuration.Milliseconds()),
-		"audio_duration_ms": audioDurationMs,
-	})
-
-	return c.Status(fiber.StatusCreated).JSON(voice.ToResponse())
+	return &voice, audioDurationMs, cloneMs, nil
 }
 
 // List returns the user's custom voices and system/built-in voices.
@@ -299,7 +299,6 @@ func (h *VoiceHandler) List(c *fiber.Ctx) error {
 	for _, v := range voices {
 		customVoices = append(customVoices, v.ToResponse())
 	}
-
 	// Fetch system voices from sidecar
 	systemVoices := make([]models.VoiceResponse, 0)
 	sidecarVoices, err := h.sidecar.ListVoices()
@@ -399,15 +398,38 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 		})
 	}
 
-	var voice models.Voice
-	if result := h.db.Where("id = ? AND user_id = ?", voiceID, userID).First(&voice); result.Error != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+	_, opErr := h.deleteVoiceCore(userID, voiceID, "/api/v1/voices/:id", c.IP(), middleware.RequestIDFromCtx(c))
+	if opErr != nil {
+		return c.Status(opErr.httpStatus).JSON(fiber.Map{
 			"error": fiber.Map{
-				"code":    "NOT_FOUND",
-				"message": "Voice not found",
-				"status":  404,
+				"code":    opErr.code,
+				"message": opErr.msg,
+				"status":  opErr.httpStatus,
 			},
 		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "Voice deleted",
+	})
+}
+
+// deleteVoiceCore is the dialect-independent delete shared by the native
+// DELETE /api/v1/voices/:id and the ElevenLabs-compatible
+// DELETE /v1/voices/:voice_id: removes the local embedding file (other
+// nodes drop theirs via their own caches) and soft-deletes the DB row
+// (which also drops the shared embedding blob).
+func (h *VoiceHandler) deleteVoiceCore(userID, voiceID uuid.UUID, endpoint, ip, requestID string) (*models.Voice, *voiceOpError) {
+	var voice models.Voice
+	if result := h.db.Where("id = ? AND user_id = ?", voiceID, userID).First(&voice); result.Error != nil {
+		h.lm.SendLog(h.lm.BuildLog("VOICE_NOT_FOUND", "VoiceNotFound", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   endpoint,
+			"ip":         ip,
+			"user_id":    userID.String(),
+			"voice_id":   voiceID.String(),
+			"request_id": requestID,
+		}))
+		return nil, &voiceOpError{fiber.StatusNotFound, "NOT_FOUND", "Voice not found"}
 	}
 
 	// Remove the embedding file
@@ -419,35 +441,37 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 	// Soft-delete the record
 	if result := h.db.Delete(&voice); result.Error != nil {
 		h.lm.SendLog(h.lm.BuildLog("VOICE_DELETE_DB_ERROR", "VoiceDeleteDBError", slog.LevelError, map[string]interface{}{
-			"endpoint":   "/api/v1/voices/:id",
-			"ip":         c.IP(),
+			"endpoint":   endpoint,
+			"ip":         ip,
 			"user_id":    userID.String(),
 			"voice_id":   voiceID.String(),
-			"request_id": middleware.RequestIDFromCtx(c),
+			"request_id": requestID,
 		}, result.Error))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fiber.Map{
-				"code":    "DB_ERROR",
-				"message": "Failed to delete voice",
-				"status":  500,
-			},
-		})
+		return nil, &voiceOpError{fiber.StatusInternalServerError, "DB_ERROR", "Failed to delete voice"}
 	}
 
-	slog.InfoContext(c.UserContext(), "voice deleted", "voice_id", voiceID, "user_id", userID, "name", voice.Name)
+	slog.Info("voice deleted", "voice_id", voiceID, "user_id", userID, "name", voice.Name)
 
 	h.lm.SendLog(h.lm.BuildLog("VOICE_DELETED", "VoiceDeleted", slog.LevelInfo, map[string]interface{}{
-		"endpoint":   "/api/v1/voices/:id",
-		"ip":         c.IP(),
+		"endpoint":   endpoint,
+		"ip":         ip,
 		"user_id":    userID.String(),
 		"voice_id":   voiceID.String(),
 		"name":       voice.Name,
-		"request_id": middleware.RequestIDFromCtx(c),
+		"request_id": requestID,
 	}))
 
-	return c.JSON(fiber.Map{
-		"message": "Voice deleted",
-	})
+	return &voice, nil
+}
+
+// listCustomVoices returns the user's cloned voices, newest first.
+// Best-effort for compat-layer list endpoints: returns nil on DB error.
+func (h *VoiceHandler) listCustomVoices(userID uuid.UUID) []models.Voice {
+	var voices []models.Voice
+	if result := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&voices); result.Error != nil {
+		return nil
+	}
+	return voices
 }
 
 // LoadVoiceData reads the stored embedding for a voice and returns base64.
@@ -486,13 +510,16 @@ func (h *VoiceHandler) LoadVoiceData(voiceID, userID uuid.UUID) (string, error) 
 }
 
 // SyncVoiceStorage reconciles DB blobs and per-node disk files at startup.
-// Safe to run on every node boot — both directions are idempotent:
+// Safe to run on every node boot — all three directions are idempotent:
 //
 //   - Backfill (disk → DB): rows with an empty embedding_data blob but an
 //     existing local file get the blob stored. Covers voices cloned before
 //     the blob column existed and pre-existing files on this node.
 //   - Forward-fill (DB → disk): rows with a blob but no local file get the
 //     file materialized. Covers voices cloned on other nodes.
+//   - Orphan sweep: local files whose voice row is gone (deleted on any
+//     node — the soft-deleted row no longer matches active queries) are
+//     removed. This is how deletions propagate to other nodes' caches.
 func (h *VoiceHandler) SyncVoiceStorage() {
 	var voices []models.Voice
 	if result := h.db.Find(&voices); result.Error != nil {
@@ -534,16 +561,64 @@ func (h *VoiceHandler) SyncVoiceStorage() {
 		}
 	}
 
-	if backfilled > 0 || forwardFilled > 0 || failed > 0 {
+	orphansRemoved := h.sweepOrphanedVoiceFiles()
+
+	if backfilled > 0 || forwardFilled > 0 || orphansRemoved > 0 || failed > 0 {
 		slog.Info("voice storage sync completed",
 			"total_voices", len(voices), "backfilled", backfilled,
-			"forward_filled", forwardFilled, "failed", failed)
+			"forward_filled", forwardFilled, "orphans_removed", orphansRemoved,
+			"failed", failed)
 	}
 	h.lm.SendLog(h.lm.BuildLog("VOICE_STORAGE_SYNCED", "VoiceStorageSynced", slog.LevelInfo, map[string]interface{}{
-		"endpoint":       "startup",
-		"total_voices":   len(voices),
-		"backfilled":     backfilled,
-		"forward_filled": forwardFilled,
-		"failed":         failed,
+		"endpoint":        "startup",
+		"total_voices":    len(voices),
+		"backfilled":      backfilled,
+		"forward_filled":  forwardFilled,
+		"orphans_removed": orphansRemoved,
+		"failed":          failed,
 	}))
+}
+
+// sweepOrphanedVoiceFiles removes embedding files under voicesDir whose
+// voice row no longer exists (or was soft-deleted on any node). Filenames
+// are {user_id}/{voice_id}.bin; anything unparseable is left alone.
+func (h *VoiceHandler) sweepOrphanedVoiceFiles() int {
+	userDirs, err := os.ReadDir(h.voicesDir)
+	if err != nil {
+		return 0 // no voices dir yet — nothing to sweep
+	}
+
+	removed := 0
+	for _, userDir := range userDirs {
+		if !userDir.IsDir() {
+			continue
+		}
+		dir := filepath.Join(h.voicesDir, userDir.Name())
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || filepath.Ext(f.Name()) != ".bin" {
+				continue
+			}
+			voiceID, err := uuid.Parse(strings.TrimSuffix(f.Name(), ".bin"))
+			if err != nil {
+				continue // not a voice embedding file — leave it
+			}
+			var count int64
+			h.db.Model(&models.Voice{}).Where("id = ?", voiceID).Count(&count)
+			if count > 0 {
+				continue
+			}
+			path := filepath.Join(dir, f.Name())
+			if err := os.Remove(path); err != nil {
+				slog.Warn("voice storage sync: orphan removal failed", "path", path, "error", err)
+				continue
+			}
+			slog.Info("voice storage sync: removed orphaned voice file (deleted on another node)", "path", path)
+			removed++
+		}
+	}
+	return removed
 }

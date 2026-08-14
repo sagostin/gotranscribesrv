@@ -470,7 +470,8 @@ type VoiceInfo struct {
 	ID          string `json:"id"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
-	Type        string `json:"type,omitempty"` // "system" or "custom"
+	Type        string `json:"type,omitempty"`    // "system" or "custom"
+	Backend     string `json:"backend,omitempty"` // "pocket" or "kokoro"
 }
 
 // VoicesResponse is the JSON list of available TTS voices.

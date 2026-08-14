@@ -24,12 +24,16 @@ becomes a write-through cache.
       - **Forward-fill** DB → disk: rows with a blob but no local file get
         the file materialized (covers voices cloned on other nodes).
 - [x] `DELETE /api/v1/voices/:id`: removes local file + DB row (blob goes
-      with the row).
+      with the row). Deletion propagates to other nodes for synthesis
+      immediately (DB row is checked before the disk cache); each node's
+      stale cache files are removed by the **orphan sweep** in
+      `SyncVoiceStorage` at boot.
 - [ ] **Live verification pending:** multi-node clone→synthesize flow needs a
       running postgres (local docker daemon was off during implementation).
       Verify on mm2/staging: clone on node A → `POST /api/v1/tts` with that
-      `voice_id` via node B → 200 audio; check Loki for
-      `VOICE_STORAGE_SYNCED` backfill/forward-fill counts on node boot.
+      `voice_id` via node B → 200 audio; delete a voice on node A → node B's
+      cached file is swept on its next boot; check Loki for
+      `VOICE_STORAGE_SYNCED` backfill/forward-fill/orphan counts.
 
 **Done when:** clone on node A → synthesize via node B works without manual
 file copies; restarting any node with pre-existing local files backfills the

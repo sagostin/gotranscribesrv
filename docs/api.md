@@ -946,6 +946,44 @@ X-TTS-Model: <model from request>                # echoed
 
 > The `/api/v1/tts` endpoint above is unchanged in behavior — this is purely additive. Use `/v1/audio/speech` for OpenAI client compatibility; it defaults to Kokoro (Go `TTS_DEFAULT_BACKEND=kokoro`).
 
+### Voice resolution (all TTS endpoints)
+
+The sidecar's `VoiceResolver` normalizes every synthesis request before it reaches an engine:
+
+- `voice` omitted, empty, or `"default"` → the backend's real default (`alba` for PocketTTS, `af_heart` for Kokoro EN). Never triggers a HuggingFace download.
+- A voice name that belongs to the *other* backend (e.g. `af_heart` with `?backend=pocket`): **auto-rerouted** when the backend came from the server default; **422** when `?backend=` was explicitly sent.
+- Unknown voices → **422** listing the valid voices per backend (surfaced by the Go gateway as-is — no longer masked as a 502).
+- Responses carry `X-TTS-Backend` and `X-TTS-Voice` showing what actually ran.
+
+### ElevenLabs-Compatible API
+
+Drop-in ElevenLabs compatibility: point an ElevenLabs SDK at this gateway's base URL and use an API key as `xi-api-key` (the auth middleware accepts it alongside `X-API-Key` / Bearer / Token / Basic).
+
+```
+POST /v1/text-to-speech/{voice_id}          # batch
+POST /v1/text-to-speech/{voice_id}/stream   # streaming
+GET  /v1/voices                             # legacy list shape (SDK voices.getAll)
+GET  /v2/voices                             # search shape (SDK voices.search) — search + page_size + next_page_token
+GET  /v1/voices/{voice_id}                  # single voice
+POST /v1/voices/add                         # voice cloning (multipart: name, description, files[])
+DELETE /v1/voices/{voice_id}                # delete a cloned voice
+GET  /v1/models                             # shared with OpenAI — ElevenLabs shape returned when xi-api-key is present
+```
+
+**`voice_id` path param accepts:** PocketTTS names (`jane`, `alba`, …), Kokoro IDs (`af_heart`, `zf_001`, …), `"default"`, or the **UUID of a cloned voice** (from `/v1/voices/add` or `/api/v1/voices/clone` — the stored embedding is loaded from the multi-node blob store, PocketTTS backend).
+
+**`model_id`:** `kokoro` / `kokoro_82m` → Kokoro; `pocket` / `pocket_tts` / `pocket-tts-1` → PocketTTS; anything else (incl. `eleven_multilingual_v2`) → server default backend.
+
+**`output_format`:** full ElevenLabs `codec_samplerate[_bitrate]` matrix — `mp3_*_*`, `opus_48000_*`, `pcm_*`, `wav_*`, `ulaw_8000`, `alaw_8000` (Twilio). `wav_24000`/`pcm_24000` are served from sidecar bytes with no encode pass; other rates/codecs are resampled/transcoded via ffmpeg at the requested rate/bitrate (501 when ffmpeg is absent). Default: `mp3_44100_128`.
+
+**`voice_settings`:** `speed` is honored; `stability` / `similarity_boost` / `style` / `use_speaker_boost` are accepted but ignored (no equivalent controls in PocketTTS/Kokoro). `previous_text` / `next_text` / request stitching / pronunciation dictionaries are not supported.
+
+**Streaming:** `/stream` with `output_format=pcm_24000` is true chunked streaming from PocketTTS (~80 ms frames). Other formats fall back to batch synthesize + transcode, returned as a single body — SDK-compatible, just without early chunks.
+
+**Errors** use the ElevenLabs shape: `{"detail": {"status": "...", "message": "..."}}`, with sidecar 4xx rejections (unknown voice, etc.) forwarded at their real status.
+
+**Cloned voices** created here are stored in the shared DB blob store (`embedding_data`) with per-node disk write-through caching — clone on node A, synthesize via node B; deletions propagate (other nodes' cached files are swept at boot). See TODO.md Phase 2.
+
 ### POST `/synthesize/stream` (sidecar, chunked audio)
 
 Server-Sent chunked L16 audio, 80 ms frames @ 24 kHz mono, streamed from PocketTTS. The only sidecar endpoint with low-latency first-chunk delivery. **Kokoro not supported** — `?backend=kokoro` returns 501.
