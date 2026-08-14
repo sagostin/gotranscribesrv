@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	audioenc "github.com/shaunagostinho/gotranscribesrv/internal/audio"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
+	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -67,6 +69,12 @@ type OpenAITTSBody struct {
 func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 	var body OpenAITTSBody
 	if err := c.BodyParser(&body); err != nil {
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_VALIDATION_FAILED", "OpenAITTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/v1/audio/speech",
+			"reason":     "invalid_json",
+			"ip":         c.IP(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "INVALID_INPUT",
@@ -77,6 +85,12 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 	}
 
 	if strings.TrimSpace(body.Input) == "" {
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_VALIDATION_FAILED", "OpenAITTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/v1/audio/speech",
+			"reason":     "missing_input",
+			"ip":         c.IP(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "MISSING_INPUT",
@@ -86,6 +100,13 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		})
 	}
 	if len(body.Input) > 5000 {
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_VALIDATION_FAILED", "OpenAITTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":     "/v1/audio/speech",
+			"reason":       "input_too_long",
+			"input_length": len(body.Input),
+			"ip":           c.IP(),
+			"request_id":   middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "INPUT_TOO_LONG",
@@ -130,6 +151,13 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		stripWavHdr = true
 	case "mp3", "opus", "flac", "aac":
 		if !audioenc.Available() {
+			h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_VALIDATION_FAILED", "OpenAITTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+				"endpoint":        "/v1/audio/speech",
+				"reason":          "unsupported_format_no_ffmpeg",
+				"response_format": format,
+				"ip":              c.IP(),
+				"request_id":      middleware.RequestIDFromCtx(c),
+			}))
 			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
 				"error": fiber.Map{
 					"code":    "UNSUPPORTED_FORMAT",
@@ -141,6 +169,13 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		outCT = audioenc.ContentType(format)
 		transcode = true
 	default:
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_VALIDATION_FAILED", "OpenAITTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":        "/v1/audio/speech",
+			"reason":          "invalid_format",
+			"response_format": format,
+			"ip":              c.IP(),
+			"request_id":      middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "INVALID_FORMAT",
@@ -184,16 +219,34 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 	audio, _, backendUsed, err := h.sidecar.SynthesizeWithBackend(c.UserContext(), req, backend)
 	synthDuration := time.Since(synthStart)
 	if err != nil {
+		var scErr *sidecar.SidecarError
+		isClientError := errors.As(err, &scErr) && scErr.StatusCode >= 400 && scErr.StatusCode < 500
+		sidecarStatus := 0
+		if errors.As(err, &scErr) {
+			sidecarStatus = scErr.StatusCode
+		}
 		h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_FAILED", "OpenAITTSFailed", slog.LevelError, map[string]interface{}{
-			"endpoint":      "/v1/audio/speech",
-			"ip":            c.IP(),
-			"model":         body.Model,
-			"backend":       backend,
-			"voice":         pocketVoice,
-			"input_length":  len(body.Input),
-			"synth_time_ms": int(synthDuration.Milliseconds()),
-			"request_id":    middleware.RequestIDFromCtx(c),
+			"endpoint":       "/v1/audio/speech",
+			"ip":             c.IP(),
+			"model":          body.Model,
+			"backend":        backend,
+			"voice":          pocketVoice,
+			"input_length":   len(body.Input),
+			"synth_time_ms":  int(synthDuration.Milliseconds()),
+			"sidecar_status": sidecarStatus,
+			"request_id":     middleware.RequestIDFromCtx(c),
 		}, err))
+		if isClientError {
+			// Sidecar rejected the request (e.g. unknown voice for the chosen
+			// backend) — forward the real status and reason.
+			return c.Status(scErr.StatusCode).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "TTS_REJECTED",
+					"message": scErr.Reason,
+					"status":  scErr.StatusCode,
+				},
+			})
+		}
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
@@ -244,6 +297,9 @@ func (h *OpenAITTSHandler) Speech(c *fiber.Ctx) error {
 		}
 		audio = encoded
 	}
+
+	// Record TTS metrics — parity with /api/v1/tts.
+	metrics.RecordTTSUsage(pocketVoice, int(synthDuration.Milliseconds()))
 
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_TTS_COMPLETED", "OpenAITTSCompleted", slog.LevelInfo, map[string]interface{}{
 		"endpoint":           "/v1/audio/speech",

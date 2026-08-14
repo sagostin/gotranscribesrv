@@ -55,17 +55,25 @@ func (lm *LogManager) LoadTemplates() {
 		"WSASRConnectFailed":  "WebSocket ASR sidecar connect failed: %v",
 
 		// ── TTS ─────────────────────────────────────────────────
-		"TTSRequestReceived": "TTS request received",
-		"TTSCompleted":       "TTS synthesis completed",
-		"TTSFailed":          "TTS synthesis failed: %v",
-		"TTSVoiceLoadFailed": "TTS failed to load stored voice: %v",
-		"TTSSidecarError":    "TTS sidecar returned non-200: %v",
+		"TTSRequestReceived":  "TTS request received",
+		"TTSCompleted":        "TTS synthesis completed",
+		"TTSFailed":           "TTS synthesis failed: %v",
+		"TTSValidationFailed": "TTS request validation failed",
+		"TTSVoiceLoadFailed":  "TTS failed to load stored voice: %v",
+		"TTSSidecarError":     "TTS sidecar returned non-200: %v",
 
 		// ── OpenAI-compatible TTS ───────────────────────────────
-		"OpenAITTSRequest":         "OpenAI-compat TTS request received",
-		"OpenAITTSCompleted":       "OpenAI-compat TTS synthesis completed",
-		"OpenAITTSFailed":          "OpenAI-compat TTS synthesis failed: %v",
-		"OpenAITTSTranscodeFailed": "OpenAI-compat TTS audio transcode failed: %v",
+		"OpenAITTSRequest":          "OpenAI-compat TTS request received",
+		"OpenAITTSCompleted":        "OpenAI-compat TTS synthesis completed",
+		"OpenAITTSFailed":           "OpenAI-compat TTS synthesis failed: %v",
+		"OpenAITTSValidationFailed": "OpenAI-compat TTS request validation failed",
+		"OpenAITTSTranscodeFailed":  "OpenAI-compat TTS audio transcode failed: %v",
+
+		// ── Realtime speech-to-speech TTS ───────────────────────
+		// Failures only; per-turn TTS telemetry rides on the
+		// OpenAIRealtimeS2STurnCompleted event (per-sentence info
+		// logs would be too chatty for Loki on long responses).
+		"RTS2STTSStreamFailed": "Realtime S2S TTS stream failed: %v",
 
 		// ── LLM gateway (OpenAI + Anthropic dialects) ───────────
 		// Content (prompts/completions) is NEVER logged — metadata
@@ -111,8 +119,12 @@ func (lm *LogManager) LoadTemplates() {
 		// Reached via the VOICE_CLONE_FAILED template already; the
 		// following cover the storage / DB error paths that fire
 		// AFTER a successful sidecar clone.
-		"VoiceListDBError":   "Voice list DB query failed: %v",
-		"VoiceDeleteDBError": "Voice delete DB error: %v",
+		"VoiceListDBError":       "Voice list DB query failed: %v",
+		"VoiceListSidecarFailed": "Voice list: sidecar system voices unavailable: %v",
+		"VoiceDeleteDBError":     "Voice delete DB error: %v",
+		"VoiceDeleted":           "Voice deleted",
+		"VoiceNotFound":          "Voice not found",
+		"VoiceStorageSynced":     "Voice storage sync completed (multi-node disk↔DB reconcile)",
 
 		// ── Sidecar client (transport-level) ────────────────────
 		"SidecarCallStarted": "Sidecar call started",

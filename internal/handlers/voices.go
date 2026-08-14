@@ -202,13 +202,14 @@ func (h *VoiceHandler) Clone(c *fiber.Ctx) error {
 	audioDurationSec := float64(audioDurationMs) / 1000.0
 
 	voice := models.Voice{
-		ID:          voiceID,
-		UserID:      userID,
-		Name:        name,
-		Description: description,
-		FilePath:    relPath,
-		SizeBytes:   int64(len(embedding)),
-		DurationSec: audioDurationSec,
+		ID:            voiceID,
+		UserID:        userID,
+		Name:          name,
+		Description:   description,
+		FilePath:      relPath,
+		EmbeddingData: embedding, // DB is source of truth; disk file is a cache
+		SizeBytes:     int64(len(embedding)),
+		DurationSec:   audioDurationSec,
 	}
 
 	if result := h.db.Create(&voice); result.Error != nil {
@@ -304,6 +305,12 @@ func (h *VoiceHandler) List(c *fiber.Ctx) error {
 	sidecarVoices, err := h.sidecar.ListVoices()
 	if err != nil {
 		slog.Warn("failed to fetch system voices from sidecar", "error", err)
+		h.lm.SendLog(h.lm.BuildLog("VOICE_LIST_SIDECAR_FAILED", "VoiceListSidecarFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/voices",
+			"ip":         c.IP(),
+			"user_id":    userID.String(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}, err))
 		// Non-fatal — still return custom voices
 	} else {
 		for _, sv := range sidecarVoices.Voices {
@@ -348,6 +355,13 @@ func (h *VoiceHandler) Get(c *fiber.Ctx) error {
 
 	var voice models.Voice
 	if result := h.db.Where("id = ? AND user_id = ?", voiceID, userID).First(&voice); result.Error != nil {
+		h.lm.SendLog(h.lm.BuildLog("VOICE_NOT_FOUND", "VoiceNotFound", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/voices/:id",
+			"ip":         c.IP(),
+			"user_id":    userID.String(),
+			"voice_id":   voiceID.String(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "NOT_FOUND",
@@ -422,6 +436,15 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 
 	slog.InfoContext(c.UserContext(), "voice deleted", "voice_id", voiceID, "user_id", userID, "name", voice.Name)
 
+	h.lm.SendLog(h.lm.BuildLog("VOICE_DELETED", "VoiceDeleted", slog.LevelInfo, map[string]interface{}{
+		"endpoint":   "/api/v1/voices/:id",
+		"ip":         c.IP(),
+		"user_id":    userID.String(),
+		"voice_id":   voiceID.String(),
+		"name":       voice.Name,
+		"request_id": middleware.RequestIDFromCtx(c),
+	}))
+
 	return c.JSON(fiber.Map{
 		"message": "Voice deleted",
 	})
@@ -429,6 +452,10 @@ func (h *VoiceHandler) Delete(c *fiber.Ctx) error {
 
 // LoadVoiceData reads the stored embedding for a voice and returns base64.
 // Used by TTSHandler when synthesizing with a stored voice_id.
+//
+// Multi-node: the local disk file is a per-node cache; the DB blob is the
+// source of truth. On a local miss (voice was cloned on another node) the
+// blob is fetched from the DB and written through to disk for next time.
 func (h *VoiceHandler) LoadVoiceData(voiceID, userID uuid.UUID) (string, error) {
 	var voice models.Voice
 	if result := h.db.Where("id = ? AND user_id = ?", voiceID, userID).First(&voice); result.Error != nil {
@@ -436,10 +463,87 @@ func (h *VoiceHandler) LoadVoiceData(voiceID, userID uuid.UUID) (string, error) 
 	}
 
 	absPath := filepath.Join(h.voicesDir, voice.FilePath)
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", fmt.Errorf("read embedding file: %w", err)
+
+	// Fast path — local cache hit.
+	if data, err := os.ReadFile(absPath); err == nil {
+		return base64.StdEncoding.EncodeToString(data), nil
 	}
 
-	return base64.StdEncoding.EncodeToString(data), nil
+	// Local miss — fall back to the DB blob (cloned on another node, or the
+	// local cache was cleared).
+	if len(voice.EmbeddingData) == 0 {
+		return "", fmt.Errorf("voice not found")
+	}
+
+	// Write-through so subsequent reads hit disk.
+	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err == nil {
+		if err := os.WriteFile(absPath, voice.EmbeddingData, 0644); err != nil {
+			slog.Warn("failed to write through voice embedding cache", "path", absPath, "error", err)
+		}
+	}
+
+	return base64.StdEncoding.EncodeToString(voice.EmbeddingData), nil
+}
+
+// SyncVoiceStorage reconciles DB blobs and per-node disk files at startup.
+// Safe to run on every node boot — both directions are idempotent:
+//
+//   - Backfill (disk → DB): rows with an empty embedding_data blob but an
+//     existing local file get the blob stored. Covers voices cloned before
+//     the blob column existed and pre-existing files on this node.
+//   - Forward-fill (DB → disk): rows with a blob but no local file get the
+//     file materialized. Covers voices cloned on other nodes.
+func (h *VoiceHandler) SyncVoiceStorage() {
+	var voices []models.Voice
+	if result := h.db.Find(&voices); result.Error != nil {
+		slog.Error("voice storage sync: failed to list voices", "error", result.Error)
+		return
+	}
+
+	var backfilled, forwardFilled, failed int
+	for _, voice := range voices {
+		absPath := filepath.Join(h.voicesDir, voice.FilePath)
+		_, diskErr := os.ReadFile(absPath)
+		diskOK := diskErr == nil
+
+		switch {
+		case len(voice.EmbeddingData) == 0 && diskOK:
+			// Backfill: disk file exists but DB blob missing.
+			data, _ := os.ReadFile(absPath)
+			if err := h.db.Model(&models.Voice{}).Where("id = ?", voice.ID).
+				Update("embedding_data", data).Error; err != nil {
+				slog.Warn("voice storage sync: backfill failed", "voice_id", voice.ID, "error", err)
+				failed++
+				continue
+			}
+			backfilled++
+
+		case len(voice.EmbeddingData) > 0 && !diskOK:
+			// Forward-fill: DB blob exists but this node lacks the file.
+			if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
+				slog.Warn("voice storage sync: forward-fill mkdir failed", "voice_id", voice.ID, "error", err)
+				failed++
+				continue
+			}
+			if err := os.WriteFile(absPath, voice.EmbeddingData, 0644); err != nil {
+				slog.Warn("voice storage sync: forward-fill write failed", "voice_id", voice.ID, "error", err)
+				failed++
+				continue
+			}
+			forwardFilled++
+		}
+	}
+
+	if backfilled > 0 || forwardFilled > 0 || failed > 0 {
+		slog.Info("voice storage sync completed",
+			"total_voices", len(voices), "backfilled", backfilled,
+			"forward_filled", forwardFilled, "failed", failed)
+	}
+	h.lm.SendLog(h.lm.BuildLog("VOICE_STORAGE_SYNCED", "VoiceStorageSynced", slog.LevelInfo, map[string]interface{}{
+		"endpoint":       "startup",
+		"total_voices":   len(voices),
+		"backfilled":     backfilled,
+		"forward_filled": forwardFilled,
+		"failed":         failed,
+	}))
 }

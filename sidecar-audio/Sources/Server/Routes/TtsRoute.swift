@@ -34,7 +34,8 @@ func ttsRoutes(_ app: Application, engines: EngineManager) {
 private func handleSynthesize(req: Request, engines: EngineManager) async throws -> Response {
     let body = try req.content.decode(SynthesizeRequest.self)
     let defaultBack = await engines.getTtsDefaultBackend()
-    let backend = (req.query[String.self, at: "backend"] ?? defaultBack).lowercased()
+    let explicitBackend = req.query[String.self, at: "backend"]
+    let backend = (explicitBackend ?? defaultBack).lowercased()
 
     // Validate backend
     guard backend == "pocket" || backend == "kokoro" else {
@@ -53,44 +54,70 @@ private func handleSynthesize(req: Request, engines: EngineManager) async throws
         )
     }
 
+    // Resolve the voice against the per-backend catalogs. Maps nil/""/"default"
+    // to the backend's built-in default (prevents a bogus HuggingFace fetch of
+    // "default.safetensors"), auto-reroutes voices that belong to the other
+    // backend when ?backend= wasn't explicit, and 422s unknown voices.
+    let resolved = try VoiceResolver.resolve(
+        voice: body.voice,
+        backend: backend,
+        backendExplicit: explicitBackend != nil,
+        kokoroLoaded: await engines.hasKokoro(),
+        logger: req.logger
+    )
+
     let audioData: Data
 
-    switch backend {
-    case "kokoro":
-        // Kokoro has no voice-cloning pipeline — text + voice ID only.
-        audioData = try await engines.synthesizeKokoro(text: body.text, voice: body.voice)
-    default: // "pocket"
-        if let voiceData = body.voice_data, !voiceData.isEmpty {
-            // Pre-extracted voice embedding — fastest path (stored voices)
-            guard let embeddingBytes = Data(base64Encoded: voiceData) else {
-                throw Abort(.badRequest, reason: "Invalid base64 voice_data")
+    do {
+        switch resolved.backend {
+        case "kokoro":
+            // Kokoro has no voice-cloning pipeline — text + voice ID only.
+            audioData = try await engines.synthesizeKokoro(text: body.text, voice: resolved.voice)
+        default: // "pocket"
+            if let voiceData = body.voice_data, !voiceData.isEmpty {
+                // Pre-extracted voice embedding — fastest path (stored voices)
+                guard let embeddingBytes = Data(base64Encoded: voiceData) else {
+                    throw Abort(.badRequest, reason: "Invalid base64 voice_data")
+                }
+                audioData = try await engines.synthesizeWithEmbedding(text: body.text, voiceData: embeddingBytes)
+            } else if let voiceRef = body.voice_ref, !voiceRef.isEmpty {
+                // Raw audio reference — one-shot voice cloning
+                guard let refBytes = Data(base64Encoded: voiceRef) else {
+                    throw Abort(.badRequest, reason: "Invalid base64 voice reference")
+                }
+
+                let refURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("voice-ref-\(UUID().uuidString).wav")
+                defer { try? FileManager.default.removeItem(at: refURL) }
+
+                let refSamples = try await SidecarAudioConverter.toPCM16kMono(refBytes)
+                try writeWav(samples: refSamples, sampleRate: 16000, to: refURL)
+
+                // Voice cloning + synthesis (runs inside actor)
+                audioData = try await engines.synthesizeWithClone(text: body.text, voiceURL: refURL)
+            } else {
+                // Named system voice (runs inside actor)
+                audioData = try await engines.synthesize(text: body.text, voice: resolved.voice)
             }
-            audioData = try await engines.synthesizeWithEmbedding(text: body.text, voiceData: embeddingBytes)
-        } else if let voiceRef = body.voice_ref, !voiceRef.isEmpty {
-            // Raw audio reference — one-shot voice cloning
-            guard let refBytes = Data(base64Encoded: voiceRef) else {
-                throw Abort(.badRequest, reason: "Invalid base64 voice reference")
-            }
-
-            let refURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voice-ref-\(UUID().uuidString).wav")
-            defer { try? FileManager.default.removeItem(at: refURL) }
-
-            let refSamples = try await SidecarAudioConverter.toPCM16kMono(refBytes)
-            try writeWav(samples: refSamples, sampleRate: 16000, to: refURL)
-
-            // Voice cloning + synthesis (runs inside actor)
-            audioData = try await engines.synthesizeWithClone(text: body.text, voiceURL: refURL)
-        } else {
-            // Named system voice (runs inside actor)
-            audioData = try await engines.synthesize(text: body.text, voice: body.voice)
         }
+    } catch let abort as AbortError {
+        throw abort
+    } catch let error as AssetDownloader.Error {
+        // e.g. a voice safetensors 404 — treat as a client-fixable voice
+        // problem rather than a generic 500 so the gateway doesn't mask it
+        // as "TTS service unavailable".
+        throw Abort(.unprocessableEntity, reason: "voice asset unavailable: \(error.localizedDescription)")
+    } catch let error as PocketTTSError {
+        throw Abort(.unprocessableEntity, reason: "PocketTTS failed: \(error.localizedDescription)")
+    } catch let error as KokoroAneError {
+        throw Abort(.unprocessableEntity, reason: "Kokoro TTS failed: \(error.localizedDescription)")
     }
 
     var headers = HTTPHeaders()
     headers.add(name: .contentType, value: "audio/wav")
     headers.add(name: "X-Audio-Sample-Rate", value: "24000")
-    headers.add(name: "X-TTS-Backend", value: backend)
+    headers.add(name: "X-TTS-Backend", value: resolved.backend)
+    headers.add(name: "X-TTS-Voice", value: resolved.effectiveVoice)
     return Response(status: .ok, headers: headers, body: .init(data: audioData))
 }
 
@@ -108,12 +135,28 @@ private func handleSynthesizeStream(req: Request, engines: EngineManager) async 
             reason: "backend=\(backend) does not support streaming — only pocket (PocketTTS) streams. Use POST /synthesize?backend=\(backend) for batch synthesis."
         )
     }
-    let stream = try await engines.pocketSynthesizeStream(text: body.text, voice: body.voice)
+    // Same voice resolution as batch /synthesize — "default"/"" must map to
+    // the PocketTTS built-in default, not a literal HuggingFace fetch.
+    let resolved = try VoiceResolver.resolve(
+        voice: body.voice,
+        backend: "pocket",
+        backendExplicit: false,
+        kokoroLoaded: await engines.hasKokoro(),
+        logger: req.logger
+    )
+    guard resolved.backend == "pocket" else {
+        throw Abort(
+            .notImplemented,
+            reason: "voice \"\(resolved.effectiveVoice)\" belongs to the kokoro backend, which does not support streaming. Use POST /synthesize?backend=kokoro for batch synthesis."
+        )
+    }
+    let stream = try await engines.pocketSynthesizeStream(text: body.text, voice: resolved.voice)
 
     var headers = HTTPHeaders()
     headers.add(name: .contentType, value: "audio/L16; rate=24000; channels=1")
     headers.add(name: "X-Audio-Sample-Rate", value: "24000")
     headers.add(name: "X-TTS-Backend", value: "pocket")
+    headers.add(name: "X-TTS-Voice", value: resolved.effectiveVoice)
 
     // Convert the AsyncThrowingStream<AudioFrame> into a streaming Response.
     // managedAsyncStream auto-closes the stream on return (no .end required).
@@ -179,29 +222,14 @@ private func extractEmbedding(audioBytes: Data, engines: EngineManager) async th
 }
 
 private func handleListVoices(engines: EngineManager) async throws -> VoicesListResponse {
-    // PocketTTS built-in voices (back-compat with original /voices response)
-    let pocketVoices: [VoiceInfo] = [
-        VoiceInfo(id: "default", name: "default", description: "PocketTTS default voice", type: "system", backend: "pocket"),
-        VoiceInfo(id: "jane", name: "Jane", description: "Female, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "alba", name: "Alba", description: "Male, reading & conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "charles", name: "Charles", description: "Male, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "anna", name: "Anna", description: "Female, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "eve", name: "Eve", description: "Female, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "george", name: "George", description: "Male, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "paul", name: "Paul", description: "Male, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "mary", name: "Mary", description: "Female, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "michael", name: "Michael", description: "Male, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "vera", name: "Vera", description: "Female, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "jean", name: "Jean", description: "Male, conversational", type: "system", backend: "pocket"),
-        VoiceInfo(id: "eponine", name: "Eponine", description: "Female, reading", type: "system", backend: "pocket"),
-        VoiceInfo(id: "fantine", name: "Fantine", description: "Female, reading", type: "system", backend: "pocket"),
-        VoiceInfo(id: "marius", name: "Marius", description: "Male", type: "system", backend: "pocket"),
-        VoiceInfo(id: "cosette", name: "Cosette", description: "Female", type: "system", backend: "pocket"),
-        VoiceInfo(id: "azelma", name: "Azelma", description: "Female, reading", type: "system", backend: "pocket"),
+    // PocketTTS built-in voices (back-compat with original /voices response).
+    // "default" stays listed — VoiceResolver maps it to the backend default.
+    var voices: [VoiceInfo] = [
+        VoiceInfo(id: "default", name: "default", description: "PocketTTS default voice", type: "system", backend: "pocket")
     ]
-
-    // Also scan filesystem for any .wav presets
-    var voices = pocketVoices
+    for v in VoiceResolver.pocketVoiceCatalog {
+        voices.append(VoiceInfo(id: v.id, name: v.name, description: v.description, type: "system", backend: "pocket"))
+    }
     let voicesDir = URL(fileURLWithPath: "voices")
     if FileManager.default.fileExists(atPath: voicesDir.path) {
         if let contents = try? FileManager.default.contentsOfDirectory(
@@ -224,7 +252,7 @@ private func handleListVoices(engines: EngineManager) async throws -> VoicesList
 
     // Kokoro voice catalog — only include the voices if Kokoro loaded successfully.
     if await engines.hasKokoro() {
-        for v in kokoroVoiceCatalog {
+        for v in VoiceResolver.kokoroVoiceCatalog {
             // Kokoro voice IDs include variant prefix (en-/zh-/ja-) — keep raw.
             voices.append(VoiceInfo(
                 id: v.id, name: v.name, description: v.description,
@@ -235,24 +263,6 @@ private func handleListVoices(engines: EngineManager) async throws -> VoicesList
 
     return VoicesListResponse(voices: voices)
 }
-
-/// Curated Kokoro voice catalog. Kokoro voice packs auto-download on first
-/// use; we only list IDs that resolve reliably for the configured variant.
-private let kokoroVoiceCatalog: [(id: String, name: String, description: String)] = [
-    ("af_heart", "Heart (EN)", "Female, warm — Kokoro default"),
-    ("af_bella", "Bella (EN)", "Female"),
-    ("af_sky", "Sky (EN)", "Female"),
-    ("af_nicole", "Nicole (EN)", "Female, news"),
-    ("am_adam", "Adam (EN)", "Male"),
-    ("am_michael", "Michael (EN)", "Male"),
-    ("bf_emma", "Emma (EN)", "Female, British"),
-    ("bf_isabella", "Isabella (EN)", "Female, British"),
-    ("bm_george", "George (EN)", "Male, British"),
-    ("zf_001", "Xiaoxiao (ZH)", "Female, Mandarin default"),
-    ("zf_002", "Xiaoyi (ZH)", "Female, Mandarin"),
-    ("zm_001", "Yunjian (ZH)", "Male, Mandarin"),
-    ("jf_alpha", "Alpha (JA)", "Female, Japanese default"),
-]
 
 private func writeWav(samples: [Float], sampleRate: Int, to url: URL) throws {
     var data = Data()

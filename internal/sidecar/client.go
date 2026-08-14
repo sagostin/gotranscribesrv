@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
@@ -277,6 +278,32 @@ func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) ([]byte,
 	return audio, ct, err
 }
 
+// SidecarError is a non-200 HTTP response from a sidecar. Callers can use
+// errors.As to distinguish client-fixable rejections (4xx, e.g. unknown
+// voice) from genuine sidecar outages (5xx / transport errors).
+type SidecarError struct {
+	StatusCode int
+	Reason     string // parsed from Vapor's {"error":true,"reason":"..."} body when possible
+}
+
+func (e *SidecarError) Error() string {
+	return fmt.Sprintf("sidecar returned %d: %s", e.StatusCode, e.Reason)
+}
+
+// newSidecarError builds a SidecarError from a non-200 response body,
+// extracting Vapor's "reason" field when present.
+func newSidecarError(statusCode int, body []byte) *SidecarError {
+	reason := strings.TrimSpace(string(body))
+	var vaporErr struct {
+		Error  bool   `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(body, &vaporErr) == nil && vaporErr.Reason != "" {
+		reason = vaporErr.Reason
+	}
+	return &SidecarError{StatusCode: statusCode, Reason: reason}
+}
+
 // SynthesizeWithBackend is like Synthesize but routes to a specific TTS
 // backend on the sidecar via ?backend= query param. Pass backend="" to use
 // the sidecar default (pocket). Known values: "pocket", "kokoro".
@@ -308,7 +335,7 @@ func (c *Client) SynthesizeWithBackend(ctx context.Context, req SynthesizeReques
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
-		return nil, "", "", fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(errBody))
+		return nil, "", "", newSidecarError(resp.StatusCode, errBody)
 	}
 
 	audio, err := io.ReadAll(resp.Body)
@@ -354,7 +381,7 @@ func (c *Client) SynthesizeStream(ctx context.Context, text, voice, requestID st
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("sidecar streaming TTS returned %d: %s", resp.StatusCode, string(errBody))
+		return nil, newSidecarError(resp.StatusCode, errBody)
 	}
 	return resp.Body, nil
 }

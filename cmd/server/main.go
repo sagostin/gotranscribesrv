@@ -194,6 +194,10 @@ func main() {
 	asrHandler := handlers.NewASRHandler(sc, redactor, cfg.EnableITN, logManager)
 	whisperHandler := handlers.NewWhisperHandler(sc, redactor, cfg.EnableITN, logManager)
 	voiceHandler := handlers.NewVoiceHandler(db.DB, sc, cfg.VoicesDataDir, logManager)
+	// Multi-node voice sharing: reconcile per-node disk files with the DB
+	// blobs (backfill disk→DB, forward-fill DB→disk). Idempotent; runs in
+	// the background so it never delays startup.
+	go voiceHandler.SyncVoiceStorage()
 	ttsHandler := handlers.NewTTSHandler(sc, voiceHandler, logManager)
 	openaiTTSHandler := handlers.NewOpenAITTSHandler(sc, logManager, cfg.TTSDefaultBackend)
 	usageHandler := handlers.NewUsageHandler(db.DB)

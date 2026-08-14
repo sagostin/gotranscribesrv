@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/url"
@@ -818,6 +819,7 @@ func (h *OpenAIRealtimeS2SHandler) runResponse(ctx context.Context, sess *s2sSes
 	var usage *sidecar.ChatUsage
 	var ttftRecorded bool
 	var firstAudioRecorded bool
+	ttsStats := &s2sTTSStats{}
 
 	for chunk := range stream {
 		if sess.gen.Load() != gen || ctx.Err() != nil {
@@ -864,7 +866,7 @@ func (h *OpenAIRealtimeS2SHandler) runResponse(ctx context.Context, sess *s2sSes
 			if !ok {
 				break
 			}
-			if !h.speakSentence(ctx, sess, gen, responseID, sentence, &firstAudioRecorded) {
+			if !h.speakSentence(ctx, sess, gen, responseID, sentence, &firstAudioRecorded, ttsStats) {
 				return // interrupted or TTS failed
 			}
 		}
@@ -872,7 +874,7 @@ func (h *OpenAIRealtimeS2SHandler) runResponse(ctx context.Context, sess *s2sSes
 
 	// Flush any trailing text.
 	if tail := splitter.Flush(); tail != "" {
-		if !h.speakSentence(ctx, sess, gen, responseID, tail, &firstAudioRecorded) {
+		if !h.speakSentence(ctx, sess, gen, responseID, tail, &firstAudioRecorded, ttsStats) {
 			return
 		}
 	}
@@ -943,14 +945,18 @@ func (h *OpenAIRealtimeS2SHandler) runResponse(ctx context.Context, sess *s2sSes
 		"turn_latency_ms", int(turnLatency*1000), "response_chars", len(text),
 		"audio_out_ms", int(sess.respAudioBytes/48))
 	h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_S2S_TURN_COMPLETED", "OpenAIRealtimeS2STurnCompleted", slog.LevelInfo, map[string]interface{}{
-		"endpoint":        "/v1/realtime",
-		"request_id":      sess.requestID,
-		"turn_id":         responseID,
-		"turn":            sess.turns,
-		"turn_latency_ms": int(turnLatency * 1000),
-		"response_chars":  len(text),
-		"audio_out_ms":    int(sess.respAudioBytes / 48),
-		"llm_model":       h.cfg.RealtimeS2SModel,
+		"endpoint":           "/v1/realtime",
+		"request_id":         sess.requestID,
+		"turn_id":            responseID,
+		"turn":               sess.turns,
+		"turn_latency_ms":    int(turnLatency * 1000),
+		"response_chars":     len(text),
+		"audio_out_ms":       int(sess.respAudioBytes / 48),
+		"llm_model":          h.cfg.RealtimeS2SModel,
+		"voice":              sess.voice,
+		"tts_sentences":      ttsStats.sentences,
+		"tts_total_synth_ms": int(ttsStats.totalSynthTime.Milliseconds()),
+		"tts_first_chunk_ms": int(ttsStats.firstChunkLatency.Milliseconds()),
 	}))
 }
 
@@ -1058,10 +1064,19 @@ func (h *OpenAIRealtimeS2SHandler) finishToolCallTurn(sess *s2sSession, response
 	}))
 }
 
+// s2sTTSStats accumulates per-turn streaming TTS telemetry across sentences.
+// Logged once per turn on the turn-completed event (per-sentence info logs
+// would be too chatty for Loki on long responses).
+type s2sTTSStats struct {
+	sentences         int
+	totalSynthTime    time.Duration
+	firstChunkLatency time.Duration
+}
+
 // speakSentence synthesizes one sentence via streaming TTS and forwards the
 // frames as response.audio.delta events. In text-only mode it emits
 // response.text.delta instead. Returns false if interrupted or on TTS error.
-func (h *OpenAIRealtimeS2SHandler) speakSentence(ctx context.Context, sess *s2sSession, gen int64, responseID, sentence string, firstAudioRecorded *bool) bool {
+func (h *OpenAIRealtimeS2SHandler) speakSentence(ctx context.Context, sess *s2sSession, gen int64, responseID, sentence string, firstAudioRecorded *bool, stats *s2sTTSStats) bool {
 	if sess.gen.Load() != gen {
 		return false
 	}
@@ -1092,13 +1107,27 @@ func (h *OpenAIRealtimeS2SHandler) speakSentence(ctx context.Context, sess *s2sS
 	body, err := h.sc.SynthesizeStream(ctx, sentence, sess.voice, responseID)
 	if err != nil {
 		if ctx.Err() == nil && sess.gen.Load() == gen {
+			sidecarStatus := 0
+			var scErr *sidecar.SidecarError
+			if errors.As(err, &scErr) {
+				sidecarStatus = scErr.StatusCode
+			}
 			slog.Warn("[OA-RT-S2S] TTS stream failed", "error", err, "request_id", sess.requestID, "turn_id", responseID)
+			h.lm.SendLog(h.lm.BuildLog("RT_S2S_TTS_STREAM_FAILED", "RTS2STTSStreamFailed", slog.LevelError, map[string]interface{}{
+				"endpoint":       "/v1/realtime",
+				"voice":          sess.voice,
+				"sentence_chars": len(sentence),
+				"turn_id":        responseID,
+				"sidecar_status": sidecarStatus,
+				"request_id":     sess.requestID,
+			}, err))
 			sess.sendErr("server_error", "tts_unavailable", "speech synthesis unavailable: "+err.Error())
 		}
 		return false
 	}
 	defer body.Close()
 
+	sentenceStart := time.Now()
 	ttsStart := time.Now()
 	slog.Debug("[OA-RT-S2S] TTS sentence started", "request_id", sess.requestID, "turn_id", responseID,
 		"sentence_chars", len(sentence))
@@ -1110,9 +1139,11 @@ func (h *OpenAIRealtimeS2SHandler) speakSentence(ctx context.Context, sess *s2sS
 				return false
 			}
 			if !*firstAudioRecorded {
-				metrics.RecordRealtimeS2STTSFirstChunk(time.Since(ttsStart).Seconds())
+				firstChunk := time.Since(ttsStart)
+				metrics.RecordRealtimeS2STTSFirstChunk(firstChunk.Seconds())
 				// Headline metric: end-of-speech → first audio byte out.
 				metrics.RecordRealtimeS2STurn(sess.engine, time.Since(sess.turnStart).Seconds())
+				stats.firstChunkLatency = firstChunk
 				*firstAudioRecorded = true
 			}
 			chunk := make([]byte, n)
@@ -1130,6 +1161,8 @@ func (h *OpenAIRealtimeS2SHandler) speakSentence(ctx context.Context, sess *s2sS
 			})
 		}
 		if err == io.EOF {
+			stats.sentences++
+			stats.totalSynthTime += time.Since(sentenceStart)
 			return true
 		}
 		if err != nil {

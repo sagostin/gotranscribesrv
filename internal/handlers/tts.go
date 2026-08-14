@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"log/slog"
 	"time"
 
@@ -49,6 +50,12 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	}
 
 	if body.Text == "" {
+		h.lm.SendLog(h.lm.BuildLog("TTS_VALIDATION_FAILED", "TTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":   "/api/v1/tts",
+			"reason":     "missing_text",
+			"ip":         c.IP(),
+			"request_id": middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "MISSING_TEXT",
@@ -59,6 +66,13 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	}
 
 	if len(body.Text) > 5000 {
+		h.lm.SendLog(h.lm.BuildLog("TTS_VALIDATION_FAILED", "TTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+			"endpoint":    "/api/v1/tts",
+			"reason":      "text_too_long",
+			"text_length": len(body.Text),
+			"ip":          c.IP(),
+			"request_id":  middleware.RequestIDFromCtx(c),
+		}))
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "TEXT_TOO_LONG",
@@ -92,6 +106,13 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	if body.VoiceID != "" {
 		voiceUUID, err := uuid.Parse(body.VoiceID)
 		if err != nil {
+			h.lm.SendLog(h.lm.BuildLog("TTS_VALIDATION_FAILED", "TTSValidationFailed", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/api/v1/tts",
+				"reason":     "invalid_voice_id",
+				"voice_id":   body.VoiceID,
+				"ip":         c.IP(),
+				"request_id": middleware.RequestIDFromCtx(c),
+			}))
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": fiber.Map{
 					"code":    "INVALID_VOICE_ID",
@@ -146,18 +167,36 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	}))
 
 	synthStart := time.Now()
-	audio, contentType, err := h.sidecar.Synthesize(c.UserContext(), req)
+	audio, contentType, backendUsed, err := h.sidecar.SynthesizeWithBackend(c.UserContext(), req, "")
 	synthDuration := time.Since(synthStart)
 	if err != nil {
+		var scErr *sidecar.SidecarError
+		isClientError := errors.As(err, &scErr) && scErr.StatusCode >= 400 && scErr.StatusCode < 500
+		sidecarStatus := 0
+		if errors.As(err, &scErr) {
+			sidecarStatus = scErr.StatusCode
+		}
 		h.lm.SendLog(h.lm.BuildLog("TTS_FAILED", "TTSFailed", slog.LevelError, map[string]interface{}{
-			"endpoint":      "/api/v1/tts",
-			"ip":            c.IP(),
-			"voice":         req.Voice,
-			"voice_id":      body.VoiceID,
-			"text_length":   len(body.Text),
-			"synth_time_ms": int(synthDuration.Milliseconds()),
-			"request_id":    middleware.RequestIDFromCtx(c),
+			"endpoint":       "/api/v1/tts",
+			"ip":             c.IP(),
+			"voice":          req.Voice,
+			"voice_id":       body.VoiceID,
+			"text_length":    len(body.Text),
+			"synth_time_ms":  int(synthDuration.Milliseconds()),
+			"sidecar_status": sidecarStatus,
+			"request_id":     middleware.RequestIDFromCtx(c),
 		}, err))
+		if isClientError {
+			// Sidecar rejected the request (e.g. unknown voice) — forward the
+			// real status and reason instead of masking it as a 502 outage.
+			return c.Status(scErr.StatusCode).JSON(fiber.Map{
+				"error": fiber.Map{
+					"code":    "TTS_REJECTED",
+					"message": scErr.Reason,
+					"status":  scErr.StatusCode,
+				},
+			})
+		}
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": fiber.Map{
 				"code":    "SIDECAR_ERROR",
@@ -181,6 +220,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 		"endpoint":           "/api/v1/tts",
 		"ip":                 c.IP(),
 		"voice":              req.Voice,
+		"backend":            backendUsed,
 		"voice_id":           body.VoiceID,
 		"format":             req.Format,
 		"text_length":        len(body.Text),
@@ -196,6 +236,7 @@ func (h *TTSHandler) Synthesize(c *fiber.Ctx) error {
 	c.Locals("usage_meta", map[string]interface{}{
 		"text_length":        len(body.Text),
 		"voice":              req.Voice,
+		"backend":            backendUsed,
 		"voice_id":           body.VoiceID,
 		"format":             req.Format,
 		"output_bytes":       len(audio),

@@ -11,17 +11,24 @@ import (
 // Each voice belongs to a user and stores an extracted voice embedding
 // that can be reused for synthesis without re-cloning.
 type Voice struct {
-	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	UserID      uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_voice_user_name"`
-	Name        string         `json:"name" gorm:"not null;uniqueIndex:idx_voice_user_name"`
-	Description string         `json:"description,omitempty"`
-	FilePath    string         `json:"-" gorm:"not null"`      // Relative: {user_id}/{voice_id}.bin
-	SizeBytes   int64          `json:"size_bytes"`             // Embedding file size
-	SampleRate  int            `json:"sample_rate,omitempty"`  // Source audio sample rate
-	DurationSec float64        `json:"duration_sec,omitempty"` // Source audio duration
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+	ID          uuid.UUID `json:"id" gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
+	UserID      uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_voice_user_name"`
+	Name        string    `json:"name" gorm:"not null;uniqueIndex:idx_voice_user_name"`
+	Description string    `json:"description,omitempty"`
+	FilePath    string    `json:"-" gorm:"not null"` // Relative: {user_id}/{voice_id}.bin
+	// EmbeddingData is the raw embedding bytes — the source of truth in
+	// multi-node deployments. The on-disk file at FilePath is a per-node
+	// write-through cache: LoadVoiceData serves from disk when present and
+	// falls back to this blob (re-materializing the file) when not.
+	// SyncVoiceStorage backfills this column from pre-existing disk files
+	// at startup and forward-fills missing disk files from the blob.
+	EmbeddingData []byte         `json:"-" gorm:"type:bytea"`
+	SizeBytes     int64          `json:"size_bytes"`             // Embedding file size
+	SampleRate    int            `json:"sample_rate,omitempty"`  // Source audio sample rate
+	DurationSec   float64        `json:"duration_sec,omitempty"` // Source audio duration
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
 
 	// Associations
 	User User `json:"-" gorm:"foreignKey:UserID"`
