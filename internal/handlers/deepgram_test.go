@@ -633,6 +633,268 @@ func TestDeepgramRealtimeConnectFailedEmitsEvent(t *testing.T) {
 	}
 }
 
+// ── Flush / Finalize teardown tests ─────────────────────────────────
+
+// mockSidecarAppWithFinalizeDelay behaves like mockSidecarApp but waits
+// finalizeDelay before answering a Finalize — simulating a sidecar that
+// needs real time to transcribe the buffered audio.
+func mockSidecarAppWithFinalizeDelay(finalText string, finalizeDelay time.Duration) *fiber.App {
+	app := fiber.New()
+	app.Use("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt != websocket.TextMessage {
+				continue
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			switch typ, _ := ctrl["type"].(string); typ {
+			case "Finalize":
+				time.Sleep(finalizeDelay)
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          finalText,
+					"start":         0.0,
+					"end":           1.0,
+					"words":         []any{},
+					"is_final":      true,
+					"from_finalize": true,
+				})
+			case "CloseStream":
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          finalText,
+					"start":         0.0,
+					"end":           1.0,
+					"words":         []any{},
+					"is_final":      true,
+					"from_finalize": false,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "done"})
+				return
+			}
+		}
+	}))
+	return app
+}
+
+// mockSidecarDiesOnFinalize closes the connection when it receives a
+// Finalize — simulating a sidecar crash mid-flush.
+func mockSidecarDiesOnFinalize() *fiber.App {
+	app := fiber.New()
+	app.Use("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt != websocket.TextMessage {
+				continue
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			if typ, _ := ctrl["type"].(string); typ == "Finalize" {
+				return // die without answering
+			}
+		}
+	}))
+	return app
+}
+
+// halfClose shuts down the write side of a test client's TCP conn,
+// mimicking Deepgram-client behavior of closing right after Finalize
+// while still expecting the final Results (the read side stays open).
+func halfClose(t *testing.T, conn *ws.Conn) {
+	t.Helper()
+	type closeWriter interface{ CloseWrite() error }
+	cw, ok := conn.NetConn().(closeWriter)
+	if !ok {
+		t.Skip("test client conn does not support CloseWrite")
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+}
+
+// TestDeepgramFinalizeSurvivesClientHalfClose is the regression test for
+// the lost-Finalize bug: a client that disconnects (here: half-close)
+// immediately after sending Finalize must still receive the final
+// Results event — teardown must wait for the pending flush instead of
+// killing the sidecar connection instantly.
+func TestDeepgramFinalizeSurvivesClientHalfClose(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarAppWithFinalizeDelay("flushed transcript", 150*time.Millisecond))
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"Finalize"}`)); err != nil {
+		t.Fatalf("write Finalize: %v", err)
+	}
+
+	// Disconnect immediately — before the sidecar answers (150ms delay).
+	halfClose(t, conn)
+
+	// The final Results must still arrive on the half-closed conn.
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results after half-close: %v (final was lost to teardown)", err)
+	}
+	if res["type"] != "Results" {
+		t.Fatalf("event type = %v, want Results", res["type"])
+	}
+	if res["from_finalize"] != true {
+		t.Errorf("from_finalize = %v, want true", res["from_finalize"])
+	}
+	ch, _ := res["channel"].(map[string]any)
+	alts, _ := ch["alternatives"].([]any)
+	if len(alts) == 0 {
+		t.Fatal("Results.channel.alternatives empty")
+	}
+	if alt0, _ := alts[0].(map[string]any); alt0["transcript"] != "flushed transcript" {
+		t.Errorf("transcript = %v, want %q", alt0["transcript"], "flushed transcript")
+	}
+}
+
+// TestDeepgramCloseStreamReturnsTerminalMetadata verifies the Deepgram
+// spec behavior on CloseStream: after the final Results the server sends
+// a terminal Metadata summary before terminating the connection.
+func TestDeepgramCloseStreamReturnsTerminalMetadata(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarApp())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 32000)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+
+	// 1. Final Results.
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results: %v", err)
+	}
+	if res["type"] != "Results" || res["is_final"] != true {
+		t.Fatalf("first event = %v, want final Results", res)
+	}
+
+	// 2. Terminal Metadata summary (Deepgram spec).
+	var term map[string]any
+	if err := conn.ReadJSON(&term); err != nil {
+		t.Fatalf("read terminal Metadata: %v", err)
+	}
+	if term["type"] != "Metadata" {
+		t.Fatalf("terminal event type = %v, want Metadata", term["type"])
+	}
+	if term["transaction_key"] != "deprecated" {
+		t.Errorf("transaction_key = %v, want deprecated", term["transaction_key"])
+	}
+	if rid, _ := term["request_id"].(string); rid == "" {
+		t.Error("terminal Metadata missing request_id")
+	}
+	if s, _ := term["sha256"].(string); len(s) != 64 {
+		t.Errorf("sha256 = %q, want 64-char hex", s)
+	}
+	if d, _ := term["duration"].(float64); d != 1.0 {
+		t.Errorf("duration = %v, want 1.0 (32000 bytes @ 32kB/s PCM16)", d)
+	}
+	if ch, _ := term["channels"].(float64); ch != 1 {
+		t.Errorf("channels = %v, want 1", ch)
+	}
+
+	// 3. Server terminates the connection.
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Error("expected connection to terminate after terminal Metadata")
+	}
+}
+
+// TestDeepgramTeardownPromptWhenSidecarDiesMidFlush verifies the grace
+// wait bails out immediately when the sidecar goroutine exits, instead
+// of blocking teardown for the full grace period.
+func TestDeepgramTeardownPromptWhenSidecarDiesMidFlush(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarDiesOnFinalize())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"Finalize"}`)); err != nil {
+		t.Fatalf("write Finalize: %v", err)
+	}
+	halfClose(t, conn)
+
+	// Flush is pending but the sidecar died — SESSION_ENDED must arrive
+	// promptly, well under the 10s grace period.
+	start := time.Now()
+	ended := waitForLogEvent(lm, "DEEPGRAM_SESSION_ENDED", 5*time.Second)
+	if ended == nil {
+		t.Fatal("DEEPGRAM_SESSION_ENDED never emitted")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("teardown took %v with a dead sidecar — grace wait did not bail out early", elapsed)
+	}
+}
+
 // TestDGSessionStats verifies the mutex-guarded session counters used
 // by both Deepgram handlers (run with -race to catch regressions).
 func TestDGSessionStats(t *testing.T) {

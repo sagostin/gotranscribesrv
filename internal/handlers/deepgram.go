@@ -272,11 +272,13 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 							// with a Results event carrying from_finalize=true.
 							// The sidecar transcribes the buffered audio and
 							// emits a final event WITHOUT closing the session.
+							stats.requestFlush(false)
 							slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"Finalize"}`))
 							continue
 						case "CloseStream":
+							stats.requestFlush(true)
 							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"CloseStream"}`))
@@ -312,9 +314,14 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		}
 	}()
 
-	// Sidecar → Client: translate internal events to Deepgram format
+	// Sidecar → Client: translate internal events to Deepgram format.
+	// sidecarGone signals teardown that this goroutine has exited, so a
+	// pending-flush grace wait can bail out immediately instead of
+	// waiting for the full grace period.
+	sidecarGone := make(chan struct{})
 	go func() {
 		defer wg.Done()
+		defer close(sidecarGone)
 		for {
 			_, msg, err := sidecarConn.ReadMessage()
 			if err != nil {
@@ -432,6 +439,22 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 			case "done":
 				slog.Info("[DG] Sidecar done, ending session", "request_id", requestID)
+				// Deepgram spec: CloseStream earns a terminal Metadata
+				// summary ("send the response, send a summary metadata
+				// object, then terminate") before the session ends.
+				if stats.closeStreamRequested() {
+					audioBytes, _, _, _ := stats.snapshot()
+					_ = c.WriteJSON(dgMetadata{
+						Type:           "Metadata",
+						TransactionKey: "deprecated",
+						RequestID:      requestID,
+						SHA256:         fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
+						Created:        time.Now().UTC().Format(time.RFC3339),
+						Duration:       float64(audioBytes) / 32000.0, // PCM 16-bit 16kHz mono
+						Channels:       1,
+						ModelInfo:      modelMeta.ModelInfo,
+					})
+				}
 				errCh <- nil
 				return
 
@@ -446,6 +469,18 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	}()
 
 	<-errCh
+
+	// A client disconnect (including a TCP half-close, which Deepgram's
+	// own docs show clients doing) may race a pending Finalize/
+	// CloseStream flush — the final response can still be delivered on
+	// the half-closed conn, so give the sidecar a bounded grace window
+	// before killing its connection. Skipped entirely when no flush is
+	// pending or the sidecar goroutine already exited.
+	if flushAt, pending := stats.flushPending(); pending {
+		slog.Info("[DG] Client disconnected with flush pending, waiting for final",
+			"request_id", requestID, "grace_ms", dgFlushGrace.Milliseconds())
+		waitForFlushResult(stats, sidecarGone, flushAt, dgFlushGrace)
+	}
 
 	// Signal teardown (suppresses spurious CLIENT_READ_ERROR), then
 	// unblock the sibling goroutine and wait for both to exit before
@@ -503,6 +538,12 @@ type dgSessionStats struct {
 	frameCount   int
 	firstAudioAt time.Time
 	lastResultAt time.Time
+	// flushAt records when the client last asked the sidecar to flush
+	// (Finalize or CloseStream). A zero value means no flush is pending.
+	// closeStream notes whether the pending flush was a CloseStream,
+	// which per Deepgram's docs also earns a terminal Metadata event.
+	flushAt     time.Time
+	closeStream bool
 }
 
 // addAudio records one binary audio frame and returns the running
@@ -525,6 +566,41 @@ func (s *dgSessionStats) markResult() {
 	s.lastResultAt = time.Now()
 }
 
+// requestFlush records a client Finalize/CloseStream request so teardown
+// can give the sidecar a grace window to deliver the pending final.
+func (s *dgSessionStats) requestFlush(closeStream bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushAt = time.Now()
+	s.closeStream = closeStream
+}
+
+// flushPending reports the pending flush time, or false if the sidecar
+// has already delivered a final at-or-after the last flush request.
+func (s *dgSessionStats) flushPending() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flushAt.IsZero() || !s.lastResultAt.Before(s.flushAt) {
+		return time.Time{}, false
+	}
+	return s.flushAt, true
+}
+
+// resultAtOrAfter reports whether a final was delivered at-or-after t.
+func (s *dgSessionStats) resultAtOrAfter(t time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.lastResultAt.Before(t)
+}
+
+// closeStreamRequested reports whether the pending/last flush was a
+// CloseStream (used to emit the terminal Metadata event on done).
+func (s *dgSessionStats) closeStreamRequested() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeStream
+}
+
 func (s *dgSessionStats) bytes() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -542,6 +618,34 @@ func (s *dgSessionStats) snapshot() (audioBytes, frameCount int, firstAudioAt, l
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.audioBytes, s.frameCount, s.firstAudioAt, s.lastResultAt
+}
+
+// dgFlushGrace bounds how long session teardown waits for the sidecar to
+// answer a pending Finalize/CloseStream after the client has disconnected.
+// Deepgram's own docs show clients closing immediately after a flush and
+// still expecting the final response (a half-closed TCP conn can receive
+// it), so teardown must not kill the sidecar connection instantly.
+const dgFlushGrace = 10 * time.Second
+
+// waitForFlushResult blocks until the sidecar delivers a final at-or-after
+// flushAt, the sidecar goroutine exits, or the grace period expires.
+func waitForFlushResult(stats *dgSessionStats, sidecarGone <-chan struct{}, flushAt time.Time, grace time.Duration) {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-sidecarGone:
+			return
+		case <-deadline.C:
+			return
+		case <-tick.C:
+			if stats.resultAtOrAfter(flushAt) {
+				return
+			}
+		}
+	}
 }
 
 // itnEnabled returns whether ITN is on for this WS request, factoring
