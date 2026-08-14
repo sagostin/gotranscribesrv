@@ -27,16 +27,24 @@ func (lm *LogManager) LoadTemplates() {
 		"WhisperFailed":          "Whisper-compat transcription failed: %v",
 
 		// ── Deepgram-compatible streaming ASR ───────────────────
-		"DeepgramSessionStarted": "Deepgram-compat session started",
-		"DeepgramSessionEnded":   "Deepgram-compat session ended",
-		"DeepgramSessionError":   "Deepgram-compat session error: %v",
-		"DeepgramConnectFailed":  "Deepgram-compat sidecar connect failed: %v",
+		"DeepgramSessionStarted":  "Deepgram-compat session started",
+		"DeepgramSessionEnded":    "Deepgram-compat session ended",
+		"DeepgramSessionError":    "Deepgram-compat session error: %v",
+		"DeepgramConnectFailed":   "Deepgram-compat sidecar connect failed: %v",
+		"DeepgramClientReadError": "Deepgram-compat client read error: %v",
+		"DeepgramForwardFailed":   "Deepgram-compat failed to forward audio to sidecar: %v",
 		// Transcript fields on *_SENT events are PII-redacted before
 		// the event is built — never log raw sidecar text.
-		"DeepgramPartialSent":         "Deepgram-compat partial result sent",
-		"DeepgramFinalSent":           "Deepgram-compat final result sent",
-		"DeepgramRealtimePartialSent": "Deepgram-realtime partial result sent",
-		"DeepgramRealtimeFinalSent":   "Deepgram-realtime final result sent",
+		"DeepgramPartialSent":             "Deepgram-compat partial result sent",
+		"DeepgramFinalSent":               "Deepgram-compat final result sent",
+		"DeepgramRealtimeStarted":         "Deepgram-realtime session started",
+		"DeepgramRealtimeEnded":           "Deepgram-realtime session ended",
+		"DeepgramRealtimeConnectFailed":   "Deepgram-realtime sidecar connect failed: %v",
+		"DeepgramRealtimeSessionError":    "Deepgram-realtime session error: %v",
+		"DeepgramRealtimeClientReadError": "Deepgram-realtime client read error: %v",
+		"DeepgramRealtimeForwardFailed":   "Deepgram-realtime failed to forward audio to sidecar: %v",
+		"DeepgramRealtimePartialSent":     "Deepgram-realtime partial result sent",
+		"DeepgramRealtimeFinalSent":       "Deepgram-realtime final result sent",
 
 		// ── Watson-compatible ASR ───────────────────────────────
 		"WatsonRecognizeReceived":  "Watson-compat POST /v1/recognize received",

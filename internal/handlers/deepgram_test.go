@@ -203,6 +203,15 @@ func TestDeepgramFinalizeFlow(t *testing.T) {
 		t.Errorf("CloseStream Results is_final=%v speech_final=%v, want both true",
 			res2["is_final"], res2["speech_final"])
 	}
+
+	// The server ends the session after "done" and closes the conn.
+	// Wait for the close so the session-end log path finishes before
+	// the test tears down the LogManager.
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break
+		}
+	}
 }
 
 // TestDeepgramFinalRedactsPIIForLokiButNotClient verifies the privacy
@@ -298,5 +307,375 @@ func TestDeepgramFinalRedactsPIIForLokiButNotClient(t *testing.T) {
 	types, _ := finalSent.AdditionalData["pii_entity_types"].([]string)
 	if len(types) != 2 {
 		t.Errorf("pii_entity_types = %v, want [PERSON PHONE_NUMBER]", types)
+	}
+}
+
+// ── Logging lifecycle tests ─────────────────────────────────────────
+
+// captureLogManager returns a LogManager with no consumer goroutine so
+// tests can drain LogChannel and assert on the Loki-bound events.
+func captureLogManager() *logging.LogManager {
+	lm := &logging.LogManager{
+		Templates:   make(map[string]string),
+		LokiEnabled: false,
+		LogChannel:  make(chan *logging.LoggingFormat, 64),
+	}
+	lm.LoadTemplates()
+	return lm
+}
+
+// waitForLogEvent drains lm.LogChannel until an event of the given type
+// appears or the timeout elapses. Intervening events are discarded —
+// call it in emission order.
+func waitForLogEvent(lm *logging.LogManager, eventType string, timeout time.Duration) *logging.LoggingFormat {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-lm.LogChannel:
+			if ev.Type == eventType {
+				return ev
+			}
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
+// TestDeepgramSessionLifecycleLogging asserts the v1 session emits the
+// full Loki event lifecycle — STARTED (with request metadata), FINAL_SENT,
+// ENDED (with usage stats) and CLIENT_READ_ERROR on disconnect — with the
+// fields operators need for Whisper-style observability.
+func TestDeepgramSessionLifecycleLogging(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarApp())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	header := http.Header{"User-Agent": []string{"dg-lifecycle-test/1.0"}}
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?language=en&sample_rate=16000", header)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+
+	// SESSION_STARTED — request metadata must be present.
+	started := waitForLogEvent(lm, "DEEPGRAM_SESSION_STARTED", 2*time.Second)
+	if started == nil {
+		t.Fatal("DEEPGRAM_SESSION_STARTED never emitted")
+	}
+	if started.Message != "Deepgram-compat session started" {
+		t.Errorf("started message = %q, template not resolved?", started.Message)
+	}
+	if ua, _ := started.AdditionalData["user_agent"].(string); ua != "dg-lifecycle-test/1.0" {
+		t.Errorf("user_agent = %v, want dg-lifecycle-test/1.0", ua)
+	}
+	if m, _ := started.AdditionalData["model"].(string); m == "" {
+		t.Error("model missing from SESSION_STARTED")
+	}
+	if lang, _ := started.AdditionalData["language"].(string); lang != "en" {
+		t.Errorf("language = %v, want en", lang)
+	}
+
+	// Drive a full session: audio → CloseStream → final + done.
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results: %v", err)
+	}
+
+	if waitForLogEvent(lm, "DEEPGRAM_FINAL_SENT", 2*time.Second) == nil {
+		t.Fatal("DEEPGRAM_FINAL_SENT never emitted")
+	}
+
+	// SESSION_ENDED — usage stats must be present and consistent.
+	ended := waitForLogEvent(lm, "DEEPGRAM_SESSION_ENDED", 2*time.Second)
+	if ended == nil {
+		t.Fatal("DEEPGRAM_SESSION_ENDED never emitted")
+	}
+	if ended.Message != "Deepgram-compat session ended" {
+		t.Errorf("ended message = %q, template not resolved?", ended.Message)
+	}
+	if b, _ := ended.AdditionalData["audio_bytes"].(int); b != 3200 {
+		t.Errorf("audio_bytes = %v, want 3200", b)
+	}
+	if fc, _ := ended.AdditionalData["frame_count"].(int); fc != 1 {
+		t.Errorf("frame_count = %v, want 1", fc)
+	}
+	if d, _ := ended.AdditionalData["audio_duration_ms"].(int); d != 100 {
+		t.Errorf("audio_duration_ms = %v, want 100 (3200 bytes / 32)", d)
+	}
+
+	// Normal teardown (sidecar done) must NOT emit CLIENT_READ_ERROR —
+	// the event is reserved for client-initiated disconnects. Verify by
+	// abruptly closing a second connection.
+	conn2, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler (conn2): %v", err)
+	}
+	var meta2 map[string]any
+	if err := conn2.ReadJSON(&meta2); err != nil {
+		t.Fatalf("read Metadata (conn2): %v", err)
+	}
+	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 640)); err != nil {
+		t.Fatalf("write audio (conn2): %v", err)
+	}
+	_ = conn2.Close() // abrupt client disconnect ends the session
+
+	readErr := waitForLogEvent(lm, "DEEPGRAM_CLIENT_READ_ERROR", 2*time.Second)
+	if readErr == nil {
+		t.Fatal("DEEPGRAM_CLIENT_READ_ERROR never emitted after abrupt client close")
+	}
+	if b, _ := readErr.AdditionalData["total_bytes"].(int); b != 640 {
+		t.Errorf("total_bytes = %v, want 640", b)
+	}
+}
+
+// mockRealtimeSidecarApp mimics the sidecar's /stream/realtime protocol:
+// ready on connect, one speech_final final after the first audio frame,
+// then the connection closes (ending the session).
+func mockRealtimeSidecarApp() *fiber.App {
+	app := fiber.New()
+	app.Use("/stream/realtime", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream/realtime", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		for {
+			mt, _, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt != websocket.BinaryMessage {
+				continue
+			}
+			_ = c.WriteJSON(fiber.Map{
+				"type":         "final",
+				"text":         "realtime hello",
+				"speech_final": true,
+				"time":         1.0,
+			})
+			return // close → ends the handler session
+		}
+	}))
+	return app
+}
+
+func deepgramRealtimeTestApp(t *testing.T, sidecarWSURL string, lm *logging.LogManager) *fiber.App {
+	t.Helper()
+	sc := sidecar.NewClient("http://unused", sidecarWSURL, "http://unused-llm")
+	metricsOnce.Do(func() { metrics.Init(true) })
+	h := NewDeepgramRealtimeHandler(sc, pii.NewRedactor(nil, false, nil, 0), lm, nil)
+
+	app := fiber.New()
+	app.Use("/v2/listen", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/v2/listen", h.Upgrade())
+	return app
+}
+
+// TestDeepgramRealtimeSessionLifecycleLogging asserts the /v2/listen
+// session emits the same lifecycle event coverage as the legacy handler:
+// STARTED (with engine + request metadata), FINAL_SENT, ENDED (with
+// usage stats) and CLIENT_READ_ERROR on teardown.
+func TestDeepgramRealtimeSessionLifecycleLogging(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockRealtimeSidecarApp())
+	handlerWS := startTestApp(t, deepgramRealtimeTestApp(t, sidecarWS, lm))
+
+	header := http.Header{"User-Agent": []string{"dg-rt-lifecycle-test/1.0"}}
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v2/listen?model=nova-3", header)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// First frame to the client is the Deepgram Metadata event.
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+
+	started := waitForLogEvent(lm, "DEEPGRAM_REALTIME_STARTED", 2*time.Second)
+	if started == nil {
+		t.Fatal("DEEPGRAM_REALTIME_STARTED never emitted")
+	}
+	if started.Message != "Deepgram-realtime session started" {
+		t.Errorf("started message = %q, template not resolved?", started.Message)
+	}
+	if eng, _ := started.AdditionalData["engine"].(string); eng != "eou-320" {
+		t.Errorf("engine = %v, want eou-320 (nova-3 mapping)", eng)
+	}
+	if ua, _ := started.AdditionalData["user_agent"].(string); ua != "dg-rt-lifecycle-test/1.0" {
+		t.Errorf("user_agent = %v, want dg-rt-lifecycle-test/1.0", ua)
+	}
+
+	// One audio frame → mock sidecar emits a speech_final final + closes.
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 6400)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results: %v", err)
+	}
+	if res["type"] != "Results" || res["is_final"] != true {
+		t.Errorf("event = %v, want final Results", res)
+	}
+
+	finalSent := waitForLogEvent(lm, "DEEPGRAM_REALTIME_FINAL_SENT", 2*time.Second)
+	if finalSent == nil {
+		t.Fatal("DEEPGRAM_REALTIME_FINAL_SENT never emitted")
+	}
+	if tr, _ := finalSent.AdditionalData["transcript"].(string); tr != "realtime hello" {
+		t.Errorf("transcript = %v, want %q", tr, "realtime hello")
+	}
+
+	ended := waitForLogEvent(lm, "DEEPGRAM_REALTIME_ENDED", 2*time.Second)
+	if ended == nil {
+		t.Fatal("DEEPGRAM_REALTIME_ENDED never emitted")
+	}
+	if ended.Message != "Deepgram-realtime session ended" {
+		t.Errorf("ended message = %q, template not resolved?", ended.Message)
+	}
+	if b, _ := ended.AdditionalData["audio_bytes"].(int); b != 6400 {
+		t.Errorf("audio_bytes = %v, want 6400", b)
+	}
+	if fc, _ := ended.AdditionalData["frame_count"].(int); fc != 1 {
+		t.Errorf("frame_count = %v, want 1", fc)
+	}
+	if eng, _ := ended.AdditionalData["engine"].(string); eng != "eou-320" {
+		t.Errorf("engine = %v, want eou-320", eng)
+	}
+
+	// Abrupt client disconnect → REALTIME_CLIENT_READ_ERROR (see the v1
+	// lifecycle test for why normal teardown must not emit it).
+	conn2, _, err := ws.DefaultDialer.Dial(handlerWS+"/v2/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler (conn2): %v", err)
+	}
+	var meta2 map[string]any
+	if err := conn2.ReadJSON(&meta2); err != nil {
+		t.Fatalf("read Metadata (conn2): %v", err)
+	}
+	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 640)); err != nil {
+		t.Fatalf("write audio (conn2): %v", err)
+	}
+	_ = conn2.Close()
+
+	readErr := waitForLogEvent(lm, "DEEPGRAM_REALTIME_CLIENT_READ_ERROR", 2*time.Second)
+	if readErr == nil {
+		t.Fatal("DEEPGRAM_REALTIME_CLIENT_READ_ERROR never emitted after abrupt client close")
+	}
+}
+
+// TestDeepgramRealtimeConnectFailedEmitsEvent asserts that a failed
+// sidecar dial produces a DEEPGRAM_REALTIME_CONNECT_FAILED Loki event
+// (previously the failure was only visible to the WebSocket client).
+func TestDeepgramRealtimeConnectFailedEmitsEvent(t *testing.T) {
+	// Grab a port and close it — guaranteed refused connection.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	lm := captureLogManager()
+	handlerWS := startTestApp(t, deepgramRealtimeTestApp(t, "ws://"+deadAddr, lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v2/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// Client still receives a protocol-level Error frame.
+	var errEvt map[string]any
+	if err := conn.ReadJSON(&errEvt); err != nil {
+		t.Fatalf("read Error event: %v", err)
+	}
+	if errEvt["type"] != "Error" {
+		t.Errorf("client event type = %v, want Error", errEvt["type"])
+	}
+
+	if waitForLogEvent(lm, "DEEPGRAM_REALTIME_STARTED", 2*time.Second) == nil {
+		t.Fatal("DEEPGRAM_REALTIME_STARTED never emitted")
+	}
+	failed := waitForLogEvent(lm, "DEEPGRAM_REALTIME_CONNECT_FAILED", 2*time.Second)
+	if failed == nil {
+		t.Fatal("DEEPGRAM_REALTIME_CONNECT_FAILED never emitted")
+	}
+	if failed.Message == "DeepgramRealtimeConnectFailed" {
+		t.Error("message is the raw template name — template not registered")
+	}
+	if eng, _ := failed.AdditionalData["engine"].(string); eng != "eou-320" {
+		t.Errorf("engine = %v, want eou-320 (default)", eng)
+	}
+}
+
+// TestDGSessionStats verifies the mutex-guarded session counters used
+// by both Deepgram handlers (run with -race to catch regressions).
+func TestDGSessionStats(t *testing.T) {
+	s := &dgSessionStats{}
+
+	if got := s.addAudio(100); got != 1 {
+		t.Errorf("first addAudio returned %d, want 1", got)
+	}
+	if got := s.addAudio(200); got != 2 {
+		t.Errorf("second addAudio returned %d, want 2", got)
+	}
+	s.markResult()
+
+	bytes, frames, first, last := s.snapshot()
+	if bytes != 300 {
+		t.Errorf("bytes = %d, want 300", bytes)
+	}
+	if frames != 2 {
+		t.Errorf("frames = %d, want 2", frames)
+	}
+	if first.IsZero() {
+		t.Error("firstAudioAt should be set after addAudio")
+	}
+	if last.IsZero() {
+		t.Error("lastResultAt should be set after markResult")
+	}
+	if last.Before(first) {
+		t.Errorf("lastResultAt %v before firstAudioAt %v", last, first)
+	}
+
+	// Concurrent access must not race (verify with go test -race).
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.addAudio(32)
+			s.markResult()
+			_, _, _, _ = s.snapshot()
+		}()
+	}
+	wg.Wait()
+	if _, frames, _, _ := s.snapshot(); frames != 10 {
+		t.Errorf("frames after concurrent adds = %d, want 10", frames)
 	}
 }

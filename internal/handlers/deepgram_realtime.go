@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	ws "github.com/fasthttp/websocket"
@@ -52,14 +53,11 @@ func (h *DeepgramRealtimeHandler) Upgrade() fiber.Handler {
 }
 
 type dgRealtimeSession struct {
-	requestID       string
-	ws              *websocket.Conn
-	sidecar         *ws.Conn
-	modelMeta       dgModelMeta
-	speechEndF      bool
-	totalAudioBytes int
-	firstAudioAt    time.Time
-	lastResultAt    time.Time
+	requestID string
+	ws        *websocket.Conn
+	sidecar   *ws.Conn
+	modelMeta dgModelMeta
+	stats     *dgSessionStats
 }
 
 func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
@@ -94,12 +92,26 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 		"endpoint":        "/v2/listen",
 		"ip":              c.IP(),
 		"request_id":      requestID,
+		"user_agent":      c.Headers("User-Agent"),
 		"engine":          model,
 		"interim_results": interimResults,
+		"language":        c.Query("language", "en"),
+		"sample_rate":     c.Query("sample_rate", "16000"),
+		"encoding":        c.Query("encoding", "linear16"),
+		"itn":             c.Query("itn", "true") != "false",
+		"vad":             c.Query("vad", ""),
 	}))
 
 	sidecarConn, _, err := ws.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
+		slog.Error("[DG-RT] failed to connect to sidecar realtime WebSocket", "error", err, "request_id", requestID)
+		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_CONNECT_FAILED", "DeepgramRealtimeConnectFailed", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/v2/listen",
+			"ip":         c.IP(),
+			"request_id": requestID,
+			"engine":     model,
+			"url":        u.String(),
+		}, err))
 		_ = c.WriteJSON(fiber.Map{"type": "Error", "message": "transcription service unavailable"})
 		return
 	}
@@ -111,6 +123,7 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 		requestID: requestID,
 		ws:        c,
 		sidecar:   sidecarConn,
+		stats:     &dgSessionStats{},
 		modelMeta: dgModelMeta{
 			RequestID: requestID,
 			ModelInfo: map[string]string{
@@ -134,23 +147,49 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	})
 
 	errCh := make(chan error, 2)
+	// done is closed when the session ends — see DeepgramHandler.handle
+	// for why teardown-induced client read errors are not logged.
+	done := make(chan struct{})
+	// wg tracks both forwarding goroutines — see DeepgramHandler.handle
+	// for why handle must not return while either is still running.
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// Client → sidecar: forward raw binary audio verbatim
 	go func() {
+		defer wg.Done()
 		for {
 			mt, msg, err := c.ReadMessage()
 			if err != nil {
+				select {
+				case <-done:
+					// Teardown-induced: session already ended.
+				default:
+					slog.Info("[DG-RT] Client read error (connection closed?)", "error", err, "request_id", requestID)
+					h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_CLIENT_READ_ERROR", "DeepgramRealtimeClientReadError", slog.LevelWarn, map[string]interface{}{
+						"endpoint":    "/v2/listen",
+						"ip":          c.IP(),
+						"request_id":  requestID,
+						"engine":      model,
+						"total_bytes": sess.stats.bytes(),
+					}, err))
+				}
 				errCh <- err
 				return
 			}
 			if mt == websocket.BinaryMessage {
 				if len(msg) > 0 {
-					sess.totalAudioBytes += len(msg)
-					if sess.firstAudioAt.IsZero() {
-						sess.firstAudioAt = time.Now()
-					}
+					sess.stats.addAudio(len(msg))
 				}
 				if err := sidecarConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+					slog.Error("[DG-RT] Failed to forward audio to sidecar", "error", err, "request_id", requestID)
+					h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_FORWARD_FAILED", "DeepgramRealtimeForwardFailed", slog.LevelError, map[string]interface{}{
+						"endpoint":    "/v2/listen",
+						"ip":          c.IP(),
+						"request_id":  requestID,
+						"engine":      model,
+						"total_bytes": sess.stats.bytes(),
+					}, err))
 					errCh <- err
 					return
 				}
@@ -166,6 +205,7 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 
 	// Sidecar → client: translate JSON events → Deepgram event schema
 	go func() {
+		defer wg.Done()
 		for {
 			_, msg, err := sidecarConn.ReadMessage()
 			if err != nil {
@@ -178,14 +218,24 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 
 	<-errCh
 
+	// Signal teardown + wait for both goroutines to exit — see
+	// DeepgramHandler.handle for the full rationale (including why
+	// SetReadDeadline is needed to unblock the client read goroutine).
+	close(done)
+	_ = sidecarConn.Close()
+	_ = c.SetReadDeadline(time.Now())
+	_ = c.Close()
+	wg.Wait()
+
 	// Log usage — processing time = first audio frame → last final result
+	totalAudioBytes, frameCount, firstAudioAt, lastResultAt := sess.stats.snapshot()
 	audioDurationMs := 0
-	if sess.totalAudioBytes > 0 {
-		audioDurationMs = sess.totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+	if totalAudioBytes > 0 {
+		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
 	}
 	processTimeMs := 0
-	if !sess.firstAudioAt.IsZero() && !sess.lastResultAt.IsZero() {
-		processTimeMs = int(sess.lastResultAt.Sub(sess.firstAudioAt).Milliseconds())
+	if !firstAudioAt.IsZero() && !lastResultAt.IsZero() {
+		processTimeMs = int(lastResultAt.Sub(firstAudioAt).Milliseconds())
 	}
 	userID, _ := c.Locals("user_id").(string)
 	apiKeyID, _ := c.Locals("api_key_id").(string)
@@ -193,16 +243,19 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 		audioDurationMs, processTimeMs, false)
 
 	slog.Info("[DG-RT] Deepgram-realtime session ended", "request_id", requestID,
-		"audio_bytes", sess.totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"process_ms", processTimeMs)
+		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
+		"process_ms", processTimeMs, "frames", frameCount)
 
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_ENDED", "DeepgramRealtimeEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/v2/listen",
 		"ip":                c.IP(),
 		"request_id":        requestID,
-		"audio_bytes":       sess.totalAudioBytes,
+		"user_agent":        c.Headers("User-Agent"),
+		"engine":            model,
+		"audio_bytes":       totalAudioBytes,
 		"audio_duration_ms": audioDurationMs,
 		"process_ms":        processTimeMs,
+		"frame_count":       frameCount,
 		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
 	}))
 }
@@ -271,7 +324,7 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 	case "final":
 		text, _ := ev["text"].(string)
 		isSpeechFinal, _ := ev["speech_final"].(bool)
-		sess.lastResultAt = time.Now()
+		sess.stats.markResult()
 		redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
 		if piiErr != nil {
 			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
@@ -318,7 +371,6 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 				"channel":       []int{0},
 				"last_word_end": asFloat(ev["time"]),
 			})
-			sess.speechEndF = true
 		}
 	case "end_of_turn":
 		// already covered by speech_final final
@@ -328,9 +380,17 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 	case "done":
 		// Connection will close naturally
 	case "error":
+		errMsg := asString(ev["message"])
+		slog.Error("[DG-RT] Sidecar error", "message", errMsg, "request_id", sess.requestID)
+		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_SESSION_ERROR", "DeepgramRealtimeSessionError", slog.LevelError, map[string]interface{}{
+			"endpoint":   "/v2/listen",
+			"ip":         sess.ws.IP(),
+			"request_id": sess.requestID,
+			"engine":     sess.modelMeta.ModelInfo["name"],
+		}, errMsg))
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":    "Error",
-			"message": asString(ev["message"]),
+			"message": errMsg,
 		})
 	}
 }

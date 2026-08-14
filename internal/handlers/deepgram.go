@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sync"
 	"time"
 
 	ws "github.com/fasthttp/websocket"
@@ -210,6 +211,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"endpoint":        "/v1/listen",
 		"ip":              c.IP(),
 		"request_id":      requestID,
+		"user_agent":      c.Headers("User-Agent"),
+		"model":           modelMeta.ModelInfo["name"],
 		"interim_results": interimResults,
 		"language":        c.Query("language", "en"),
 		"sample_rate":     c.Query("sample_rate", "16000"),
@@ -217,18 +220,39 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		"diarize":         c.Query("diarize", "false") == "true",
 		"itn":             itnEnabled(c, h.defaultITN),
 	}))
-	var totalAudioBytes int
-	var firstAudioAt time.Time
-	var lastResultAt time.Time
+	stats := &dgSessionStats{}
 	errCh := make(chan error, 2)
+	// done is closed when the session ends (after <-errCh). The client
+	// read goroutine checks it before emitting CLIENT_READ_ERROR so a
+	// read error caused by our own c.Close() during normal teardown
+	// doesn't produce a spurious event — the event only fires when the
+	// client disconnect is what ended the session.
+	done := make(chan struct{})
+	// wg tracks both forwarding goroutines. handle must not return while
+	// either is still running: the fiber websocket wrapper releases the
+	// client conn to a pool on return, and a lingering goroutine would
+	// race with that reuse.
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// Client → Sidecar: forward binary audio and translate control messages
 	go func() {
-		var frameCount int
+		defer wg.Done()
 		for {
 			msgType, msg, err := c.ReadMessage()
 			if err != nil {
-				slog.Info("[DG] Client read error (connection closed?)", "error", err, "request_id", requestID)
+				select {
+				case <-done:
+					// Teardown-induced: session already ended.
+				default:
+					slog.Info("[DG] Client read error (connection closed?)", "error", err, "request_id", requestID)
+					h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_CLIENT_READ_ERROR", "DeepgramClientReadError", slog.LevelWarn, map[string]interface{}{
+						"endpoint":    "/v1/listen",
+						"ip":          c.IP(),
+						"request_id":  requestID,
+						"total_bytes": stats.bytes(),
+					}, err))
+				}
 				errCh <- err
 				return
 			}
@@ -248,12 +272,12 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 							// with a Results event carrying from_finalize=true.
 							// The sidecar transcribes the buffered audio and
 							// emits a final event WITHOUT closing the session.
-							slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
+							slog.Info("[DG] Finalize from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"Finalize"}`))
 							continue
 						case "CloseStream":
-							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", frameCount, "total_bytes", totalAudioBytes)
+							slog.Info("[DG] CloseStream from client, forwarding to sidecar", "request_id", requestID, "total_frames", stats.frames(), "total_bytes", stats.bytes())
 							_ = sidecarConn.WriteMessage(ws.TextMessage,
 								[]byte(`{"type":"CloseStream"}`))
 							continue
@@ -269,17 +293,19 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			}
 
 			// Binary audio frame
-			frameCount++
-			totalAudioBytes += len(msg)
-			if frameCount == 1 {
-				firstAudioAt = time.Now()
-			}
+			frameCount := stats.addAudio(len(msg))
 			if frameCount%50 == 1 {
-				slog.Info("[DG] Forwarding audio to sidecar", "frame", frameCount, "bytes", len(msg), "total_bytes", totalAudioBytes, "request_id", requestID)
+				slog.Info("[DG] Forwarding audio to sidecar", "frame", frameCount, "bytes", len(msg), "total_bytes", stats.bytes(), "request_id", requestID)
 			}
 
 			if err := sidecarConn.WriteMessage(msgType, msg); err != nil {
 				slog.Error("[DG] Failed to forward audio to sidecar", "error", err, "request_id", requestID)
+				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_FORWARD_FAILED", "DeepgramForwardFailed", slog.LevelError, map[string]interface{}{
+					"endpoint":    "/v1/listen",
+					"ip":          c.IP(),
+					"request_id":  requestID,
+					"total_bytes": stats.bytes(),
+				}, err))
 				errCh <- err
 				return
 			}
@@ -288,6 +314,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	// Sidecar → Client: translate internal events to Deepgram format
 	go func() {
+		defer wg.Done()
 		for {
 			_, msg, err := sidecarConn.ReadMessage()
 			if err != nil {
@@ -368,7 +395,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					errCh <- err
 					return
 				}
-				lastResultAt = time.Now()
+				stats.markResult()
 				// Response-sent event → Loki. Transcript is PII-redacted.
 				finalFields := map[string]interface{}{
 					"endpoint":      "/v1/listen",
@@ -420,7 +447,20 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	<-errCh
 
+	// Signal teardown (suppresses spurious CLIENT_READ_ERROR), then
+	// unblock the sibling goroutine and wait for both to exit before
+	// returning (see wg comment above). Note: c.Close() is a no-op on
+	// fasthttp hijacked conns while the handler is running, so the
+	// client read goroutine is unblocked via a past read deadline
+	// instead; closing sidecarConn (a dialed conn) really closes it.
+	close(done)
+	_ = sidecarConn.Close()
+	_ = c.SetReadDeadline(time.Now())
+	_ = c.Close()
+	wg.Wait()
+
 	// Log usage — processing time = first audio frame → last final result
+	totalAudioBytes, frameCount, firstAudioAt, lastResultAt := stats.snapshot()
 	audioDurationMs := 0
 	if totalAudioBytes > 0 {
 		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
@@ -436,17 +476,72 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	slog.Info("[DG] Deepgram-compat session ended", "request_id", requestID,
 		"audio_bytes", totalAudioBytes, "audio_duration_ms", audioDurationMs,
-		"process_ms", processTimeMs)
+		"process_ms", processTimeMs, "frames", frameCount)
 
 	h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ENDED", "DeepgramSessionEnded", slog.LevelInfo, map[string]interface{}{
 		"endpoint":          "/v1/listen",
 		"ip":                c.IP(),
 		"request_id":        requestID,
+		"user_agent":        c.Headers("User-Agent"),
+		"model":             modelMeta.ModelInfo["name"],
 		"audio_bytes":       totalAudioBytes,
 		"audio_duration_ms": audioDurationMs,
 		"process_ms":        processTimeMs,
+		"frame_count":       frameCount,
 		"realtime_x":        realtimeFactor(audioDurationMs, processTimeMs),
 	}))
+}
+
+// dgSessionStats tracks per-session counters shared between the two
+// forwarding goroutines and the session-end log path. All fields are
+// mutex-guarded — the client→sidecar goroutine writes audio stats while
+// the sidecar→client goroutine records result timing, and the main
+// handler reads a snapshot after the session ends.
+type dgSessionStats struct {
+	mu           sync.Mutex
+	audioBytes   int
+	frameCount   int
+	firstAudioAt time.Time
+	lastResultAt time.Time
+}
+
+// addAudio records one binary audio frame and returns the running
+// frame count (1-based).
+func (s *dgSessionStats) addAudio(n int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frameCount++
+	s.audioBytes += n
+	if s.firstAudioAt.IsZero() {
+		s.firstAudioAt = time.Now()
+	}
+	return s.frameCount
+}
+
+// markResult records the time a final result was delivered to the client.
+func (s *dgSessionStats) markResult() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastResultAt = time.Now()
+}
+
+func (s *dgSessionStats) bytes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.audioBytes
+}
+
+func (s *dgSessionStats) frames() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.frameCount
+}
+
+// snapshot returns a consistent view of all counters for session-end logging.
+func (s *dgSessionStats) snapshot() (audioBytes, frameCount int, firstAudioAt, lastResultAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.audioBytes, s.frameCount, s.firstAudioAt, s.lastResultAt
 }
 
 // itnEnabled returns whether ITN is on for this WS request, factoring

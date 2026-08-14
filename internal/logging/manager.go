@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,9 +28,11 @@ type LogManager struct {
 	LokiClient   *LokiClient
 	LokiEnabled  bool
 	LogChannel   chan *LoggingFormat
+	quit         chan struct{}
 	wg           sync.WaitGroup
 	printToLocal bool
 	serverID     string
+	closed       atomic.Bool
 }
 
 // LoggingFormat is the wire-format of a single event. It serializes to
@@ -63,6 +66,7 @@ func NewLogManager(lokiClient *LokiClient, lokiEnabled bool, serverID ...string)
 		LokiClient:   lokiClient,
 		LokiEnabled:  lokiEnabled,
 		LogChannel:   make(chan *LoggingFormat, 512),
+		quit:         make(chan struct{}),
 		printToLocal: true,
 		serverID:     sid,
 	}
@@ -139,10 +143,26 @@ func (lm *LogManager) formatTemplate(templateName string, args ...interface{}) s
 // is full we log a single warning locally and drop the entry. This
 // guarantees the request path is never stalled by Loki latency or
 // downtime.
+//
+// After CloseLogManager the channel is closed; in-flight handlers
+// (e.g. hijacked WebSocket sessions that outlive the HTTP server
+// shutdown) may still call SendLog. Those logs are dropped, never
+// panics — a logging path must not crash a request.
 func (lm *LogManager) SendLog(log *LoggingFormat) {
+	if lm.closed.Load() {
+		return
+	}
 	if lm.printToLocal {
 		log.Print()
 	}
+	// The closed-check above races with CloseLogManager by design;
+	// recover the send-on-closed-channel panic and drop instead.
+	defer func() {
+		if recover() != nil {
+			slog.Warn("log channel closed, dropping log",
+				"type", log.Type, "message", log.Message)
+		}
+	}()
 	select {
 	case lm.LogChannel <- log:
 	default:
@@ -154,36 +174,55 @@ func (lm *LogManager) SendLog(log *LoggingFormat) {
 }
 
 // processLogChannel is the single consumer goroutine. It runs until
-// LogChannel is closed (via CloseLogManager). When Loki is disabled
-// it still drains the channel so the buffer doesn't fill, but skips
-// the network call.
+// quit is closed (via CloseLogManager), draining any entries still
+// buffered at shutdown before returning. When Loki is disabled it
+// still drains the channel so the buffer doesn't fill, but skips the
+// network call.
 func (lm *LogManager) processLogChannel() {
 	defer lm.wg.Done()
-	for log := range lm.LogChannel {
-		if !lm.LokiEnabled || lm.LokiClient == nil {
-			continue
-		}
-		labels := map[string]string{
-			"job":       os.Getenv("LOKI_JOB"),
-			"server_id": lm.serverID,
-			"type":      log.Type,
-			"level":     log.Level.String(),
-		}
-		// If the event declared an "endpoint" field, promote it to a
-		// label so it can be filtered cheaply in Grafana.
-		if log.AdditionalData != nil {
-			if ep, ok := log.AdditionalData["endpoint"].(string); ok && ep != "" {
-				labels["endpoint"] = ep
+	for {
+		select {
+		case log := <-lm.LogChannel:
+			lm.ship(log)
+		case <-lm.quit:
+			// Drain whatever is still buffered, then exit.
+			for {
+				select {
+				case log := <-lm.LogChannel:
+					lm.ship(log)
+				default:
+					return
+				}
 			}
 		}
-		entry := LogEntry{
-			Timestamp: log.Timestamp,
-			Line:      log.String(),
+	}
+}
+
+// ship pushes a single entry to Loki (no-op when Loki is disabled).
+func (lm *LogManager) ship(log *LoggingFormat) {
+	if !lm.LokiEnabled || lm.LokiClient == nil {
+		return
+	}
+	labels := map[string]string{
+		"job":       os.Getenv("LOKI_JOB"),
+		"server_id": lm.serverID,
+		"type":      log.Type,
+		"level":     log.Level.String(),
+	}
+	// If the event declared an "endpoint" field, promote it to a
+	// label so it can be filtered cheaply in Grafana.
+	if log.AdditionalData != nil {
+		if ep, ok := log.AdditionalData["endpoint"].(string); ok && ep != "" {
+			labels["endpoint"] = ep
 		}
-		if err := lm.LokiClient.PushLog(labels, entry); err != nil {
-			slog.Error("failed to send log to Loki",
-				"error", err, "type", log.Type)
-		}
+	}
+	entry := LogEntry{
+		Timestamp: log.Timestamp,
+		Line:      log.String(),
+	}
+	if err := lm.LokiClient.PushLog(labels, entry); err != nil {
+		slog.Error("failed to send log to Loki",
+			"error", err, "type", log.Type)
 	}
 }
 
@@ -228,8 +267,12 @@ func (lf *LoggingFormat) String() string {
 	return string(data)
 }
 
-// CloseLogManager closes the log channel and waits for the consumer
-// goroutine to drain. Safe to call multiple times.
+// CloseLogManager signals the consumer goroutine to drain and exit,
+// then waits for it. Safe to call multiple times. LogChannel is never
+// closed — a quit signal is used instead — so concurrent/in-flight
+// SendLog callers (e.g. hijacked WebSocket handlers that outlive the
+// HTTP server shutdown) can never panic on send-to-closed-channel;
+// their logs are simply dropped (see SendLog's closed check).
 type closeOnce struct {
 	sync.Once
 }
@@ -240,7 +283,10 @@ func (lm *LogManager) CloseLogManager() {
 	once, _ := closeState.LoadOrStore(lm, &closeOnce{})
 	co := once.(*closeOnce)
 	co.Do(func() {
-		close(lm.LogChannel)
+		lm.closed.Store(true)
+		if lm.quit != nil {
+			close(lm.quit)
+		}
 		lm.wg.Wait()
 	})
 }
