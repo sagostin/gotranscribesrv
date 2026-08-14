@@ -21,7 +21,9 @@ type Voice struct {
 	// write-through cache: LoadVoiceData serves from disk when present and
 	// falls back to this blob (re-materializing the file) when not.
 	// SyncVoiceStorage backfills this column from pre-existing disk files
-	// at startup and forward-fills missing disk files from the blob.
+	// at startup and forward-fills missing disk files from the blob. It
+	// also truncates oversize legacy embeddings (>125 frames, cloned on
+	// FluidAudio ≤ 0.13.6) down to the 125-frame cap 0.15.5 enforces.
 	EmbeddingData []byte         `json:"-" gorm:"type:bytea"`
 	SizeBytes     int64          `json:"size_bytes"`             // Embedding file size
 	SampleRate    int            `json:"sample_rate,omitempty"`  // Source audio sample rate

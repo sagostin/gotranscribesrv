@@ -20,6 +20,31 @@ import (
 	"gorm.io/gorm"
 )
 
+// PocketTTS voice-prompt geometry, mirroring FluidAudio 0.15.5's
+// PocketTtsVoiceCloner: embeddings are packed little-endian Float32
+// [frames × 1024], and loadVoice rejects prompts over 125 frames
+// ("Voice file too large: N frames (max 125)"). FluidAudio ≤ 0.13.6
+// allowed up to 250 frames, so voices cloned before the 0.15.5 upgrade
+// can exceed the new cap. The over-cap tail is just extra reference
+// audio (the new cloner itself truncates input to the first 10s), so
+// truncating to the first maxVoiceEmbeddingFrames frames is lossless.
+const (
+	voiceEmbeddingFrameBytes = 1024 * 4 // one frame: 1024 float32
+	maxVoiceEmbeddingFrames  = 125
+	maxVoiceEmbeddingBytes   = voiceEmbeddingFrameBytes * maxVoiceEmbeddingFrames // 512_000
+)
+
+// truncateVoiceEmbedding caps a PocketTTS voice embedding at
+// maxVoiceEmbeddingFrames frames, returning the (possibly shortened)
+// data and whether it changed. Data whose length is not a whole number
+// of frames is left untouched — that's corruption, not oversize.
+func truncateVoiceEmbedding(data []byte) ([]byte, bool) {
+	if len(data) <= maxVoiceEmbeddingBytes || len(data)%voiceEmbeddingFrameBytes != 0 {
+		return data, false
+	}
+	return data[:maxVoiceEmbeddingBytes], true
+}
+
 // VoiceHandler manages per-user voice cloning and listing.
 type VoiceHandler struct {
 	db        *gorm.DB
@@ -510,8 +535,13 @@ func (h *VoiceHandler) LoadVoiceData(voiceID, userID uuid.UUID) (string, error) 
 }
 
 // SyncVoiceStorage reconciles DB blobs and per-node disk files at startup.
-// Safe to run on every node boot — all three directions are idempotent:
+// Safe to run on every node boot — all four directions are idempotent:
 //
+//   - Truncate: oversize embeddings (>125 frames, from voices cloned on
+//     FluidAudio ≤ 0.13.6 which allowed 250 frames) are cut to the first
+//     125 frames in both the DB blob and the disk file. 0.15.5's loader
+//     hard-rejects these, and the dropped tail is only extra reference
+//     audio. Runs first so the passes below propagate repaired bytes.
 //   - Backfill (disk → DB): rows with an empty embedding_data blob but an
 //     existing local file get the blob stored. Covers voices cloned before
 //     the blob column existed and pre-existing files on this node.
@@ -527,18 +557,64 @@ func (h *VoiceHandler) SyncVoiceStorage() {
 		return
 	}
 
-	var backfilled, forwardFilled, failed int
+	var truncated, backfilled, forwardFilled, failed int
 	for _, voice := range voices {
 		absPath := filepath.Join(h.voicesDir, voice.FilePath)
-		_, diskErr := os.ReadFile(absPath)
+		diskData, diskErr := os.ReadFile(absPath)
 		diskOK := diskErr == nil
+
+		// Repair oversize legacy embeddings before anything else reads them.
+		if trimmed, ok := truncateVoiceEmbedding(voice.EmbeddingData); ok {
+			if err := h.db.Model(&models.Voice{}).Where("id = ?", voice.ID).
+				Updates(map[string]interface{}{
+					"embedding_data": trimmed,
+					"size_bytes":     int64(len(trimmed)),
+				}).Error; err != nil {
+				slog.Warn("voice storage sync: truncation failed", "voice_id", voice.ID, "error", err)
+				failed++
+				continue
+			}
+			voice.EmbeddingData = trimmed
+			if diskOK {
+				if err := os.WriteFile(absPath, trimmed, 0644); err != nil {
+					slog.Warn("voice storage sync: truncation disk rewrite failed", "voice_id", voice.ID, "path", absPath, "error", err)
+				} else {
+					diskData = trimmed
+				}
+			}
+			truncated++
+			slog.Info("voice storage sync: truncated oversize legacy voice embedding to 125 frames",
+				"voice_id", voice.ID, "user_id", voice.UserID)
+		} else if len(voice.EmbeddingData) > maxVoiceEmbeddingBytes {
+			// Oversize but not a whole number of frames — corrupt, leave alone.
+			slog.Warn("voice storage sync: embedding blob has invalid size, skipping",
+				"voice_id", voice.ID, "size_bytes", len(voice.EmbeddingData))
+		}
+
+		// Blob empty but disk file oversize — repair the file so the
+		// backfill below uploads the truncated bytes.
+		if len(voice.EmbeddingData) == 0 && diskOK {
+			if trimmed, ok := truncateVoiceEmbedding(diskData); ok {
+				if err := os.WriteFile(absPath, trimmed, 0644); err != nil {
+					slog.Warn("voice storage sync: disk truncation failed", "voice_id", voice.ID, "path", absPath, "error", err)
+					failed++
+					continue
+				}
+				diskData = trimmed
+				truncated++
+				slog.Info("voice storage sync: truncated oversize legacy voice file to 125 frames",
+					"voice_id", voice.ID, "path", absPath)
+			} else if len(diskData) > maxVoiceEmbeddingBytes {
+				slog.Warn("voice storage sync: embedding file has invalid size, skipping",
+					"voice_id", voice.ID, "path", absPath, "size_bytes", len(diskData))
+			}
+		}
 
 		switch {
 		case len(voice.EmbeddingData) == 0 && diskOK:
 			// Backfill: disk file exists but DB blob missing.
-			data, _ := os.ReadFile(absPath)
 			if err := h.db.Model(&models.Voice{}).Where("id = ?", voice.ID).
-				Update("embedding_data", data).Error; err != nil {
+				Update("embedding_data", diskData).Error; err != nil {
 				slog.Warn("voice storage sync: backfill failed", "voice_id", voice.ID, "error", err)
 				failed++
 				continue
@@ -563,15 +639,17 @@ func (h *VoiceHandler) SyncVoiceStorage() {
 
 	orphansRemoved := h.sweepOrphanedVoiceFiles()
 
-	if backfilled > 0 || forwardFilled > 0 || orphansRemoved > 0 || failed > 0 {
+	if truncated > 0 || backfilled > 0 || forwardFilled > 0 || orphansRemoved > 0 || failed > 0 {
 		slog.Info("voice storage sync completed",
-			"total_voices", len(voices), "backfilled", backfilled,
+			"total_voices", len(voices), "truncated", truncated,
+			"backfilled", backfilled,
 			"forward_filled", forwardFilled, "orphans_removed", orphansRemoved,
 			"failed", failed)
 	}
 	h.lm.SendLog(h.lm.BuildLog("VOICE_STORAGE_SYNCED", "VoiceStorageSynced", slog.LevelInfo, map[string]interface{}{
 		"endpoint":        "startup",
 		"total_voices":    len(voices),
+		"truncated":       truncated,
 		"backfilled":      backfilled,
 		"forward_filled":  forwardFilled,
 		"orphans_removed": orphansRemoved,
