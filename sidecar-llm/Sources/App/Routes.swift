@@ -124,7 +124,7 @@ func routes(_ app: Application, context: ServerContext) throws {
     app.get("models", ":id", "status") { req async throws -> Response in
         guard let id = req.parameters.get("id") else { throw Abort(.badRequest) }
         guard let entry = await context.manager.entries.first(where: { $0.id == id }) else {
-            return errorResponse(.notFound, message: "Unknown model: \(id)", type: "invalid_request_error")
+            return unknownModelResponse(id, entries: await context.manager.entries)
         }
         let status: ModelStatus
         switch entry.kind {
@@ -143,7 +143,7 @@ func routes(_ app: Application, context: ServerContext) throws {
     app.post("models", ":id", "download") { req async throws -> Response in
         guard let id = req.parameters.get("id") else { throw Abort(.badRequest) }
         guard let entry = await context.manager.entries.first(where: { $0.id == id }) else {
-            return errorResponse(.notFound, message: "Unknown model: \(id)", type: "invalid_request_error")
+            return unknownModelResponse(id, entries: await context.manager.entries)
         }
         Task {
             do {
@@ -164,7 +164,7 @@ func routes(_ app: Application, context: ServerContext) throws {
     app.post("models", ":id", "load") { req async throws -> Response in
         guard let id = req.parameters.get("id") else { throw Abort(.badRequest) }
         guard let entry = await context.manager.entries.first(where: { $0.id == id }) else {
-            return errorResponse(.notFound, message: "Unknown model: \(id)", type: "invalid_request_error")
+            return unknownModelResponse(id, entries: await context.manager.entries)
         }
         do {
             switch (entry.kind, entry.runtime) {
@@ -190,7 +190,7 @@ func routes(_ app: Application, context: ServerContext) throws {
     app.post("models", ":id", "unload") { req async throws -> Response in
         guard let id = req.parameters.get("id") else { throw Abort(.badRequest) }
         guard let entry = await context.manager.entries.first(where: { $0.id == id }) else {
-            return errorResponse(.notFound, message: "Unknown model: \(id)", type: "invalid_request_error")
+            return unknownModelResponse(id, entries: await context.manager.entries)
         }
         switch (entry.kind, entry.runtime) {
         case (.chat, .coremlLLM): await context.coremlLLM?.unload(id: id)
@@ -206,7 +206,7 @@ func routes(_ app: Application, context: ServerContext) throws {
     app.post("v1", "chat", "completions") { req async throws -> Response in
         let chatRequest = try req.content.decode(ChatCompletionRequest.self)
         guard let entry = await context.manager.entries.first(where: { $0.id == chatRequest.model }) else {
-            return errorResponse(.notFound, message: "Unknown model: \(chatRequest.model)", type: "invalid_request_error")
+            return unknownModelResponse(chatRequest.model, entries: await context.manager.entries)
         }
 
         let entryMax = entry.maxNewTokens
@@ -536,11 +536,27 @@ func jsonResponse(_ object: [String: Any], status: HTTPResponseStatus = .ok) -> 
     return response
 }
 
-/// OpenAI-style error envelope.
-func errorResponse(_ status: HTTPResponseStatus, message: String, type: String) -> Response {
-    jsonResponse(
-        ["error": ["message": message, "type": type, "code": NSNull()]],
+/// OpenAI-style error envelope. `code` is machine-readable (e.g.
+/// "model_not_found") so gateways and SDKs can branch on it — and so the
+/// Go gateway's request logs show a non-empty error_code.
+func errorResponse(_ status: HTTPResponseStatus, message: String, type: String, code: String? = nil) -> Response {
+    let codeValue: Any = code ?? NSNull()
+    return jsonResponse(
+        ["error": ["message": message, "type": type, "code": codeValue]],
         status: status)
+}
+
+/// 404 for an unregistered model id. The message lists the available ids so
+/// misconfigured clients (e.g. an SDK defaulting to "gpt-4o-mini") can see
+/// exactly what this server serves, straight from the error body.
+func unknownModelResponse(_ id: String, entries: [ModelRegistryEntry]) -> Response {
+    let available = entries.map(\.id).sorted()
+    let list = available.isEmpty ? "none configured" : available.joined(separator: ", ")
+    return errorResponse(
+        .notFound,
+        message: "Unknown model: \(id). Available models: \(list)",
+        type: "invalid_request_error",
+        code: "model_not_found")
 }
 
 func imagesDisabled() -> Response {

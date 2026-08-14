@@ -382,9 +382,8 @@ func responsesRoutes(_ app: Application, context: ServerContext) {
                 .badRequest, message: "malformed request body", type: "invalid_request_error")
         }
         guard let entry = await context.manager.entries.first(where: { $0.id == responsesRequest.model }) else {
-            return errorResponse(
-                .notFound, message: "Unknown model: \(responsesRequest.model)",
-                type: "invalid_request_error")
+            return unknownModelResponse(
+                responsesRequest.model, entries: await context.manager.entries)
         }
 
         let messages: [ChatMessage]

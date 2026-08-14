@@ -227,6 +227,8 @@ func (h *LLMHandler) Responses(c *fiber.Ctx) error {
 				"stream":            false,
 			})
 			h.persistResponse(userID, apiKeyIDStr, peek, respBody)
+		} else {
+			logUpstreamError(c, "llm_responses", peek.Model, resp.StatusCode, respBody)
 		}
 		return passthrough(c, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 	}
@@ -236,6 +238,7 @@ func (h *LLMHandler) Responses(c *fiber.Ctx) error {
 		defer resp.Body.Close()
 		defer cancel()
 		respBody, _ := io.ReadAll(resp.Body)
+		logUpstreamError(c, "llm_responses", peek.Model, resp.StatusCode, respBody)
 		return passthrough(c, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 	}
 

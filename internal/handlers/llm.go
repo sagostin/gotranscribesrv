@@ -162,6 +162,8 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 				"total_tokens":      prompt + completion,
 				"stream":            false,
 			})
+		} else {
+			logUpstreamError(c, endpoint, peek.Model, resp.StatusCode, respBody)
 		}
 		// Non-2xx: the usage middleware's failure path logs a RequestLog;
 		// the sidecar's OpenAI-style error envelope passes through verbatim.
@@ -175,6 +177,7 @@ func (h *LLMHandler) proxy(c *fiber.Ctx, path, endpoint string, dialect llmDiale
 		defer resp.Body.Close()
 		defer cancel()
 		respBody, _ := io.ReadAll(resp.Body)
+		logUpstreamError(c, endpoint, peek.Model, resp.StatusCode, respBody)
 		return passthrough(c, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 	}
 
@@ -362,6 +365,32 @@ func extractUsage(dialect llmDialect, body []byte) (prompt, completion int) {
 		}
 	}
 	return 0, 0
+}
+
+// upstreamErrorSummary pulls message/type/code out of a sidecar error
+// envelope (OpenAI-style {"error": {...}}) for logging.
+func upstreamErrorSummary(body []byte) (errType, message, code string) {
+	var env struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &env) == nil {
+		return env.Error.Type, env.Error.Message, env.Error.Code
+	}
+	return "", "", ""
+}
+
+// logUpstreamError warns with the sidecar's rejection reason so a 4xx/5xx
+// passthrough is diagnosable from gateway logs alone (the usage middleware
+// only records the status + code, not the message).
+func logUpstreamError(c *fiber.Ctx, endpoint, model string, status int, body []byte) {
+	errType, message, code := upstreamErrorSummary(body)
+	slog.WarnContext(c.UserContext(), "llm sidecar rejected request",
+		"endpoint", endpoint, "model", model, "status", status,
+		"error_type", errType, "error_code", code, "error_message", message)
 }
 
 // passthrough writes an upstream response to the client unchanged.
