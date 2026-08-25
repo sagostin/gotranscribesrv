@@ -550,7 +550,7 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 | `endpointing` | string | ms of silence before an automatic final (default: `300`; `"false"`/`"0"` disables). Note: Deepgram's spec default is 10ms — deliberately overridden here |
 | `vad_events` | string | `"true"` to receive `SpeechStarted` events (default: `"false"`) |
 | `utterance_end_ms` | string | Set to receive `UtteranceEnd` events after speech_final finals |
-| `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT v3 via CoreML) |
+| `model` | string | Accepted for compatibility (ignored — v1 always uses the buffered offline Parakeet TDT v3; for selectable streaming engines use [`/v2/listen`](#ws-v2listen-deepgram-compatible-real-time)) |
 | `punctuate` | string | Accepted for compatibility (ignored) |
 | `smart_format` | string | Accepted for compatibility (ignored) |
 
@@ -641,7 +641,7 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 {"type": "UtteranceEnd", "channel": [0], "last_word_end": 1.8}
 ```
 
-> **Compatibility note:** `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv uses Parakeet TDT v3 (CoreML/ANE). Automatic endpointing is driven by streaming Silero VAD in the sidecar; finals cover the current speech segment with stream-relative `start`/`duration`, and a segment's interims and its final share the same `start` (Deepgram semantics). Segments longer than ~10s without a pause are committed as rolling mid-utterance finals (`is_final: true`, `speech_final: false`) — concatenate all `is_final: true` transcripts for the complete text, per Deepgram's docs. The request id is also echoed as the `dg-request-id` header on the WS upgrade response.
+> **Compatibility note:** `model`, `punctuate`, and `smart_format` are accepted without error but ignored. This endpoint always runs the **buffered offline Parakeet TDT v3** engine (CoreML/ANE): audio is transcribed segment-by-segment with streaming Silero VAD endpointing — the engine is not selectable on v1. The true cache-aware streaming engines (Parakeet EOU, Nemotron, Parakeet Unified) are only available via [`/v2/listen`](#ws-v2listen-deepgram-compatible-real-time) or the sidecar's native `/stream/realtime`. Finals cover the current speech segment with stream-relative `start`/`duration`, and a segment's interims and its final share the same `start` (Deepgram semantics). Segments longer than ~10s without a pause are committed as rolling mid-utterance finals (`is_final: true`, `speech_final: false`) — concatenate all `is_final: true` transcripts for the complete text, per Deepgram's docs. The request id is also echoed as the `dg-request-id` header on the WS upgrade response.
 
 ---
 
@@ -911,7 +911,7 @@ Deepgram Nova-compatible WebSocket proxy using the real-time engine. Distinct fr
 
 | Query param       | Default | Description |
 |-------------------|---------|-------------|
-| `model`           | `nova-3` | Deepgram model name — mapped to a streaming engine: `nova-3`/`nova-2` → `eou-320`, `nova-3-unified` → `unified-320`, `2-nova` → `nemotron-560`. Pass an explicit engine ID (`eou-160`, `nemotron-1120`, …) to bypass the mapping. |
+| `model`           | `nova-3` | Deepgram model name — mapped to a streaming engine: `nova-3`/`nova-2`/`nova-2-eou` → `eou-320`, `nova-3-unified` → `unified-320`, `2-nova` → `nemotron-560`. Pass an explicit engine ID to bypass the mapping: `eou-160`/`eou-320`/`eou-1280` (Parakeet EOU 120M, built-in end-of-utterance), `nemotron-560`/`1120`/`2240`, `unified-320`/`640`/`1120`/`2080` (TDT v3 0.6B quality, streaming). Absent `model`/`engine`, the sidecar's `SIDECAR_REALTIME_ENGINE` env decides (fallback `eou-320`; see `/health.config.realtimeEngine`). |
 | `interim_results` | `false` | Emit interim `Results` events with `is_final=false` (default per Deepgram spec). Set `true` to receive partials. |
 | `encoding`        | `linear16` | `linear16` \| `mulaw` \| `alaw`. |
 | `sample_rate`     | `16000` | 8000 is upsampled 2×. |

@@ -2,12 +2,11 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,15 +96,28 @@ type dgWord struct {
 	Speaker *int `json:"speaker,omitempty"`
 }
 
+// dgMetadata is the terminal session-summary event. Shape follows the
+// live Deepgram captures (testing-proxy-dg/DEEPGRAM_PROTOCOL.md §5.2):
+// sha256 is the literal "incomplete" for streaming, models/model_info are
+// keyed by model UUID and omitted entirely when no audio was processed.
 type dgMetadata struct {
-	Type           string            `json:"type"`
-	TransactionKey string            `json:"transaction_key"`
-	RequestID      string            `json:"request_id"`
-	SHA256         string            `json:"sha256"`
-	Created        string            `json:"created"`
-	Duration       float64           `json:"duration"`
-	Channels       int               `json:"channels"`
-	ModelInfo      map[string]string `json:"model_info"`
+	Type           string                     `json:"type"`
+	TransactionKey string                     `json:"transaction_key"`
+	RequestID      string                     `json:"request_id"`
+	SHA256         string                     `json:"sha256"`
+	Created        string                     `json:"created"`
+	Duration       float64                    `json:"duration"`
+	Channels       int                        `json:"channels"`
+	Models         []string                   `json:"models,omitempty"`
+	ModelInfo      map[string]dgMetadataModel `json:"model_info,omitempty"`
+}
+
+// dgMetadataModel is one entry of the terminal Metadata's model_info map
+// (keyed by model UUID in Deepgram's wire format).
+type dgMetadataModel struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Arch    string `json:"arch"`
 }
 
 type dgModelMeta struct {
@@ -148,17 +160,30 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	// Deepgram spec: interim_results defaults to false.
 	interimResults := c.Query("interim_results", "false") == "true"
 	// Session language — stamped onto words[]/languages[] in every
-	// Results message (Deepgram includes both).
+	// Results message, but ONLY when the client asked for language
+	// detection (Deepgram omits both fields otherwise — confirmed in
+	// the dgproxy wire captures).
 	sessionLang := c.Query("language", "en")
+	detectLanguage := c.Query("detect_language", "false") == "true"
+	resultsLang := ""
+	if detectLanguage {
+		resultsLang = sessionLang
+	}
 	// utterance_end_ms / vad_events gate the UtteranceEnd and SpeechStarted
 	// server events respectively (Deepgram only emits them when requested).
 	utteranceEndMs := c.Query("utterance_end_ms") != ""
 	vadEvents := c.Query("vad_events", "false") == "true"
 
+	// Session start — echoed as `created` in the terminal Metadata event
+	// (Deepgram stamps the session's creation time, RFC3339 w/ millis).
+	sessionStart := time.Now().UTC()
+
 	modelMeta := dgModelMeta{
 		RequestID: requestID,
 		ModelInfo: map[string]string{
-			"name":    "parakeet-tdt-v3-coreml",
+			// Deepgram echoes the requested model (nova-2-phonecall →
+			// "2-phonecall-nova"); arch stays our real engine.
+			"name":    dgModelDisplayName(c.Query("model")),
 			"version": "2026-03-01",
 			"arch":    "parakeet-tdt",
 		},
@@ -166,24 +191,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		ModelUUID: dgModelUUID,
 	}
 
-	// Send Deepgram Metadata event on connection open. transaction_key is
-	// "deprecated" upstream; sha256 is included for strict-schema clients
-	// (hash of the request id — Deepgram hashes request internals, clients
-	// treat it as opaque).
-	meta := dgMetadata{
-		Type:           "Metadata",
-		TransactionKey: "deprecated",
-		RequestID:      requestID,
-		SHA256:         fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
-		Created:        time.Now().UTC().Format(time.RFC3339),
-		Duration:       0,
-		Channels:       1,
-		ModelInfo:      modelMeta.ModelInfo,
-	}
-	if err := c.WriteJSON(meta); err != nil {
-		slog.Error("failed to send Metadata event", "error", err, "request_id", requestID)
-		return
-	}
+	// NOTE: Deepgram sends NOTHING on connection open (confirmed in all
+	// dgproxy captures — the first server frame is a Results after audio
+	// starts). Metadata is strictly the terminal event, sent just before
+	// the close frame. Do not add an open-time Metadata here.
 
 	// Connect to audio sidecar /stream WebSocket
 	sidecarURL := h.sidecar.StreamURL()
@@ -452,7 +463,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					slog.Info("[DG] Skipping partial (interim_results=false)", "request_id", requestID)
 					continue
 				}
-				dgEvt := buildDGResults(evt, false, false, modelMeta, sessionLang)
+				dgEvt := buildDGResults(evt, false, false, modelMeta, resultsLang)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					slog.Error("[DG] Failed to write partial Results to client", "error", err, "request_id", requestID)
 					errCh <- dgSessionEnd{src: "client_write", err: err}
@@ -489,7 +500,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID,
 					"from_finalize", evt.FromFinalize, "words", len(evt.Words),
 					"start", evt.Start, "end", evt.End)
-				dgEvt := buildDGResults(evt, true, evt.SpeechFinal, modelMeta, sessionLang)
+				dgEvt := buildDGResults(evt, true, evt.SpeechFinal, modelMeta, resultsLang)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					slog.Error("[DG] Failed to write final Results to client", "error", err, "request_id", requestID)
 					errCh <- dgSessionEnd{src: "client_write", err: err}
@@ -528,7 +539,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				}
 				if err := c.WriteJSON(fiber.Map{
 					"type":          "UtteranceEnd",
-					"channel":       []int{0},
+					"channel":       []int{0, 1},
 					"last_word_end": evt.LastWordEnd,
 				}); err != nil {
 					slog.Error("[DG] Failed to write UtteranceEnd to client", "error", err, "request_id", requestID)
@@ -543,7 +554,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				}
 				if err := c.WriteJSON(fiber.Map{
 					"type":      "SpeechStarted",
-					"channel":   []int{0},
+					"channel":   []int{0, 1},
 					"timestamp": evt.Timestamp,
 				}); err != nil {
 					slog.Error("[DG] Failed to write SpeechStarted to client", "error", err, "request_id", requestID)
@@ -564,24 +575,37 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 			case "done":
 				slog.Info("[DG] Sidecar done, ending session", "request_id", requestID)
-				// Deepgram spec: CloseStream earns a terminal Metadata
-				// summary ("send the response, send a summary metadata
-				// object, then terminate") before the session ends.
-				if stats.closeStreamRequested() {
-					audioBytes, _, _, _ := stats.snapshot()
-					bps := audioBytesPerSecond(c.Query("encoding", "linear16"), c.Query("sample_rate", "16000"))
-					if err := c.WriteJSON(dgMetadata{
-						Type:           "Metadata",
-						TransactionKey: "deprecated",
-						RequestID:      requestID,
-						SHA256:         fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
-						Created:        time.Now().UTC().Format(time.RFC3339),
-						Duration:       float64(audioBytes) / bps,
-						Channels:       1,
-						ModelInfo:      modelMeta.ModelInfo,
-					}); err != nil {
-						slog.Warn("[DG] Failed to write terminal Metadata to client", "error", err, "request_id", requestID)
+				// Deepgram parity (confirmed in dgproxy captures): the
+				// terminal Metadata summary is the last message before
+				// the close frame on EVERY server-side termination — not
+				// just CloseStream (Deepgram also sends it on its net0001
+				// inactivity timeout). models/model_info are present only
+				// when audio was actually processed.
+				audioBytes, _, _, _ := stats.snapshot()
+				bps := audioBytesPerSecond(c.Query("encoding", "linear16"), c.Query("sample_rate", "16000"))
+				term := dgMetadata{
+					Type:           "Metadata",
+					TransactionKey: "deprecated",
+					RequestID:      requestID,
+					// Deepgram's streaming sha256 is the literal
+					// "incomplete" (no complete audio hash exists).
+					SHA256:   "incomplete",
+					Created:  sessionStart.Format("2006-01-02T15:04:05.000Z"),
+					Duration: float64(audioBytes) / bps,
+					Channels: 1,
+				}
+				if audioBytes > 0 {
+					term.Models = []string{modelMeta.ModelUUID}
+					term.ModelInfo = map[string]dgMetadataModel{
+						modelMeta.ModelUUID: {
+							Name:    modelMeta.ModelInfo["name"],
+							Version: modelMeta.ModelInfo["version"],
+							Arch:    modelMeta.ModelInfo["arch"],
+						},
 					}
+				}
+				if err := c.WriteJSON(term); err != nil {
+					slog.Warn("[DG] Failed to write terminal Metadata to client", "error", err, "request_id", requestID)
 				}
 				errCh <- dgSessionEnd{src: "sidecar_done"}
 				return
@@ -850,6 +874,8 @@ func audioBytesPerSecond(encoding, sampleRateStr string) float64 {
 }
 
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.
+// lang is empty unless the client passed detect_language=true — Deepgram
+// omits the language fields entirely otherwise (confirmed in captures).
 func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgModelMeta, lang string) dgResults {
 	words := make([]dgWord, 0, len(evt.Words))
 	for _, w := range evt.Words {
@@ -872,6 +898,19 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 		duration = 0
 	}
 
+	// Deepgram reports 0.0 confidence for empty transcripts (captured);
+	// 0.99 is a placeholder for real content until the sidecar supplies
+	// actual confidences.
+	confidence := 0.99
+	if evt.Text == "" {
+		confidence = 0.0
+	}
+
+	var languages []string
+	if lang != "" {
+		languages = []string{lang}
+	}
+
 	return dgResults{
 		Type:         "Results",
 		ChannelIndex: []int{0, 1}, // [channel index, channel count] — Deepgram mono
@@ -883,13 +922,28 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 			Alternatives: []dgAlternative{
 				{
 					Transcript: evt.Text,
-					Confidence: 0.99,
+					Confidence: confidence,
 					Words:      words,
-					Languages:  []string{lang},
+					Languages:  languages,
 				},
 			},
 		},
 		Metadata:     meta,
 		FromFinalize: evt.FromFinalize,
 	}
+}
+
+// dgModelDisplayName converts the client's requested model ID into the
+// name Deepgram echoes in model_info — e.g. "nova-2-phonecall" →
+// "2-phonecall-nova", "nova-2" → "2-nova" (captured on the wire).
+// Non-nova IDs echo verbatim; empty falls back to our engine name.
+func dgModelDisplayName(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return "parakeet-tdt-v3-coreml"
+	}
+	if strings.HasPrefix(m, "nova-") {
+		return strings.TrimPrefix(m, "nova-") + "-nova"
+	}
+	return m
 }

@@ -119,39 +119,26 @@ func startTestApp(t *testing.T, app *fiber.App) (wsURL string) {
 }
 
 // TestDeepgramFinalizeFlow verifies the Deepgram streaming protocol
-// surface of /v1/listen: Metadata carries the spec-required fields,
-// and a client Finalize message yields a Results event with
-// from_finalize=true (previously Finalize was silently dropped).
+// surface of /v1/listen: nothing is sent on connection open (Deepgram
+// parity — confirmed in dgproxy captures), a client Finalize message
+// yields a Results event with from_finalize=true, and the terminal
+// Metadata summary matches the captured wire shape.
 func TestDeepgramFinalizeFlow(t *testing.T) {
 	sidecarWS := startTestApp(t, mockSidecarApp())
 	lm := logging.NewLogManager(nil, false)
 	t.Cleanup(lm.CloseLogManager)
 	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
 
-	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?model=nova-2-phonecall", nil)
 	if err != nil {
 		t.Fatalf("dial handler: %v", err)
 	}
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	// 1. Metadata — spec requires transaction_key + sha256.
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
-	if meta["type"] != "Metadata" {
-		t.Errorf("first event type = %v, want Metadata", meta["type"])
-	}
-	if meta["transaction_key"] == nil {
-		t.Error("Metadata missing spec-required transaction_key")
-	}
-	if s, _ := meta["sha256"].(string); len(s) != 64 {
-		t.Errorf("Metadata sha256 = %q, want 64-char hex", s)
-	}
-	if meta["request_id"] == nil || meta["request_id"] == "" {
-		t.Error("Metadata missing request_id")
-	}
+	// 1. Deepgram sends NOTHING on connection open (all six dgproxy
+	// captures) — implicitly verified below: the first frame received
+	// after Finalize is a Results, not a Metadata.
 
 	// 2. Send an audio frame so the session has data.
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
@@ -184,11 +171,19 @@ func TestDeepgramFinalizeFlow(t *testing.T) {
 	if alt0["transcript"] != "hello world" {
 		t.Errorf("transcript = %v, want %q", alt0["transcript"], "hello world")
 	}
-	if md, ok := res["metadata"].(map[string]any); !ok || md["request_id"] == "" {
+	md, _ := res["metadata"].(map[string]any)
+	requestID, _ := md["request_id"].(string)
+	if requestID == "" {
 		t.Error("Results missing spec-required metadata.request_id")
 	}
+	// Deepgram echoes the requested model in model_info.name.
+	mi, _ := md["model_info"].(map[string]any)
+	if name, _ := mi["name"].(string); name != "2-phonecall-nova" {
+		t.Errorf("metadata.model_info.name = %v, want %q (nova-2-phonecall echo)", name, "2-phonecall-nova")
+	}
 
-	// 4. CloseStream → Results with from_finalize=false.
+	// 4. CloseStream → Results with from_finalize=false, then terminal
+	// Metadata in the captured wire shape.
 	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
 		t.Fatalf("write CloseStream: %v", err)
 	}
@@ -207,12 +202,64 @@ func TestDeepgramFinalizeFlow(t *testing.T) {
 			res2["is_final"], res2["speech_final"])
 	}
 
+	// 5. Terminal Metadata — captured shape: sha256 is the literal
+	// "incomplete", models/model_info keyed by model UUID.
+	var term map[string]any
+	if err := conn.ReadJSON(&term); err != nil {
+		t.Fatalf("read terminal Metadata: %v", err)
+	}
+	assertCapturedMetadataShape(t, term, requestID, true)
+
 	// The server ends the session after "done" and closes the conn.
 	// Wait for the close so the session-end log path finishes before
 	// the test tears down the LogManager.
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			break
+		}
+	}
+}
+
+// assertCapturedMetadataShape checks a terminal Metadata event against
+// the shape captured from real Deepgram sessions (DEEPGRAM_PROTOCOL.md
+// §5.2). withAudio selects the full (audio processed) vs minimal
+// (no-audio) variant.
+func assertCapturedMetadataShape(t *testing.T, term map[string]any, requestID string, withAudio bool) {
+	t.Helper()
+	if term["type"] != "Metadata" {
+		t.Fatalf("terminal event type = %v, want Metadata", term["type"])
+	}
+	if term["transaction_key"] != "deprecated" {
+		t.Errorf("transaction_key = %v, want deprecated", term["transaction_key"])
+	}
+	if term["sha256"] != "incomplete" {
+		t.Errorf("sha256 = %v, want literal %q (captured)", term["sha256"], "incomplete")
+	}
+	if rid, _ := term["request_id"].(string); rid == "" || (requestID != "" && rid != requestID) {
+		t.Errorf("request_id = %v, want session request id %q", term["request_id"], requestID)
+	}
+	if ch, _ := term["channels"].(float64); ch != 1 {
+		t.Errorf("channels = %v, want 1", term["channels"])
+	}
+	models, _ := term["models"].([]any)
+	mi, _ := term["model_info"].(map[string]any)
+	if withAudio {
+		if len(models) != 1 || models[0] != dgModelUUID {
+			t.Errorf("models = %v, want [%s]", term["models"], dgModelUUID)
+		}
+		entry, _ := mi[dgModelUUID].(map[string]any)
+		if entry == nil {
+			t.Fatalf("model_info missing entry keyed by model UUID %s: %v", dgModelUUID, term["model_info"])
+		}
+		if entry["name"] == "" || entry["version"] == "" || entry["arch"] == "" {
+			t.Errorf("model_info entry incomplete: %v", entry)
+		}
+	} else {
+		if len(models) != 0 {
+			t.Errorf("models = %v, want omitted (no audio processed)", term["models"])
+		}
+		if len(mi) != 0 {
+			t.Errorf("model_info = %v, want omitted (no audio processed)", term["model_info"])
 		}
 	}
 }
@@ -255,10 +302,8 @@ func TestDeepgramFinalRedactsPIIForLokiButNotClient(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
+	// No open-time Metadata (Deepgram parity) — drive the session
+	// straight away: audio, then CloseStream.
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -362,10 +407,7 @@ func TestDeepgramSessionLifecycleLogging(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
+	// No open-time Metadata (Deepgram parity) — drive the session directly.
 
 	// SESSION_STARTED — request metadata must be present.
 	started := waitForLogEvent(lm, "DEEPGRAM_SESSION_STARTED", 2*time.Second)
@@ -425,10 +467,6 @@ func TestDeepgramSessionLifecycleLogging(t *testing.T) {
 	conn2, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
 	if err != nil {
 		t.Fatalf("dial handler (conn2): %v", err)
-	}
-	var meta2 map[string]any
-	if err := conn2.ReadJSON(&meta2); err != nil {
-		t.Fatalf("read Metadata (conn2): %v", err)
 	}
 	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 640)); err != nil {
 		t.Fatalf("write audio (conn2): %v", err)
@@ -760,10 +798,6 @@ func TestDeepgramFinalizeSurvivesClientHalfClose(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -810,10 +844,6 @@ func TestDeepgramCloseStreamReturnsTerminalMetadata(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 32000)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -830,28 +860,14 @@ func TestDeepgramCloseStreamReturnsTerminalMetadata(t *testing.T) {
 		t.Fatalf("first event = %v, want final Results", res)
 	}
 
-	// 2. Terminal Metadata summary (Deepgram spec).
+	// 2. Terminal Metadata summary in the captured Deepgram shape.
 	var term map[string]any
 	if err := conn.ReadJSON(&term); err != nil {
 		t.Fatalf("read terminal Metadata: %v", err)
 	}
-	if term["type"] != "Metadata" {
-		t.Fatalf("terminal event type = %v, want Metadata", term["type"])
-	}
-	if term["transaction_key"] != "deprecated" {
-		t.Errorf("transaction_key = %v, want deprecated", term["transaction_key"])
-	}
-	if rid, _ := term["request_id"].(string); rid == "" {
-		t.Error("terminal Metadata missing request_id")
-	}
-	if s, _ := term["sha256"].(string); len(s) != 64 {
-		t.Errorf("sha256 = %q, want 64-char hex", s)
-	}
+	assertCapturedMetadataShape(t, term, "", true)
 	if d, _ := term["duration"].(float64); d != 1.0 {
 		t.Errorf("duration = %v, want 1.0 (32000 bytes @ 32kB/s PCM16)", d)
-	}
-	if ch, _ := term["channels"].(float64); ch != 1 {
-		t.Errorf("channels = %v, want 1", ch)
 	}
 
 	// 3. Server terminates the connection.
@@ -875,10 +891,6 @@ func TestDeepgramTeardownPromptWhenSidecarDiesMidFlush(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -915,11 +927,6 @@ func TestDeepgramBinaryControlMessage(t *testing.T) {
 	}
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 
 	// Audio frame deliberately starting with '{' — must be treated as
 	// audio (it is not valid JSON), not a control message.
@@ -1091,10 +1098,6 @@ func TestDeepgramEndpointAutoFinal(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -1152,15 +1155,11 @@ func TestDeepgramVadEventsGating(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
 
-	// 1. SpeechStarted (spec shape).
+	// 1. SpeechStarted (spec shape — channel is [index, count]).
 	var ss map[string]any
 	if err := conn.ReadJSON(&ss); err != nil {
 		t.Fatalf("read SpeechStarted: %v", err)
@@ -1168,8 +1167,8 @@ func TestDeepgramVadEventsGating(t *testing.T) {
 	if ss["type"] != "SpeechStarted" {
 		t.Fatalf("event type = %v, want SpeechStarted", ss["type"])
 	}
-	if ch, _ := ss["channel"].([]any); len(ch) != 1 || ch[0] != 0.0 {
-		t.Errorf("SpeechStarted.channel = %v, want [0]", ss["channel"])
+	if ch, _ := ss["channel"].([]any); len(ch) != 2 || ch[0] != 0.0 || ch[1] != 1.0 {
+		t.Errorf("SpeechStarted.channel = %v, want [0 1]", ss["channel"])
 	}
 
 	// 2. Endpoint Results.
@@ -1192,8 +1191,8 @@ func TestDeepgramVadEventsGating(t *testing.T) {
 	if lwe, _ := ue["last_word_end"].(float64); lwe != 1.0 {
 		t.Errorf("last_word_end = %v, want 1.0", lwe)
 	}
-	if ch, _ := ue["channel"].([]any); len(ch) != 1 || ch[0] != 0.0 {
-		t.Errorf("UtteranceEnd.channel = %v, want [0]", ue["channel"])
+	if ch, _ := ue["channel"].([]any); len(ch) != 2 || ch[0] != 0.0 || ch[1] != 1.0 {
+		t.Errorf("UtteranceEnd.channel = %v, want [0 1]", ue["channel"])
 	}
 }
 
@@ -1266,10 +1265,6 @@ func TestDeepgramInterimResultsDefault(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -1281,7 +1276,7 @@ func TestDeepgramInterimResultsDefault(t *testing.T) {
 		t.Fatalf("read Results: %v", err)
 	}
 	if res["type"] != "Results" || res["is_final"] != true {
-		t.Errorf("first post-Metadata event = %v, want final Results (partial should be suppressed by default)", res)
+		t.Errorf("first event = %v, want final Results (partial should be suppressed by default)", res)
 	}
 
 	// Conn 2: interim_results=true — partial must be delivered.
@@ -1292,10 +1287,6 @@ func TestDeepgramInterimResultsDefault(t *testing.T) {
 	defer conn2.Close()
 	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta2 map[string]any
-	if err := conn2.ReadJSON(&meta2); err != nil {
-		t.Fatalf("read Metadata (conn2): %v", err)
-	}
 	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio (conn2): %v", err)
 	}
@@ -1324,9 +1315,11 @@ func TestDeepgramInterimResultsDefault(t *testing.T) {
 
 // TestDeepgramWireParity verifies the Deepgram Results wire shape
 // end-to-end: the dg-request-id response header matches the in-band
-// Metadata request_id, channel_index is [index, count], alternatives
-// carry languages, words carry per-word language, partials carry words,
-// and model_uuid is stable across messages (per model, not per session).
+// Results metadata.request_id, channel_index is [index, count],
+// partials carry words, and model_uuid is stable across messages
+// (per model, not per session). Language fields (alternatives[].languages,
+// words[].language) are ONLY present with detect_language=true —
+// confirmed absent in the dgproxy captures otherwise.
 func TestDeepgramWireParity(t *testing.T) {
 	lm := captureLogManager()
 	sidecarWS := startTestApp(t, mockSidecarAppWithPartial())
@@ -1357,14 +1350,6 @@ func TestDeepgramWireParity(t *testing.T) {
 		t.Fatal("101 response missing dg-request-id header")
 	}
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
-	if meta["request_id"] != hdrID {
-		t.Errorf("Metadata request_id = %v, want dg-request-id header %v", meta["request_id"], hdrID)
-	}
-
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -1372,12 +1357,16 @@ func TestDeepgramWireParity(t *testing.T) {
 	if err := conn.ReadJSON(&partial); err != nil {
 		t.Fatalf("read partial: %v", err)
 	}
-	assertDGWireShape(t, partial, "en")
 	pm, _ := partial["metadata"].(map[string]any)
+	if pm["request_id"] != hdrID {
+		t.Errorf("Results metadata.request_id = %v, want dg-request-id header %v", pm["request_id"], hdrID)
+	}
 	modelUUID, _ := pm["model_uuid"].(string)
 	if modelUUID == "" {
 		t.Fatal("partial metadata.model_uuid empty")
 	}
+	// Without detect_language, language fields are absent (captured shape).
+	assertDGWireShape(t, partial, "")
 	// Interims carry words (Deepgram parity) — the mock sent one.
 	ch, _ := partial["channel"].(map[string]any)
 	alts, _ := ch["alternatives"].([]any)
@@ -1393,15 +1382,33 @@ func TestDeepgramWireParity(t *testing.T) {
 	if err := conn.ReadJSON(&final); err != nil {
 		t.Fatalf("read final: %v", err)
 	}
-	assertDGWireShape(t, final, "en")
+	assertDGWireShape(t, final, "")
 	fm, _ := final["metadata"].(map[string]any)
 	if fm["model_uuid"] != modelUUID {
 		t.Errorf("model_uuid changed across messages: %v → %v (Deepgram's is stable per model)", modelUUID, fm["model_uuid"])
 	}
+
+	// Conn 2: detect_language=true — language fields appear.
+	conn2, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?interim_results=true&language=en&detect_language=true", nil)
+	if err != nil {
+		t.Fatalf("dial handler (conn2): %v", err)
+	}
+	defer conn2.Close()
+	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio (conn2): %v", err)
+	}
+	var partial2 map[string]any
+	if err := conn2.ReadJSON(&partial2); err != nil {
+		t.Fatalf("read partial (conn2): %v", err)
+	}
+	assertDGWireShape(t, partial2, "en")
 }
 
 // assertDGWireShape checks the Deepgram-spec Results fields shared by
-// interim and final messages.
+// interim and final messages. lang empty means language fields must be
+// ABSENT (Deepgram omits them without detect_language); non-empty means
+// they must carry that language.
 func assertDGWireShape(t *testing.T, res map[string]any, lang string) {
 	t.Helper()
 	ci, _ := res["channel_index"].([]any)
@@ -1414,14 +1421,23 @@ func assertDGWireShape(t *testing.T, res map[string]any, lang string) {
 		t.Fatal("channel.alternatives empty")
 	}
 	alt0, _ := alts[0].(map[string]any)
-	langs, _ := alt0["languages"].([]any)
-	if len(langs) != 1 || langs[0] != lang {
+	langs, hasLangs := alt0["languages"].([]any)
+	if lang == "" {
+		if hasLangs && len(langs) != 0 {
+			t.Errorf("alternatives[0].languages = %v, want omitted without detect_language", alt0["languages"])
+		}
+	} else if len(langs) != 1 || langs[0] != lang {
 		t.Errorf("alternatives[0].languages = %v, want [%s]", alt0["languages"], lang)
 	}
 	for i, w := range alt0["words"].([]any) {
 		wm, _ := w.(map[string]any)
-		if wm["language"] != lang {
-			t.Errorf("words[%d].language = %v, want %q", i, wm["language"], lang)
+		wl, hasWl := wm["language"]
+		if lang == "" {
+			if hasWl {
+				t.Errorf("words[%d].language = %v, want omitted without detect_language", i, wl)
+			}
+		} else if wl != lang {
+			t.Errorf("words[%d].language = %v, want %q", i, wl, lang)
 		}
 	}
 }
@@ -1622,10 +1638,6 @@ func TestDeepgramMulawUsageAccounting(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 8000)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
@@ -1723,10 +1735,6 @@ func TestDeepgramCloseStreamMidEndpointFinal(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	var meta map[string]any
-	if err := conn.ReadJSON(&meta); err != nil {
-		t.Fatalf("read Metadata: %v", err)
-	}
 	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
