@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -58,6 +60,18 @@ type dgRealtimeSession struct {
 	sidecar   *ws.Conn
 	modelMeta dgModelMeta
 	stats     *dgSessionStats
+	// lastResultEnd is the stream-relative end time (seconds) of the last
+	// final emitted — used to compute start/duration for the next final.
+	// Only touched by handleSidecarEvent (single goroutine).
+	lastResultEnd float64
+	// encoding/sampleRate are the client's audio params, used for the
+	// terminal Metadata duration math.
+	encoding   string
+	sampleRate string
+	// Spec gating: UtteranceEnd only when utterance_end_ms is set,
+	// SpeechStarted only when vad_events=true.
+	utteranceEnd bool
+	vadEvents    bool
 }
 
 func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
@@ -71,7 +85,8 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	}
 
 	model := deepgramModelToEngine(c.Query("model"))
-	interimResults := c.Query("interim_results", "true") == "true"
+	// Deepgram spec: interim_results defaults to false.
+	interimResults := c.Query("interim_results", "false") == "true"
 
 	sidecarURL := h.sc.DeepgramRealtimeURL(model)
 	u, err := url.Parse(sidecarURL)
@@ -133,17 +148,23 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 			},
 			ModelUUID: uuid.New().String(),
 		},
+		encoding:     c.Query("encoding", "linear16"),
+		sampleRate:   c.Query("sample_rate", "16000"),
+		utteranceEnd: c.Query("utterance_end_ms") != "",
+		vadEvents:    c.Query("vad_events", "false") == "true",
 	}
 
 	// Send Deepgram Metadata event on connection open (same shape as legacy handler).
 	_ = c.WriteJSON(fiber.Map{
-		"type":       "Metadata",
-		"request_id": requestID,
-		"created":    time.Now().UTC().Format(time.RFC3339),
-		"duration":   0,
-		"channels":   1,
-		"model_info": sess.modelMeta.ModelInfo,
-		"model_uuid": sess.modelMeta.ModelUUID,
+		"type":            "Metadata",
+		"transaction_key": "deprecated",
+		"request_id":      requestID,
+		"sha256":          fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
+		"created":         time.Now().UTC().Format(time.RFC3339),
+		"duration":        0,
+		"channels":        1,
+		"model_info":      sess.modelMeta.ModelInfo,
+		"model_uuid":      sess.modelMeta.ModelUUID,
 	})
 
 	errCh := make(chan error, 2)
@@ -178,6 +199,16 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 				return
 			}
 			if mt == websocket.BinaryMessage {
+				// Tolerate binary-framed control messages (Deepgram spec
+				// says text frames; some clients misbehave). A binary frame
+				// that merely starts with '{' must strictly parse as a
+				// known control message, so PCM audio can never
+				// false-positive.
+				if len(msg) > 0 && msg[0] == '{' {
+					if handled := interceptControl(sess, msg); handled {
+						continue
+					}
+				}
 				if len(msg) > 0 {
 					sess.stats.addAudio(len(msg))
 				}
@@ -194,7 +225,14 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 					return
 				}
 			} else if mt == websocket.TextMessage {
-				// Forward JSON control messages (e.g., {"action":"stop"})
+				// Intercept Deepgram control messages: KeepAlive is
+				// consumed locally; Finalize/CloseStream are tracked for
+				// flush bookkeeping, then forwarded (the sidecar's
+				// /stream/realtime speaks the same control JSON).
+				if interceptControl(sess, msg) {
+					continue
+				}
+				// Forward anything else (e.g., {"action":"stop"})
 				if err := sidecarConn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					errCh <- err
 					return
@@ -260,6 +298,39 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	}))
 }
 
+// interceptControl inspects a client frame for a Deepgram control message.
+// KeepAlive is consumed locally (the sidecar has no use for it); Finalize
+// and CloseStream are recorded for flush bookkeeping and forwarded to the
+// sidecar as-is. Returns true when the frame was a control message that
+// should not be treated as audio.
+func interceptControl(sess *dgRealtimeSession, msg []byte) bool {
+	var ctrl map[string]interface{}
+	if json.Unmarshal(msg, &ctrl) != nil {
+		return false
+	}
+	ctrlType, ok := ctrl["type"].(string)
+	if !ok {
+		return false
+	}
+	switch ctrlType {
+	case "KeepAlive":
+		slog.Info("[DG-RT] KeepAlive from client", "request_id", sess.requestID)
+		return true
+	case "Finalize":
+		sess.stats.requestFlush(false)
+		slog.Info("[DG-RT] Finalize from client, forwarding to sidecar", "request_id", sess.requestID)
+	case "CloseStream":
+		sess.stats.requestFlush(true)
+		slog.Info("[DG-RT] CloseStream from client, forwarding to sidecar", "request_id", sess.requestID)
+	default:
+		return false
+	}
+	if err := sess.sidecar.WriteMessage(ws.TextMessage, msg); err != nil {
+		slog.Error("[DG-RT] Failed to forward control to sidecar", "type", ctrlType, "error", err, "request_id", sess.requestID)
+	}
+	return true
+}
+
 func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, msg []byte, interimResults bool) {
 	var ev map[string]any
 	if err := json.Unmarshal(msg, &ev); err != nil {
@@ -271,6 +342,10 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 		// Already sent Metadata on connect; nothing to do.
 	case "speech_started":
 		// Spec shape: {"type":"SpeechStarted","channel":[0],"timestamp":<float>}
+		// Only emitted when the client passed vad_events=true.
+		if !sess.vadEvents {
+			return
+		}
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":      "SpeechStarted",
 			"channel":   []int{0},
@@ -294,12 +369,12 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 		}
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":          "Results",
-			"channel_index": []int{0, 1},
+			"channel_index": []int{0},
 			"duration":      0.0,
 			"start":         0.0,
 			"channel": fiber.Map{
 				"alternatives": []any{
-					fiber.Map{"transcript": text, "confidence": 0.0, "words": []any{}},
+					fiber.Map{"transcript": text, "confidence": 0.99, "words": []any{}},
 				},
 			},
 			"is_final":      false,
@@ -324,7 +399,17 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 	case "final":
 		text, _ := ev["text"].(string)
 		isSpeechFinal, _ := ev["speech_final"].(bool)
+		fromFinalize, _ := ev["from_finalize"].(bool)
 		sess.stats.markResult()
+		// Stream-relative timing: the sidecar reports the final's end time;
+		// the segment start is the previous final's end.
+		end := asFloat(ev["time"])
+		start := sess.lastResultEnd
+		duration := end - start
+		if duration < 0 {
+			duration = 0
+		}
+		sess.lastResultEnd = end
 		redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
 		if piiErr != nil {
 			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
@@ -336,36 +421,38 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 		}
 		_ = sess.ws.WriteJSON(fiber.Map{
 			"type":          "Results",
-			"channel_index": []int{0, 1},
-			"duration":      0.0,
-			"start":         0.0,
+			"channel_index": []int{0},
+			"duration":      duration,
+			"start":         start,
 			"channel": fiber.Map{
 				"alternatives": []any{
-					fiber.Map{"transcript": text, "confidence": 0.0, "words": []any{}},
+					fiber.Map{"transcript": text, "confidence": 0.99, "words": []any{}},
 				},
 			},
 			"is_final":      true,
 			"speech_final":  isSpeechFinal,
 			"metadata":      sess.modelMeta,
-			"from_finalize": false,
+			"from_finalize": fromFinalize,
 		})
 		// Response-sent event → Loki (redacted transcript).
 		finalFields := map[string]interface{}{
-			"endpoint":     "/v2/listen",
-			"ip":           sess.ws.IP(),
-			"request_id":   sess.requestID,
-			"engine":       sess.modelMeta.ModelInfo["name"],
-			"transcript":   redactedFinal,
-			"pii_redacted": len(piiItems),
-			"is_final":     true,
-			"speech_final": isSpeechFinal,
+			"endpoint":      "/v2/listen",
+			"ip":            sess.ws.IP(),
+			"request_id":    sess.requestID,
+			"engine":        sess.modelMeta.ModelInfo["name"],
+			"transcript":    redactedFinal,
+			"pii_redacted":  len(piiItems),
+			"is_final":      true,
+			"speech_final":  isSpeechFinal,
+			"from_finalize": fromFinalize,
 		}
 		if len(piiItems) > 0 {
 			finalFields["pii_entity_types"] = piiEntityTypes(piiItems)
 		}
 		h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_REALTIME_FINAL_SENT", "DeepgramRealtimeFinalSent", slog.LevelInfo, finalFields))
-		if isSpeechFinal {
+		if isSpeechFinal && sess.utteranceEnd {
 			// Spec shape: {"type":"UtteranceEnd","channel":[0],"last_word_end":<float>}
+			// Only emitted when the client set utterance_end_ms.
 			_ = sess.ws.WriteJSON(fiber.Map{
 				"type":          "UtteranceEnd",
 				"channel":       []int{0},
@@ -378,6 +465,22 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 		// informational — Deepgram has SpeechStarted/SpeechEnded but not SpeechStopped;
 		// skip to avoid protocol noise.
 	case "done":
+		// Deepgram spec: CloseStream earns a terminal Metadata summary
+		// before the session ends (mirrors the v1 handler).
+		if sess.stats.closeStreamRequested() {
+			bps := audioBytesPerSecond(sess.encoding, sess.sampleRate)
+			_ = sess.ws.WriteJSON(fiber.Map{
+				"type":            "Metadata",
+				"transaction_key": "deprecated",
+				"request_id":      sess.requestID,
+				"sha256":          fmt.Sprintf("%x", sha256.Sum256([]byte(sess.requestID))),
+				"created":         time.Now().UTC().Format(time.RFC3339),
+				"duration":        float64(sess.stats.bytes()) / bps,
+				"channels":        1,
+				"model_info":      sess.modelMeta.ModelInfo,
+				"model_uuid":      sess.modelMeta.ModelUUID,
+			})
+		}
 		// Connection will close naturally
 	case "error":
 		errMsg := asString(ev["message"])

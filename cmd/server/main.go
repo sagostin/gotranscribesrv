@@ -252,17 +252,32 @@ func main() {
 	}, middleware.NewAuthMiddleware(authCfg))
 	app.Get("/ws/asr", wsHandler.Upgrade())
 
-	// Deepgram-compatible streaming
+	// Deepgram-compatible streaming (WS GET) + pre-recorded (REST POST).
+	// Same path, two protocols — the WS middleware passes non-upgrade
+	// requests through so the POST reaches the authed group below
+	// (same pattern as /v1/recognize).
 	dgHandler := handlers.NewDeepgramHandler(sc, redactor, db.DB, cfg.EnableITN, logManager)
+	dgPreRecordedHandler := handlers.NewDeepgramPreRecordedHandler(sc, redactor, cfg.EnableITN, logManager)
 	app.Use("/v1/listen", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			slog.InfoContext(c.UserContext(), "Deepgram WebSocket upgrade request", "path", "/v1/listen", "remote", c.IP())
 			return c.Next()
 		}
+		// POST /v1/listen is Deepgram's pre-recorded API — fall through.
+		if c.Method() != fiber.MethodGet {
+			return c.Next()
+		}
 		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{
 			"error": fiber.Map{"code": "UPGRADE_REQUIRED", "message": "WebSocket upgrade required", "status": 426},
 		})
-	}, middleware.NewAuthMiddleware(authCfg))
+	})
+	app.Use("/v1/listen", func(c *fiber.Ctx) error {
+		// Auth for the WebSocket upgrade; REST POST is authed by the group.
+		if websocket.IsWebSocketUpgrade(c) {
+			return middleware.NewAuthMiddleware(authCfg)(c)
+		}
+		return c.Next()
+	})
 	app.Get("/v1/listen", dgHandler.Upgrade())
 
 	// Deepgram-compatible REAL-TIME streaming (true streaming ASR).
@@ -349,6 +364,11 @@ func main() {
 
 	// Watson-compatible
 	authed.Post("/v1/recognize", watsonHandler.Recognize)
+
+	// Deepgram-compatible PRE-RECORDED transcription (REST). The WS
+	// streaming variant of /v1/listen is registered above; Deepgram SDKs
+	// pick POST vs WSS by method, so both live on the same path.
+	authed.Post("/v1/listen", dgPreRecordedHandler.Listen)
 
 	// TTS
 	authed.Post("/api/v1/tts", ttsHandler.Synthesize)

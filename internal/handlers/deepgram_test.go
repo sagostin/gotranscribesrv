@@ -67,6 +67,7 @@ func mockSidecarAppWithFinalText(finalText string) *fiber.App {
 						map[string]any{"word": "world", "start": 0.5, "end": 1.0},
 					},
 					"is_final":      true,
+					"speech_final":  false,
 					"from_finalize": true,
 				})
 			case "CloseStream":
@@ -77,6 +78,7 @@ func mockSidecarAppWithFinalText(finalText string) *fiber.App {
 					"end":           1.0,
 					"words":         []any{},
 					"is_final":      true,
+					"speech_final":  true,
 					"from_finalize": false,
 				})
 				_ = c.WriteJSON(fiber.Map{"type": "done"})
@@ -681,6 +683,7 @@ func mockSidecarAppWithFinalizeDelay(finalText string, finalizeDelay time.Durati
 					"end":           1.0,
 					"words":         []any{},
 					"is_final":      true,
+					"speech_final":  true,
 					"from_finalize": false,
 				})
 				_ = c.WriteJSON(fiber.Map{"type": "done"})
@@ -1004,5 +1007,471 @@ func TestDGSessionStats(t *testing.T) {
 	wg.Wait()
 	if _, frames, _, _ := s.snapshot(); frames != 10 {
 		t.Errorf("frames after concurrent adds = %d, want 10", frames)
+	}
+}
+
+// ── Endpointing / spec-parity tests ─────────────────────────────────
+
+// mockSidecarAppEndpointing mimics the sidecar's VAD endpointing: on the
+// first audio frame it spontaneously emits speech_started, a segment
+// final with speech_final=true, and utterance_end — no client control
+// message required. CloseStream still earns a final + done.
+func mockSidecarAppEndpointing() *fiber.App {
+	app := fiber.New()
+	app.Use("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		audioSeen := false
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt == websocket.BinaryMessage {
+				if audioSeen {
+					continue
+				}
+				audioSeen = true
+				_ = c.WriteJSON(fiber.Map{"type": "speech_started", "timestamp": 0.0})
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          "endpointed segment",
+					"start":         0.0,
+					"end":           1.0,
+					"words":         []any{},
+					"is_final":      true,
+					"speech_final":  true,
+					"from_finalize": false,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "utterance_end", "last_word_end": 1.0})
+				continue
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			if typ, _ := ctrl["type"].(string); typ == "CloseStream" {
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          "",
+					"start":         1.0,
+					"end":           1.0,
+					"words":         []any{},
+					"is_final":      true,
+					"speech_final":  true,
+					"from_finalize": false,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "done"})
+				return
+			}
+		}
+	}))
+	return app
+}
+
+// TestDeepgramEndpointAutoFinal verifies the Deepgram endpointing flow:
+// a VAD-driven final arrives WITHOUT any Finalize/CloseStream, carrying
+// is_final=true, speech_final=true and channel_index=[0].
+func TestDeepgramEndpointAutoFinal(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarAppEndpointing())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	// Without vad_events=true, the sidecar's speech_started is gated.
+	// First event must be the endpoint Results.
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read endpoint Results: %v", err)
+	}
+	if res["type"] != "Results" {
+		t.Fatalf("event type = %v, want Results (SpeechStarted should be gated without vad_events)", res["type"])
+	}
+	if res["is_final"] != true || res["speech_final"] != true {
+		t.Errorf("endpoint Results is_final=%v speech_final=%v, want both true",
+			res["is_final"], res["speech_final"])
+	}
+	ci, _ := res["channel_index"].([]any)
+	if len(ci) != 1 || ci[0] != 0.0 {
+		t.Errorf("channel_index = %v, want [0]", res["channel_index"])
+	}
+	if res["from_finalize"] != false {
+		t.Errorf("from_finalize = %v, want false for endpoint final", res["from_finalize"])
+	}
+	if d, _ := res["duration"].(float64); d != 1.0 {
+		t.Errorf("duration = %v, want 1.0", d)
+	}
+
+	// Without utterance_end_ms, UtteranceEnd is gated too: the next event
+	// after CloseStream must be the close Results, not an UtteranceEnd.
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	var res2 map[string]any
+	if err := conn.ReadJSON(&res2); err != nil {
+		t.Fatalf("read close Results: %v", err)
+	}
+	if res2["type"] != "Results" {
+		t.Errorf("event after CloseStream = %v, want Results (UtteranceEnd should be gated without utterance_end_ms)", res2["type"])
+	}
+}
+
+// TestDeepgramVadEventsGating verifies the client-opt-in events:
+// SpeechStarted requires vad_events=true and UtteranceEnd requires
+// utterance_end_ms.
+func TestDeepgramVadEventsGating(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarAppEndpointing())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?vad_events=true&utterance_end_ms=1000", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	// 1. SpeechStarted (spec shape).
+	var ss map[string]any
+	if err := conn.ReadJSON(&ss); err != nil {
+		t.Fatalf("read SpeechStarted: %v", err)
+	}
+	if ss["type"] != "SpeechStarted" {
+		t.Fatalf("event type = %v, want SpeechStarted", ss["type"])
+	}
+	if ch, _ := ss["channel"].([]any); len(ch) != 1 || ch[0] != 0.0 {
+		t.Errorf("SpeechStarted.channel = %v, want [0]", ss["channel"])
+	}
+
+	// 2. Endpoint Results.
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results: %v", err)
+	}
+	if res["type"] != "Results" || res["speech_final"] != true {
+		t.Fatalf("event = %v, want speech_final Results", res)
+	}
+
+	// 3. UtteranceEnd (spec shape).
+	var ue map[string]any
+	if err := conn.ReadJSON(&ue); err != nil {
+		t.Fatalf("read UtteranceEnd: %v", err)
+	}
+	if ue["type"] != "UtteranceEnd" {
+		t.Fatalf("event type = %v, want UtteranceEnd", ue["type"])
+	}
+	if lwe, _ := ue["last_word_end"].(float64); lwe != 1.0 {
+		t.Errorf("last_word_end = %v, want 1.0", lwe)
+	}
+	if ch, _ := ue["channel"].([]any); len(ch) != 1 || ch[0] != 0.0 {
+		t.Errorf("UtteranceEnd.channel = %v, want [0]", ue["channel"])
+	}
+}
+
+// mockSidecarAppWithPartial sends one partial on the first audio frame,
+// then answers CloseStream with a final + done.
+func mockSidecarAppWithPartial() *fiber.App {
+	app := fiber.New()
+	app.Use("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		audioSeen := false
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt == websocket.BinaryMessage {
+				if audioSeen {
+					continue
+				}
+				audioSeen = true
+				_ = c.WriteJSON(fiber.Map{
+					"type": "partial", "text": "he", "start": 0.0, "end": 0.5, "is_final": false,
+				})
+				continue
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			if typ, _ := ctrl["type"].(string); typ == "CloseStream" {
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          "hello world",
+					"start":         0.0,
+					"end":           1.0,
+					"words":         []any{},
+					"is_final":      true,
+					"speech_final":  true,
+					"from_finalize": false,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "done"})
+				return
+			}
+		}
+	}))
+	return app
+}
+
+// TestDeepgramInterimResultsDefault verifies spec 1:1 behavior:
+// interim_results defaults to FALSE (partials suppressed unless the
+// client opts in), matching Deepgram.
+func TestDeepgramInterimResultsDefault(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarAppWithPartial())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	// Conn 1: no interim_results param — partial must be suppressed.
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results: %v", err)
+	}
+	if res["type"] != "Results" || res["is_final"] != true {
+		t.Errorf("first post-Metadata event = %v, want final Results (partial should be suppressed by default)", res)
+	}
+
+	// Conn 2: interim_results=true — partial must be delivered.
+	conn2, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?interim_results=true", nil)
+	if err != nil {
+		t.Fatalf("dial handler (conn2): %v", err)
+	}
+	defer conn2.Close()
+	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta2 map[string]any
+	if err := conn2.ReadJSON(&meta2); err != nil {
+		t.Fatalf("read Metadata (conn2): %v", err)
+	}
+	if err := conn2.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio (conn2): %v", err)
+	}
+	var partial map[string]any
+	if err := conn2.ReadJSON(&partial); err != nil {
+		t.Fatalf("read partial: %v", err)
+	}
+	if partial["type"] != "Results" || partial["is_final"] != false {
+		t.Errorf("event = %v, want interim Results (is_final=false)", partial)
+	}
+	if partial["speech_final"] != false {
+		t.Errorf("interim speech_final = %v, want false", partial["speech_final"])
+	}
+	ch, _ := partial["channel"].(map[string]any)
+	alts, _ := ch["alternatives"].([]any)
+	if len(alts) == 0 {
+		t.Fatal("interim Results.channel.alternatives empty")
+	}
+	if alt0, _ := alts[0].(map[string]any); alt0["transcript"] != "he" {
+		t.Errorf("interim transcript = %v, want %q", alt0["transcript"], "he")
+	}
+	if d, _ := partial["duration"].(float64); d != 0.5 {
+		t.Errorf("interim duration = %v, want 0.5", d)
+	}
+}
+
+// ── v2 (/v2/listen) control-message tests ───────────────────────────
+
+// mockRealtimeSidecarAppControls answers Deepgram control messages on
+// /stream/realtime: Finalize → from_finalize=true final (session stays
+// open); CloseStream → speech_final final + done.
+func mockRealtimeSidecarAppControls() *fiber.App {
+	app := fiber.New()
+	app.Use("/stream/realtime", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream/realtime", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt != websocket.TextMessage {
+				continue // binary audio — ignore
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			switch typ, _ := ctrl["type"].(string); typ {
+			case "Finalize":
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          "flushed realtime",
+					"is_final":      true,
+					"speech_final":  false,
+					"from_finalize": true,
+					"time":          1.5,
+				})
+			case "CloseStream":
+				_ = c.WriteJSON(fiber.Map{
+					"type":          "final",
+					"text":          "bye realtime",
+					"is_final":      true,
+					"speech_final":  true,
+					"from_finalize": false,
+					"time":          2.0,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "done"})
+				return
+			}
+		}
+	}))
+	return app
+}
+
+// TestDeepgramRealtimeFinalizeFlow verifies v2 control handling:
+// Finalize yields a from_finalize=true Results with real timing fields,
+// CloseStream yields the closing Results + UtteranceEnd (opted-in) +
+// terminal Metadata, and Metadata carries transaction_key + sha256.
+func TestDeepgramRealtimeFinalizeFlow(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockRealtimeSidecarAppControls())
+	handlerWS := startTestApp(t, deepgramRealtimeTestApp(t, sidecarWS, lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v2/listen?utterance_end_ms=1000", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// Metadata — spec-required fields (previously missing on v2).
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if meta["transaction_key"] != "deprecated" {
+		t.Errorf("v2 Metadata transaction_key = %v, want deprecated", meta["transaction_key"])
+	}
+	if s, _ := meta["sha256"].(string); len(s) != 64 {
+		t.Errorf("v2 Metadata sha256 = %q, want 64-char hex", s)
+	}
+
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	// Finalize → from_finalize=true Results, timing from the sidecar's
+	// stream clock (time=1.5 → start 0, duration 1.5).
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"Finalize"}`)); err != nil {
+		t.Fatalf("write Finalize: %v", err)
+	}
+	var res map[string]any
+	if err := conn.ReadJSON(&res); err != nil {
+		t.Fatalf("read Results after Finalize: %v", err)
+	}
+	if res["type"] != "Results" || res["from_finalize"] != true {
+		t.Fatalf("event after Finalize = %v, want Results from_finalize=true", res)
+	}
+	if res["speech_final"] != false {
+		t.Errorf("Finalize Results speech_final = %v, want false", res["speech_final"])
+	}
+	if ci, _ := res["channel_index"].([]any); len(ci) != 1 || ci[0] != 0.0 {
+		t.Errorf("channel_index = %v, want [0]", res["channel_index"])
+	}
+	if d, _ := res["duration"].(float64); d != 1.5 {
+		t.Errorf("duration = %v, want 1.5", d)
+	}
+	if s, _ := res["start"].(float64); s != 0.0 {
+		t.Errorf("start = %v, want 0.0", s)
+	}
+	// No UtteranceEnd after a non-speech_final final, even with
+	// utterance_end_ms set.
+
+	// CloseStream → speech_final Results (start=1.5, duration=0.5) +
+	// UtteranceEnd + terminal Metadata.
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	var res2 map[string]any
+	if err := conn.ReadJSON(&res2); err != nil {
+		t.Fatalf("read Results after CloseStream: %v", err)
+	}
+	if res2["type"] != "Results" || res2["speech_final"] != true || res2["from_finalize"] != false {
+		t.Fatalf("event after CloseStream = %v, want speech_final Results from_finalize=false", res2)
+	}
+	if s, _ := res2["start"].(float64); s != 1.5 {
+		t.Errorf("CloseStream Results start = %v, want 1.5 (segment-relative)", s)
+	}
+	if d, _ := res2["duration"].(float64); d != 0.5 {
+		t.Errorf("CloseStream Results duration = %v, want 0.5", d)
+	}
+
+	var ue map[string]any
+	if err := conn.ReadJSON(&ue); err != nil {
+		t.Fatalf("read UtteranceEnd: %v", err)
+	}
+	if ue["type"] != "UtteranceEnd" {
+		t.Fatalf("event type = %v, want UtteranceEnd (utterance_end_ms was set)", ue["type"])
+	}
+
+	var term map[string]any
+	if err := conn.ReadJSON(&term); err != nil {
+		t.Fatalf("read terminal Metadata: %v", err)
+	}
+	if term["type"] != "Metadata" {
+		t.Fatalf("terminal event type = %v, want Metadata", term["type"])
+	}
+	if term["transaction_key"] != "deprecated" {
+		t.Errorf("terminal transaction_key = %v, want deprecated", term["transaction_key"])
+	}
+	if d, _ := term["duration"].(float64); d != 0.1 {
+		t.Errorf("terminal duration = %v, want 0.1 (3200 bytes @ 32kB/s PCM16)", d)
 	}
 }

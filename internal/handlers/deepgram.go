@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -80,6 +81,9 @@ type dgWord struct {
 	End            float64 `json:"end"`
 	Confidence     float64 `json:"confidence"`
 	PunctuatedWord string  `json:"punctuated_word"`
+	// Speaker is present when diarization is enabled (Deepgram assigns
+	// integer speaker IDs starting at 0).
+	Speaker *int `json:"speaker,omitempty"`
 }
 
 type dgMetadata struct {
@@ -107,7 +111,10 @@ type sidecarStreamEvent struct {
 	End          float64        `json:"end,omitempty"`
 	Words        []sidecar.Word `json:"words,omitempty"`
 	IsFinal      bool           `json:"is_final,omitempty"`
+	SpeechFinal  bool           `json:"speech_final,omitempty"`
 	FromFinalize bool           `json:"from_finalize,omitempty"`
+	Timestamp    float64        `json:"timestamp,omitempty"`
+	LastWordEnd  float64        `json:"last_word_end,omitempty"`
 	Message      string         `json:"message,omitempty"`
 }
 
@@ -127,7 +134,12 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 		requestID = uuid.New().String()
 		c.Locals(middleware.RequestIDLocalKey, requestID)
 	}
-	interimResults := c.Query("interim_results", "true") == "true"
+	// Deepgram spec: interim_results defaults to false.
+	interimResults := c.Query("interim_results", "false") == "true"
+	// utterance_end_ms / vad_events gate the UtteranceEnd and SpeechStarted
+	// server events respectively (Deepgram only emits them when requested).
+	utteranceEndMs := c.Query("utterance_end_ms") != ""
+	vadEvents := c.Query("vad_events", "false") == "true"
 
 	modelMeta := dgModelMeta{
 		RequestID: requestID,
@@ -169,7 +181,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 
 	// Forward query params to sidecar
 	q := u.Query()
-	for _, param := range []string{"language", "diarize", "encoding", "sample_rate", "itn"} {
+	for _, param := range []string{"language", "diarize", "encoding", "sample_rate", "itn", "endpointing", "utterance_end_ms", "vad_events"} {
 		if v := c.Query(param); v != "" {
 			q.Set(param, v)
 		}
@@ -462,7 +474,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID,
 					"from_finalize", evt.FromFinalize, "words", len(evt.Words),
 					"start", evt.Start, "end", evt.End)
-				dgEvt := buildDGResults(evt, true, true, modelMeta)
+				dgEvt := buildDGResults(evt, true, evt.SpeechFinal, modelMeta)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					slog.Error("[DG] Failed to write final Results to client", "error", err, "request_id", requestID)
 					errCh <- dgSessionEnd{src: "client_write", err: err}
@@ -493,6 +505,37 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Info("[DG] Sidecar ready", "request_id", requestID)
 				continue
 
+			case "utterance_end":
+				// Deepgram UtteranceEnd — only emitted when the client set
+				// utterance_end_ms (spec-gated).
+				if !utteranceEndMs {
+					continue
+				}
+				if err := c.WriteJSON(fiber.Map{
+					"type":          "UtteranceEnd",
+					"channel":       []int{0},
+					"last_word_end": evt.LastWordEnd,
+				}); err != nil {
+					slog.Error("[DG] Failed to write UtteranceEnd to client", "error", err, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: err}
+					return
+				}
+
+			case "speech_started":
+				// Deepgram SpeechStarted — only emitted when vad_events=true.
+				if !vadEvents {
+					continue
+				}
+				if err := c.WriteJSON(fiber.Map{
+					"type":      "SpeechStarted",
+					"channel":   []int{0},
+					"timestamp": evt.Timestamp,
+				}); err != nil {
+					slog.Error("[DG] Failed to write SpeechStarted to client", "error", err, "request_id", requestID)
+					errCh <- dgSessionEnd{src: "client_write", err: err}
+					return
+				}
+
 			case "error":
 				slog.Error("[DG] Sidecar error", "message", evt.Message, "request_id", requestID)
 				h.lm.SendLog(h.lm.BuildLog("DEEPGRAM_SESSION_ERROR", "DeepgramSessionError", slog.LevelError, map[string]interface{}{
@@ -511,13 +554,14 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				// object, then terminate") before the session ends.
 				if stats.closeStreamRequested() {
 					audioBytes, _, _, _ := stats.snapshot()
+					bps := audioBytesPerSecond(c.Query("encoding", "linear16"), c.Query("sample_rate", "16000"))
 					if err := c.WriteJSON(dgMetadata{
 						Type:           "Metadata",
 						TransactionKey: "deprecated",
 						RequestID:      requestID,
 						SHA256:         fmt.Sprintf("%x", sha256.Sum256([]byte(requestID))),
 						Created:        time.Now().UTC().Format(time.RFC3339),
-						Duration:       float64(audioBytes) / 32000.0, // PCM 16-bit 16kHz mono
+						Duration:       float64(audioBytes) / bps,
 						Channels:       1,
 						ModelInfo:      modelMeta.ModelInfo,
 					}); err != nil {
@@ -764,17 +808,39 @@ func realtimeFactor(audioMs, processMs int) float64 {
 	return float64(audioMs) / float64(processMs)
 }
 
+// audioBytesPerSecond returns the wire bytes-per-second for the given
+// Deepgram encoding/sample_rate query params, used to compute stream
+// duration for the terminal Metadata event.
+func audioBytesPerSecond(encoding, sampleRateStr string) float64 {
+	rate, err := strconv.Atoi(sampleRateStr)
+	if err != nil || rate <= 0 {
+		rate = 16000
+	}
+	switch encoding {
+	case "mulaw", "alaw", "g729", "amr-nb", "amr-wb":
+		// 8-bit (or sub-8-bit) codecs ≈ 1 byte/sample
+		return float64(rate)
+	default:
+		// linear16 and everything else: 2 bytes/sample
+		return float64(rate) * 2
+	}
+}
+
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.
 func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgModelMeta) dgResults {
 	words := make([]dgWord, 0, len(evt.Words))
 	for _, w := range evt.Words {
-		words = append(words, dgWord{
+		dw := dgWord{
 			Word:           w.Word,
 			Start:          w.Start,
 			End:            w.End,
 			Confidence:     0.99,
 			PunctuatedWord: w.Word,
-		})
+		}
+		// Diarization: sidecar labels speakers as strings ("0", "speaker_1",
+		// …); Deepgram uses integer IDs starting at 0.
+		dw.Speaker = dgSpeakerID(w.Speaker)
+		words = append(words, dw)
 	}
 
 	duration := evt.End - evt.Start
@@ -784,7 +850,7 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 
 	return dgResults{
 		Type:         "Results",
-		ChannelIndex: []int{0, 1},
+		ChannelIndex: []int{0},
 		Duration:     duration,
 		Start:        evt.Start,
 		IsFinal:      isFinal,

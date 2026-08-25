@@ -456,6 +456,73 @@ Control messages:
 
 ---
 
+### POST `/v1/listen` (Deepgram-Compatible Pre-Recorded)
+
+Drop-in replacement for the Deepgram Pre-Recorded Transcription API. Same path as the WebSocket endpoint — Deepgram SDKs pick REST vs streaming by method, so both live on `/v1/listen`.
+
+**Request (two modes, matching Deepgram):**
+```bash
+# Raw audio body
+curl -X POST "http://localhost:3000/v1/listen?diarize=true&utterances=true" \
+  -H "Authorization: Token gtx_live_abc123" \
+  -H "Content-Type: audio/wav" \
+  --data-binary @call.wav
+
+# JSON URL mode (server fetches the audio)
+curl -X POST "http://localhost:3000/v1/listen" \
+  -H "Authorization: Token gtx_live_abc123" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/call.wav"}'
+```
+
+**Query parameters:**
+
+| Param | Description |
+|-------|-------------|
+| `language` | BCP-47 hint (default: `en`) |
+| `diarize` | `true` enables Sortformer diarization → integer `speaker` on words/utterances |
+| `diarize_model` | Any value also enables diarization (Deepgram parity) |
+| `utterances` | `true` adds a spec-shaped `utterances` array (from pause-segmented transcript segments) |
+| `smart_format` / `numerals` | `true` forces ITN on |
+| `detect_language` | Echoes the language hint as `detected_language` (no language ID on this route) |
+| `model`, `punctuate`, `keywords`, `redact`, `search`, `replace`, `paragraphs`, `summarize`, `topics`, `intents`, `sentiment`, `multichannel`, `callback` | Accepted, ignored |
+
+**Response** — Deepgram `ListenV1Response` shape:
+```json
+{
+  "metadata": {
+    "transaction_key": "deprecated",
+    "request_id": "a847f427-…",
+    "sha256": "154e29…",
+    "created": "2026-08-25T16:00:00Z",
+    "duration": 625.536,
+    "channels": 1,
+    "models": ["0e05…"],
+    "model_info": {
+      "0e05…": {"name": "parakeet-tdt-v3-coreml", "version": "2026-03-01", "arch": "parakeet-tdt"}
+    }
+  },
+  "results": {
+    "channels": [{
+      "alternatives": [{
+        "transcript": "Welcome to Zoltus. …",
+        "confidence": 0.99,
+        "words": [
+          {"word": "Welcome", "start": 0.0, "end": 0.32, "confidence": 0.99, "punctuated_word": "Welcome", "speaker": 0}
+        ]
+      }]
+    }],
+    "utterances": [
+      {"start": 0.0, "end": 2.72, "confidence": 0.99, "channel": 0, "transcript": "Welcome to Zoltus. …", "speaker": 0, "id": "utt-001", "words": […]}
+    ]
+  }
+}
+```
+
+Errors use Deepgram's REST shape: `{"err_code": "INVALID_REQUEST", "err_msg": "…", "request_id": "…"}`.
+
+---
+
 ### WS `/v1/listen` (Deepgram-Compatible)
 
 Drop-in replacement for the Deepgram Live Transcription API. Allows existing Deepgram SDKs and tools to stream audio to GoTranscribeSrv without code changes.
@@ -476,21 +543,24 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 | Param | Type | Description |
 |-------|------|-------------|
 | `language` | string | BCP-47 language code (default: `"en"`) |
-| `diarize` | string | `"true"` to enable speaker diarization |
-| `interim_results` | string | `"true"` to receive partial transcripts (default: `"true"`) |
-| `encoding` | string | Accepted for compatibility (ignored, expects PCM 16-bit) |
-| `sample_rate` | string | Accepted for compatibility (ignored, expects 16kHz) |
+| `diarize` | string | `"true"` adds a `speaker` field to words (single-speaker placeholder — no real diarization on this route) |
+| `interim_results` | string | `"true"` to receive partial transcripts (default: `"false"`, per Deepgram spec) |
+| `encoding` | string | `linear16` (default) \| `mulaw` \| `alaw` |
+| `sample_rate` | string | Input sample rate (default: `16000`; `8000` is upsampled 2×) |
+| `endpointing` | string | ms of silence before an automatic final (default: `300`; `"false"`/`"0"` disables). Note: Deepgram's spec default is 10ms — deliberately overridden here |
+| `vad_events` | string | `"true"` to receive `SpeechStarted` events (default: `"false"`) |
+| `utterance_end_ms` | string | Set to receive `UtteranceEnd` events after speech_final finals |
 | `model` | string | Accepted for compatibility (ignored, always uses Parakeet TDT v3 via CoreML) |
 | `punctuate` | string | Accepted for compatibility (ignored) |
 | `smart_format` | string | Accepted for compatibility (ignored) |
-| `utterance_end_ms` | string | Accepted for compatibility (best-effort) |
 
 **Client → Server:** Binary audio frames (PCM 16-bit, 16kHz, mono)
 
 **Client control messages:**
 ```json
 {"type": "KeepAlive"}    // Keep connection alive during silence
-{"type": "CloseStream"}  // Gracefully end the session
+{"type": "Finalize"}     // Flush buffered audio → final Results (from_finalize=true), session stays open
+{"type": "CloseStream"}  // Final Results + terminal Metadata, then the server closes
 ```
 
 **Server → Client:** JSON events
@@ -511,11 +581,11 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 }
 ```
 
-**`Results`** (interim transcript, `is_final: false`):
+**`Results`** (interim transcript, `is_final: false` — only when `interim_results=true`):
 ```json
 {
   "type": "Results",
-  "channel_index": [0, 1],
+  "channel_index": [0],
   "duration": 0.5,
   "start": 0.0,
   "is_final": false,
@@ -530,11 +600,11 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 }
 ```
 
-**`Results`** (final transcript, `is_final: true`):
+**`Results`** (final transcript, `is_final: true` — emitted automatically on endpointing, or in response to `Finalize`/`CloseStream`):
 ```json
 {
   "type": "Results",
-  "channel_index": [0, 1],
+  "channel_index": [0],
   "duration": 1.8,
   "start": 0.0,
   "is_final": true,
@@ -552,7 +622,17 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 }
 ```
 
-> **Compatibility note:** Fields like `encoding`, `sample_rate`, `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv always expects PCM 16-bit 16kHz mono audio and uses Parakeet TDT v3 (CoreML/ANE).
+**`SpeechStarted`** (only when `vad_events=true`):
+```json
+{"type": "SpeechStarted", "channel": [0], "timestamp": 0.0}
+```
+
+**`UtteranceEnd`** (only when `utterance_end_ms` is set; follows each `speech_final` final):
+```json
+{"type": "UtteranceEnd", "channel": [0], "last_word_end": 1.8}
+```
+
+> **Compatibility note:** `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv uses Parakeet TDT v3 (CoreML/ANE). Automatic endpointing is driven by streaming Silero VAD in the sidecar; finals cover the current speech segment with stream-relative `start`/`duration`.
 
 ---
 
@@ -823,13 +903,17 @@ Deepgram Nova-compatible WebSocket proxy using the real-time engine. Distinct fr
 | Query param       | Default | Description |
 |-------------------|---------|-------------|
 | `model`           | `nova-3` | Deepgram model name — mapped to a streaming engine: `nova-3`/`nova-2` → `eou-320`, `nova-3-unified` → `unified-320`, `2-nova` → `nemotron-560`. Pass an explicit engine ID (`eou-160`, `nemotron-1120`, …) to bypass the mapping. |
-| `interim_results` | `true`  | Emit interim `Results` events with `is_final=false`. Set `false` to receive only finals. |
+| `interim_results` | `false` | Emit interim `Results` events with `is_final=false` (default per Deepgram spec). Set `true` to receive partials. |
 | `encoding`        | `linear16` | `linear16` \| `mulaw` \| `alaw`. |
 | `sample_rate`     | `16000` | 8000 is upsampled 2×. |
 | `itn`             | `true`  | Apply inverse text normalization. |
-| `vad`             | `true`  | Emit `SpeechStarted` events from streaming VAD. |
+| `vad`             | `true`  | Sidecar VAD on/off (drives end-of-turn detection). |
+| `vad_events`      | `false` | Emit `SpeechStarted` events to the client. |
+| `utterance_end_ms` | —    | Set to receive `UtteranceEnd` after `speech_final` finals. |
 
-**Server → client events emitted** follow the Deepgram Nova wire protocol: `Metadata` on connect, `SpeechStarted`, `Results` (interim / final / `speech_final`), `UtteranceEnd`, `Error`.
+**Client control messages:** `{"type":"KeepAlive"}` (consumed by the proxy), `{"type":"Finalize"}` (flush → final Results with `from_finalize=true`, session stays open), `{"type":"CloseStream"}` (final Results + terminal `Metadata`, then the server closes).
+
+**Server → client events emitted** follow the Deepgram Nova wire protocol: `Metadata` on connect (and a terminal summary after `CloseStream`), `SpeechStarted` (opt-in), `Results` (interim / final / `speech_final` / `from_finalize`), `UtteranceEnd` (opt-in), `Error`.
 
 ### Sidecar endpoints (direct, no Go proxy)
 
@@ -850,11 +934,11 @@ For clients that don't need JWT auth or quota tracking, the audio sidecar expose
 | `speech_stopped` | `{"time":7.07}`                                       |
 | `partial`        | `{"text":"welcome if you","is_final":false}`         |
 | `end_of_turn`    | Marker for turn boundary.                             |
-| `final`          | `{"text":"welcome if you are calling…","is_final":true,"speech_final":true,"itn_applied":true}` |
+| `final`          | `{"text":"welcome if you are calling…","is_final":true,"speech_final":true,"from_finalize":false,"itn_applied":true,"time":7.07}` |
 | `done`           | Stream closing.                                       |
 | `error`          | `{"message":"…"}`                                     |
 
-**Client → server:** binary PCM frames (encoding determined by query params: `linear16`/`mulaw`/`alaw`, `sample_rate=16000` or `8000`), plus JSON control: `{"action":"stop"}` or `{"type":"CloseStream"}`.
+**Client → server:** binary PCM frames (encoding determined by query params: `linear16`/`mulaw`/`alaw`, `sample_rate=16000` or `8000`), plus JSON control: `{"action":"stop"}` or `{"type":"CloseStream"}` (final + close), `{"type":"Finalize"}` (flush → `from_finalize=true` final, session stays open), `{"type":"KeepAlive"}` (no-op).
 
 ---
 

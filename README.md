@@ -10,11 +10,11 @@ A Go/Fiber backend with a Swift inference sidecar (FluidAudio) providing ASR (sp
 
 | Feature | Details |
 |---------|---------|
-| **Real-Time Streaming ASR** | Two layers: (1) buffered pseudo-streaming on `/ws/asr`, `/v1/listen`, `/v1/recognize` (full-buffer re-transcribe every ~2 s); (2) **true streaming** with cache-aware encoder states and turn-taking events on `/v2/listen` (Deepgram-compat), `/v1/realtime` (OpenAI-compat), and `/stream/realtime` (native). Eight streaming engines: Parakeet EOU 120M (English + built-in EOU), Nemotron 0.6B (English), Parakeet Unified 0.6B (multilingual, 25 EU languages). |
+| **Real-Time Streaming ASR** | Two layers: (1) buffered streaming on `/ws/asr`, `/v1/listen`, `/v1/recognize` (segment re-transcribe every ~2 s, with streaming VAD endpointing for automatic Deepgram-style finals); (2) **true streaming** with cache-aware encoder states and turn-taking events on `/v2/listen` (Deepgram-compat), `/v1/realtime` (OpenAI-compat), and `/stream/realtime` (native). Eight streaming engines: Parakeet EOU 120M (English + built-in EOU), Nemotron 0.6B (English), Parakeet Unified 0.6B (multilingual, 25 EU languages). |
 | **Realtime Speech-to-Speech** | Full OpenAI Realtime S2S on `/v1/realtime` (opt-in: `REALTIME_S2S_ENABLED=true`, connect with `?model=gpt-realtime`): ASR → LLM → streaming TTS orchestrated by the Go server, EOU turn-taking, barge-in, client-side tool calling. See [docs/realtime.md](docs/realtime.md). |
 | **File Upload ASR** | Single file or chunked upload; returns full transcript with timestamps |
 | **Whisper-Compatible API** | Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint |
-| **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` WebSocket endpoint |
+| **Deepgram-Compatible API** | Drop-in replacement for Deepgram's `/v1/listen` — both pre-recorded (REST POST) and live (WebSocket GET) variants |
 | **Watson-Compatible API** | Drop-in replacement for IBM Watson's `/v1/recognize` endpoint (HTTP + WebSocket) |
 | **Speaker Diarization** | Optional per-request; identifies and labels speakers (Sortformer, up to 4 speakers) |
 | **Text-to-Speech** | PocketTTS (with per-user stored voice cloning + 17 built-in system voices) and Kokoro (multilingual EN/Mandarin/JP, higher quality), 24 kHz output. Default backend selectable per-endpoint; streaming TTS is PocketTTS-only. |
@@ -244,6 +244,7 @@ See [sidecar-llm/README.md](sidecar-llm/README.md) for details.
 | `GET/POST` | `/v1/conversations/:id/items` | List / append conversation items |
 | `WS`   | `/ws/asr` | Real-time streaming transcription |
 | `WS`   | `/v1/listen` | Deepgram-compatible streaming transcription |
+| `POST` | `/v1/listen` | Deepgram-compatible pre-recorded transcription (raw body or `{"url": …}`) |
 | `POST` | `/v1/recognize` | Watson-compatible file transcription |
 | `WS`   | `/v1/recognize` | Watson-compatible streaming transcription |
 | `POST` | `/api/v1/tts` | Synthesize speech from text |

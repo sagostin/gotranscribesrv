@@ -68,6 +68,7 @@ private final class RealtimeStreamState: @unchecked Sendable {
     private var _vadBacklog: [Float] = []       // drained in 4096-sample chunks
     private var _vadState = VadStreamState.initial()
     private var _samplesProcessed = 0
+    private var _totalAudioSamples = 0          // all decoded 16kHz samples received
 
     init(encoding: StreamAudioEncoding, inputSampleRate: Int, itnEnabled: Bool, vadEnabled: Bool) {
         self.encoding = encoding
@@ -105,6 +106,20 @@ private final class RealtimeStreamState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _samplesProcessed
+    }
+
+    /// Total decoded audio received, in seconds (stream-relative clock for
+    /// final event timestamps).
+    var totalAudioSeconds: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return Double(_totalAudioSamples) / 16000.0
+    }
+
+    func addAudioSamples(_ n: Int) {
+        lock.lock()
+        _totalAudioSamples += n
+        lock.unlock()
     }
 
     func close() {
@@ -238,6 +253,7 @@ private func handleRealtimeStream(
 
         let samples16k = decodeTo16k(bytes, encoding: state.encoding, inputSampleRate: state.inputSampleRate)
         guard !samples16k.isEmpty else { return }
+        state.addAudioSamples(samples16k.count)
 
         if !state.engineReady {
             state.appendPending(samples16k)
@@ -259,6 +275,32 @@ private func handleRealtimeStream(
             req.logger.info("[RT] Finalizing session")
             state.close()
             await finalizeRealtime(ws: ws, engine: engine, state: state, sender: sender, logger: req.logger)
+        } else if type == "Finalize" {
+            // Deepgram Finalize: flush the current transcript as a final
+            // WITHOUT closing the session. The streaming engine keeps
+            // running; speech_final=false (no endpoint detected).
+            req.logger.info("[RT] Finalize — flushing current transcript")
+            let transcript = await engine.getPartialTranscript()
+            let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalText: String
+            if state.itnEnabled && !trimmed.isEmpty {
+                let itn = TextNormalizer.shared
+                let pre = ITNPreprocessor.preprocessPhoneNumbers(trimmed, normalizer: itn)
+                finalText = itn.normalizeSentence(pre)
+            } else {
+                finalText = trimmed
+            }
+            await sender.sendJSON([
+                "type": "final",
+                "text": finalText,
+                "is_final": true,
+                "speech_final": false,
+                "from_finalize": true,
+                "itn_applied": state.itnEnabled,
+                "time": state.totalAudioSeconds,
+            ])
+        } else if type == "KeepAlive" {
+            // No-op — connection-level keepalive.
         }
     }
 
@@ -399,7 +441,9 @@ private func emitTurnEnd(
         "text": finalText,
         "is_final": true,
         "speech_final": true,
+        "from_finalize": false,
         "itn_applied": state.itnEnabled,
+        "time": state.totalAudioSeconds,
     ])
     await sender.sendJSON(["type": "end_of_turn"])
 }
@@ -429,7 +473,10 @@ private func finalizeRealtime(
                 "type": "final",
                 "text": finalText,
                 "is_final": true,
+                "speech_final": true,
+                "from_finalize": false,
                 "itn_applied": state.itnEnabled,
+                "time": state.totalAudioSeconds,
             ])
         }
     } catch {

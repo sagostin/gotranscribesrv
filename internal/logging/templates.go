@@ -45,6 +45,10 @@ func (lm *LogManager) LoadTemplates() {
 		"DeepgramRealtimeForwardFailed":   "Deepgram-realtime failed to forward audio to sidecar: %v",
 		"DeepgramRealtimePartialSent":     "Deepgram-realtime partial result sent",
 		"DeepgramRealtimeFinalSent":       "Deepgram-realtime final result sent",
+		// Pre-recorded (REST) — POST /v1/listen
+		"DeepgramPreRecordedReceived":  "Deepgram prerecorded request received",
+		"DeepgramPreRecordedCompleted": "Deepgram prerecorded transcription completed",
+		"DeepgramPreRecordedFailed":    "Deepgram prerecorded transcription failed: %v",
 
 		// ── Watson-compatible ASR ───────────────────────────────
 		"WatsonRecognizeReceived":  "Watson-compat POST /v1/recognize received",
