@@ -585,7 +585,7 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 ```json
 {
   "type": "Results",
-  "channel_index": [0],
+  "channel_index": [0, 1],
   "duration": 0.5,
   "start": 0.0,
   "is_final": false,
@@ -594,17 +594,23 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
     "alternatives": [{
       "transcript": "hello how",
       "confidence": 0.99,
-      "words": []
+      "words": [
+        {"word": "hello", "start": 0.0, "end": 0.3, "confidence": 0.99, "language": "en", "punctuated_word": "hello"},
+        {"word": "how", "start": 0.4, "end": 0.5, "confidence": 0.99, "language": "en", "punctuated_word": "how"}
+      ],
+      "languages": ["en"]
     }]
-  }
+  },
+  "metadata": {"request_id": "…", "model_info": {"name": "parakeet-tdt-v3-coreml", "version": "…", "arch": "parakeet-tdt"}, "model_uuid": "…"},
+  "from_finalize": false
 }
 ```
 
-**`Results`** (final transcript, `is_final: true` — emitted automatically on endpointing, or in response to `Finalize`/`CloseStream`):
+**`Results`** (final transcript, `is_final: true` — emitted automatically on endpointing, on long segments (rolling mid-utterance final, `speech_final: false`, ~10s), or in response to `Finalize`/`CloseStream`):
 ```json
 {
   "type": "Results",
-  "channel_index": [0],
+  "channel_index": [0, 1],
   "duration": 1.8,
   "start": 0.0,
   "is_final": true,
@@ -614,11 +620,14 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
       "transcript": "Hello, how are you doing today?",
       "confidence": 0.99,
       "words": [
-        {"word": "Hello", "start": 0.0, "end": 0.4, "confidence": 0.99, "punctuated_word": "Hello"},
-        {"word": "how", "start": 0.5, "end": 0.7, "confidence": 0.99, "punctuated_word": "how"}
-      ]
+        {"word": "Hello", "start": 0.0, "end": 0.4, "confidence": 0.99, "language": "en", "punctuated_word": "Hello"},
+        {"word": "how", "start": 0.5, "end": 0.7, "confidence": 0.99, "language": "en", "punctuated_word": "how"}
+      ],
+      "languages": ["en"]
     }]
-  }
+  },
+  "metadata": {"request_id": "…", "model_info": {"name": "parakeet-tdt-v3-coreml", "version": "…", "arch": "parakeet-tdt"}, "model_uuid": "…"},
+  "from_finalize": false
 }
 ```
 
@@ -632,7 +641,7 @@ ws://localhost:3000/v1/listen?encoding=linear16&sample_rate=16000
 {"type": "UtteranceEnd", "channel": [0], "last_word_end": 1.8}
 ```
 
-> **Compatibility note:** `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv uses Parakeet TDT v3 (CoreML/ANE). Automatic endpointing is driven by streaming Silero VAD in the sidecar; finals cover the current speech segment with stream-relative `start`/`duration`.
+> **Compatibility note:** `model`, `punctuate`, and `smart_format` are accepted without error but ignored. GoTranscribeSrv uses Parakeet TDT v3 (CoreML/ANE). Automatic endpointing is driven by streaming Silero VAD in the sidecar; finals cover the current speech segment with stream-relative `start`/`duration`, and a segment's interims and its final share the same `start` (Deepgram semantics). Segments longer than ~10s without a pause are committed as rolling mid-utterance finals (`is_final: true`, `speech_final: false`) — concatenate all `is_final: true` transcripts for the complete text, per Deepgram's docs. The request id is also echoed as the `dg-request-id` header on the WS upgrade response.
 
 ---
 

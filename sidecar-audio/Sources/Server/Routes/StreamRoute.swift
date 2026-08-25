@@ -49,6 +49,12 @@ private let minFinalSamples = 1_600
 /// Default endpointing: 300ms of trailing silence (see route doc comment).
 private let defaultEndpointingMs = 300
 
+/// Segment length that triggers a rolling mid-utterance final (~10s).
+/// Deepgram commits is_final=true (speech_final=false) results for long
+/// segments even without a detected pause; clients that commit text on
+/// is_final cadence starve without them.
+private let maxSegmentSamples = 10 * 16_000
+
 /// Audio encoding from query params
 private enum AudioEncoding: String {
     case linear16
@@ -395,6 +401,15 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
         // the partial check so an endpoint final isn't delayed behind one.
         await processVad(samples16k, ws: ws, state: state, engines: engines, gate: gate, logger: req.logger)
 
+        // Rolling final: the segment has grown past maxSegmentSamples
+        // without an endpoint — commit it (is_final, speech_final=false)
+        // like Deepgram's mid-utterance finalization, then start a new
+        // segment so partials/finals stay stream-relative.
+        if state.segmentSampleCount >= maxSegmentSamples {
+            await emitRollingFinal(ws: ws, state: state, engines: engines, gate: gate, logger: req.logger)
+            return
+        }
+
         // Check if we have enough new audio for a partial transcription
         let newCount = state.newSampleCount
         let segmentCount = state.segmentSampleCount
@@ -407,43 +422,22 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
             let segmentStart = state.finalizedUpTo
             state.markTranscribed()
 
-            do {
-                let result = try await engines.transcribe(segment)
-                await gate.release()
-                req.logger.info("[STREAM] ASR result: \"\(result.text.prefix(200))\", length=\(result.text.count)")
-                if !result.text.isEmpty {
-                    let itn = TextNormalizer.shared
-                    let outText: String
-                    if state.itnEnabled {
-                        // Phone-number pre-pass routes digit runs through
-                        // single-expression `normalize()` (telephone tagger).
-                        // See ITNPreprocessor for the why.
-                        let pre = ITNPreprocessor.preprocessPhoneNumbers(result.text, normalizer: itn)
-                        outText = itn.normalizeSentence(pre)
-                    } else {
-                        outText = result.text
-                    }
-                    // ITN debug — always print to stdout for live transcript
-                    // visibility, plus a debug log line when the text changed.
-                    if state.itnEnabled {
-                        let native = TextNormalizer.shared.isNativeAvailable ? "ne" : "swift-passthrough"
-                        if outText != result.text {
-                            print("─[ITN \(native) partial]─────────────────────")
-                            print("  before: \"\(result.text)\"")
-                            print("  after : \"\(outText)\"")
-                            print("─────────────────────────────────────────────")
-                            req.logger.debug("ITN [\(native)] partial: \"\(result.text)\" -> \"\(outText)\"")
-                        }
-                    }
-                    let startSec = Double(segmentStart) / 16000.0
-                    let endSec = Double(segmentStart + segment.count) / 16000.0
-                    let partial = streamEventJSON(type: "partial", text: outText, isFinal: false, start: startSec, end: endSec)
-                    try? await ws.send(partial)
-                }
-            } catch {
-                await gate.release()
-                req.logger.warning("[STREAM] Partial transcription failed: \(error)")
+            // Same leading-silence trim as finals: Deepgram's interims and
+            // the final that supersedes them share the segment start — a
+            // client that matches a final to its live segment by `start`
+            // breaks when the final jumps right of the interims.
+            let result = await transcribeSegment(segment, state: state, engines: engines, logger: req.logger, label: "partial")
+            await gate.release()
+            guard let result else { return } // failure already logged
+            guard !result.text.isEmpty else {
+                req.logger.debug("[STREAM] Partial transcribed empty, skipping (\(segment.count) samples @ \(String(format: "%.2f", Double(segmentStart) / 16000.0))s)")
+                return
             }
+            let startSec = Double(segmentStart + result.trimmedSamples) / 16000.0
+            let endSec = Double(segmentStart + segment.count) / 16000.0
+            let words = buildWords(tokenTimings: result.tokenTimings, startOffsetSec: startSec, itnEnabled: state.itnEnabled, diarizeEnabled: state.diarizeEnabled)
+            let partial = streamEventJSON(type: "partial", text: result.text, isFinal: false, start: startSec, end: endSec, words: words)
+            try? await ws.send(partial)
         }
     }
 
@@ -594,7 +588,43 @@ private func emitEndpointFinal(
     }
     state.markFinalized()
     await gate.release()
+    logger.info("[STREAM] Segment finalized (endpoint) — new segment starts at \(String(format: "%.2f", Double(state.finalizedUpTo) / 16000.0))s (finals=\(state.finalsEmitted))")
     try? await ws.send(#"{"type":"utterance_end","last_word_end":"# + "\(lastWordEnd)}")
+}
+
+/// Emit a rolling mid-utterance final for an over-long segment: transcribe,
+/// send final with speech_final=FALSE (speech is still going — Deepgram
+/// semantics), and advance the segment boundary. No utterance_end: the
+/// speaker hasn't paused. Waits on the transcription gate like any final.
+private func emitRollingFinal(
+    ws: WebSocket,
+    state: StreamState,
+    engines: EngineManager,
+    gate: TranscriptionGate,
+    logger: Logger
+) async {
+    await gate.acquire()
+    let segment = state.segmentSamples
+    let segmentStart = state.finalizedUpTo
+
+    guard segment.count >= minFinalSamples else {
+        state.markFinalized()
+        await gate.release()
+        return
+    }
+
+    logger.info("[STREAM] Segment exceeds \(maxSegmentSamples / 16000)s without endpoint — rolling final (\(segment.count) samples, \(String(format: "%.1f", Double(segment.count) / 16000.0))s)")
+
+    let result = await transcribeSegment(segment, state: state, engines: engines, logger: logger, label: "rolling")
+    if let result, !result.text.isEmpty {
+        await sendFinal(ws: ws, state: state, result: result, segmentStart: segmentStart, segmentSampleCount: segment.count, fromFinalize: false, speechFinal: false)
+        state.markFinalSent()
+    } else {
+        logger.warning("[STREAM] Rolling segment transcribed EMPTY/failed (\(segment.count) samples @ \(String(format: "%.2f", Double(segmentStart) / 16000.0))s)")
+    }
+    state.markFinalized()
+    await gate.release()
+    logger.info("[STREAM] Segment finalized (rolling) — new segment starts at \(String(format: "%.2f", Double(state.finalizedUpTo) / 16000.0))s (finals=\(state.finalsEmitted))")
 }
 
 /// Perform final transcription, send results, then signal done and close.
@@ -778,54 +808,7 @@ private func sendFinal(
     let startSec = Double(segmentStart) / 16000.0 + trimSeconds
     let endSec = Double(segmentStart + segmentSampleCount) / 16000.0
 
-    // Build words array from token timings (per-word ITN applies to the
-    // surface text). Token times are segment-relative → offset to
-    // stream-relative.
-    var words: [[String: Any]] = []
-    if let timings = result?.tokenTimings {
-        let itn = TextNormalizer.shared
-        let itnEnabled = state.itnEnabled
-        var currentWord = ""
-        var wordStart: Double = 0
-        var wordEnd: Double = 0
-
-        for t in timings {
-            let token = t.token
-            if token.isEmpty || token == "<blank>" || token == "<pad>" { continue }
-
-            let isWordStart = token.hasPrefix("▁") || token.hasPrefix(" ")
-            let cleaned: String
-            if isWordStart {
-                cleaned = String(token.dropFirst()).trimmingCharacters(in: .whitespaces)
-            } else {
-                cleaned = token.trimmingCharacters(in: .whitespaces)
-            }
-            guard !cleaned.isEmpty else { continue }
-
-            if isWordStart && !currentWord.isEmpty {
-                let surface = itnEnabled ? itn.normalize(currentWord) : currentWord
-                var w: [String: Any] = ["word": surface, "start": wordStart + startSec, "end": wordEnd + startSec]
-                if state.diarizeEnabled { w["speaker"] = "0" }
-                words.append(w)
-                currentWord = cleaned
-                wordStart = t.startTime
-                wordEnd = t.endTime
-            } else if isWordStart || currentWord.isEmpty {
-                currentWord = cleaned
-                wordStart = t.startTime
-                wordEnd = t.endTime
-            } else {
-                currentWord += cleaned
-                wordEnd = t.endTime
-            }
-        }
-        if !currentWord.isEmpty {
-            let surface = itnEnabled ? itn.normalize(currentWord) : currentWord
-            var w: [String: Any] = ["word": surface, "start": wordStart + startSec, "end": wordEnd + startSec]
-            if state.diarizeEnabled { w["speaker"] = "0" }
-            words.append(w)
-        }
-    }
+    let words = buildWords(tokenTimings: result?.tokenTimings, startOffsetSec: startSec, itnEnabled: state.itnEnabled, diarizeEnabled: state.diarizeEnabled)
 
     let finalEvent: [String: Any] = [
         "type": "final",
@@ -846,8 +829,60 @@ private func sendFinal(
 
 // MARK: - Event Helpers
 
-private func streamEventJSON(type: String, text: String, isFinal: Bool, start: Double, end: Double) -> String {
-    let dict: [String: Any] = ["type": type, "text": text, "is_final": isFinal, "start": start, "end": end]
+/// Build the words array from token timings (per-word ITN applies to the
+/// surface text). Token times are relative to the transcribed (trimmed)
+/// audio — startOffsetSec shifts them to stream-relative seconds (Deepgram
+/// semantics). Shared by partial and final events so interims carry the
+/// same words shape as finals.
+private func buildWords(tokenTimings: [TokenTiming]?, startOffsetSec: Double, itnEnabled: Bool, diarizeEnabled: Bool) -> [[String: Any]] {
+    var words: [[String: Any]] = []
+    guard let timings = tokenTimings else { return words }
+    let itn = TextNormalizer.shared
+    var currentWord = ""
+    var wordStart: Double = 0
+    var wordEnd: Double = 0
+
+    for t in timings {
+        let token = t.token
+        if token.isEmpty || token == "<blank>" || token == "<pad>" { continue }
+
+        let isWordStart = token.hasPrefix("▁") || token.hasPrefix(" ")
+        let cleaned: String
+        if isWordStart {
+            cleaned = String(token.dropFirst()).trimmingCharacters(in: .whitespaces)
+        } else {
+            cleaned = token.trimmingCharacters(in: .whitespaces)
+        }
+        guard !cleaned.isEmpty else { continue }
+
+        if isWordStart && !currentWord.isEmpty {
+            let surface = itnEnabled ? itn.normalize(currentWord) : currentWord
+            var w: [String: Any] = ["word": surface, "start": wordStart + startOffsetSec, "end": wordEnd + startOffsetSec]
+            if diarizeEnabled { w["speaker"] = "0" }
+            words.append(w)
+            currentWord = cleaned
+            wordStart = t.startTime
+            wordEnd = t.endTime
+        } else if isWordStart || currentWord.isEmpty {
+            currentWord = cleaned
+            wordStart = t.startTime
+            wordEnd = t.endTime
+        } else {
+            currentWord += cleaned
+            wordEnd = t.endTime
+        }
+    }
+    if !currentWord.isEmpty {
+        let surface = itnEnabled ? itn.normalize(currentWord) : currentWord
+        var w: [String: Any] = ["word": surface, "start": wordStart + startOffsetSec, "end": wordEnd + startOffsetSec]
+        if diarizeEnabled { w["speaker"] = "0" }
+        words.append(w)
+    }
+    return words
+}
+
+private func streamEventJSON(type: String, text: String, isFinal: Bool, start: Double, end: Double, words: [[String: Any]] = []) -> String {
+    let dict: [String: Any] = ["type": type, "text": text, "is_final": isFinal, "start": start, "end": end, "words": words]
     if let data = try? JSONSerialization.data(withJSONObject: dict),
        let json = String(data: data, encoding: .utf8) {
         return json

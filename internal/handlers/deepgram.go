@@ -47,8 +47,17 @@ func NewDeepgramHandler(sc *sidecar.Client, redactor *pii.Redactor, db *gorm.DB,
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
+// Deepgram parity: the request id rides the 101 response headers as
+// dg-request-id (clients that correlate from headers, not the in-band
+// Metadata event, get nothing without it).
 func (h *DeepgramHandler) Upgrade() fiber.Handler {
-	return websocket.New(h.handle)
+	wsHandler := websocket.New(h.handle)
+	return func(c *fiber.Ctx) error {
+		if id := middleware.RequestIDFromCtx(c); id != "" {
+			c.Set("dg-request-id", id)
+		}
+		return wsHandler(c)
+	}
 }
 
 // --- Deepgram Response Types ---
@@ -73,6 +82,7 @@ type dgAlternative struct {
 	Transcript string   `json:"transcript"`
 	Confidence float64  `json:"confidence"`
 	Words      []dgWord `json:"words"`
+	Languages  []string `json:"languages,omitempty"`
 }
 
 type dgWord struct {
@@ -80,6 +90,7 @@ type dgWord struct {
 	Start          float64 `json:"start"`
 	End            float64 `json:"end"`
 	Confidence     float64 `json:"confidence"`
+	Language       string  `json:"language,omitempty"`
 	PunctuatedWord string  `json:"punctuated_word"`
 	// Speaker is present when diarization is enabled (Deepgram assigns
 	// integer speaker IDs starting at 0).
@@ -136,6 +147,9 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 	}
 	// Deepgram spec: interim_results defaults to false.
 	interimResults := c.Query("interim_results", "false") == "true"
+	// Session language — stamped onto words[]/languages[] in every
+	// Results message (Deepgram includes both).
+	sessionLang := c.Query("language", "en")
 	// utterance_end_ms / vad_events gate the UtteranceEnd and SpeechStarted
 	// server events respectively (Deepgram only emits them when requested).
 	utteranceEndMs := c.Query("utterance_end_ms") != ""
@@ -148,7 +162,8 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			"version": "2026-03-01",
 			"arch":    "parakeet-tdt",
 		},
-		ModelUUID: uuid.New().String(),
+		// Deepgram's model_uuid is stable per model, not per session.
+		ModelUUID: dgModelUUID,
 	}
 
 	// Send Deepgram Metadata event on connection open. transaction_key is
@@ -437,7 +452,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					slog.Info("[DG] Skipping partial (interim_results=false)", "request_id", requestID)
 					continue
 				}
-				dgEvt := buildDGResults(evt, false, false, modelMeta)
+				dgEvt := buildDGResults(evt, false, false, modelMeta, sessionLang)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					slog.Error("[DG] Failed to write partial Results to client", "error", err, "request_id", requestID)
 					errCh <- dgSessionEnd{src: "client_write", err: err}
@@ -474,7 +489,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				slog.Info("[DG] Sidecar final result", "text", redactedFinal, "request_id", requestID,
 					"from_finalize", evt.FromFinalize, "words", len(evt.Words),
 					"start", evt.Start, "end", evt.End)
-				dgEvt := buildDGResults(evt, true, evt.SpeechFinal, modelMeta)
+				dgEvt := buildDGResults(evt, true, evt.SpeechFinal, modelMeta, sessionLang)
 				if err := c.WriteJSON(dgEvt); err != nil {
 					slog.Error("[DG] Failed to write final Results to client", "error", err, "request_id", requestID)
 					errCh <- dgSessionEnd{src: "client_write", err: err}
@@ -771,6 +786,10 @@ func (s *dgSessionStats) snapshot() (audioBytes, frameCount int, firstAudioAt, l
 // it), so teardown must not kill the sidecar connection instantly.
 const dgFlushGrace = 10 * time.Second
 
+// dgModelUUID is the stable model identifier echoed in every Results
+// message's metadata (Deepgram's model_uuid is per model, not per session).
+const dgModelUUID = "7c9e2a14-5b3d-4f68-a1c0-9d8e6f2b4a71"
+
 // waitForFlushResult blocks until the sidecar delivers a final at-or-after
 // flushAt, the sidecar goroutine exits, or the grace period expires.
 // It returns the outcome ("delivered", "sidecar_gone", "expired") for
@@ -831,7 +850,7 @@ func audioBytesPerSecond(encoding, sampleRateStr string) float64 {
 }
 
 // buildDGResults converts a sidecar stream event into a Deepgram Results event.
-func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgModelMeta) dgResults {
+func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgModelMeta, lang string) dgResults {
 	words := make([]dgWord, 0, len(evt.Words))
 	for _, w := range evt.Words {
 		dw := dgWord{
@@ -839,6 +858,7 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 			Start:          w.Start,
 			End:            w.End,
 			Confidence:     0.99,
+			Language:       lang,
 			PunctuatedWord: w.Word,
 		}
 		// Diarization: sidecar labels speakers as strings ("0", "speaker_1",
@@ -854,7 +874,7 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 
 	return dgResults{
 		Type:         "Results",
-		ChannelIndex: []int{0},
+		ChannelIndex: []int{0, 1}, // [channel index, channel count] — Deepgram mono
 		Duration:     duration,
 		Start:        evt.Start,
 		IsFinal:      isFinal,
@@ -865,6 +885,7 @@ func buildDGResults(evt sidecarStreamEvent, isFinal, speechFinal bool, meta dgMo
 					Transcript: evt.Text,
 					Confidence: 0.99,
 					Words:      words,
+					Languages:  []string{lang},
 				},
 			},
 		},

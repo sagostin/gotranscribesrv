@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
+	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
 	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 )
@@ -1077,7 +1078,7 @@ func mockSidecarAppEndpointing() *fiber.App {
 
 // TestDeepgramEndpointAutoFinal verifies the Deepgram endpointing flow:
 // a VAD-driven final arrives WITHOUT any Finalize/CloseStream, carrying
-// is_final=true, speech_final=true and channel_index=[0].
+// is_final=true, speech_final=true and channel_index=[0,1].
 func TestDeepgramEndpointAutoFinal(t *testing.T) {
 	lm := captureLogManager()
 	sidecarWS := startTestApp(t, mockSidecarAppEndpointing())
@@ -1112,8 +1113,8 @@ func TestDeepgramEndpointAutoFinal(t *testing.T) {
 			res["is_final"], res["speech_final"])
 	}
 	ci, _ := res["channel_index"].([]any)
-	if len(ci) != 1 || ci[0] != 0.0 {
-		t.Errorf("channel_index = %v, want [0]", res["channel_index"])
+	if len(ci) != 2 || ci[0] != 0.0 || ci[1] != 1.0 {
+		t.Errorf("channel_index = %v, want [0 1]", res["channel_index"])
 	}
 	if res["from_finalize"] != false {
 		t.Errorf("from_finalize = %v, want false for endpoint final", res["from_finalize"])
@@ -1222,6 +1223,7 @@ func mockSidecarAppWithPartial() *fiber.App {
 				audioSeen = true
 				_ = c.WriteJSON(fiber.Map{
 					"type": "partial", "text": "he", "start": 0.0, "end": 0.5, "is_final": false,
+					"words": []any{map[string]any{"word": "he", "start": 0.0, "end": 0.5}},
 				})
 				continue
 			}
@@ -1317,6 +1319,110 @@ func TestDeepgramInterimResultsDefault(t *testing.T) {
 	}
 	if d, _ := partial["duration"].(float64); d != 0.5 {
 		t.Errorf("interim duration = %v, want 0.5", d)
+	}
+}
+
+// TestDeepgramWireParity verifies the Deepgram Results wire shape
+// end-to-end: the dg-request-id response header matches the in-band
+// Metadata request_id, channel_index is [index, count], alternatives
+// carry languages, words carry per-word language, partials carry words,
+// and model_uuid is stable across messages (per model, not per session).
+func TestDeepgramWireParity(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarAppWithPartial())
+
+	sc := sidecar.NewClient("http://unused", sidecarWS, "http://unused-llm")
+	metricsOnce.Do(func() { metrics.Init(true) })
+	h := NewDeepgramHandler(sc, pii.NewRedactor(nil, false, nil, 0), nil, true, lm)
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use("/v1/listen", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/v1/listen", h.Upgrade())
+	handlerWS := startTestApp(t, app)
+
+	conn, resp, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?interim_results=true&language=en", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	hdrID := resp.Header.Get("dg-request-id")
+	if hdrID == "" {
+		t.Fatal("101 response missing dg-request-id header")
+	}
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if meta["request_id"] != hdrID {
+		t.Errorf("Metadata request_id = %v, want dg-request-id header %v", meta["request_id"], hdrID)
+	}
+
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var partial map[string]any
+	if err := conn.ReadJSON(&partial); err != nil {
+		t.Fatalf("read partial: %v", err)
+	}
+	assertDGWireShape(t, partial, "en")
+	pm, _ := partial["metadata"].(map[string]any)
+	modelUUID, _ := pm["model_uuid"].(string)
+	if modelUUID == "" {
+		t.Fatal("partial metadata.model_uuid empty")
+	}
+	// Interims carry words (Deepgram parity) — the mock sent one.
+	ch, _ := partial["channel"].(map[string]any)
+	alts, _ := ch["alternatives"].([]any)
+	alt0, _ := alts[0].(map[string]any)
+	if words, _ := alt0["words"].([]any); len(words) != 1 {
+		t.Errorf("interim words = %v, want 1 word", alt0["words"])
+	}
+
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+	var final map[string]any
+	if err := conn.ReadJSON(&final); err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	assertDGWireShape(t, final, "en")
+	fm, _ := final["metadata"].(map[string]any)
+	if fm["model_uuid"] != modelUUID {
+		t.Errorf("model_uuid changed across messages: %v → %v (Deepgram's is stable per model)", modelUUID, fm["model_uuid"])
+	}
+}
+
+// assertDGWireShape checks the Deepgram-spec Results fields shared by
+// interim and final messages.
+func assertDGWireShape(t *testing.T, res map[string]any, lang string) {
+	t.Helper()
+	ci, _ := res["channel_index"].([]any)
+	if len(ci) != 2 || ci[0] != 0.0 || ci[1] != 1.0 {
+		t.Errorf("channel_index = %v, want [0 1]", res["channel_index"])
+	}
+	ch, _ := res["channel"].(map[string]any)
+	alts, _ := ch["alternatives"].([]any)
+	if len(alts) == 0 {
+		t.Fatal("channel.alternatives empty")
+	}
+	alt0, _ := alts[0].(map[string]any)
+	langs, _ := alt0["languages"].([]any)
+	if len(langs) != 1 || langs[0] != lang {
+		t.Errorf("alternatives[0].languages = %v, want [%s]", alt0["languages"], lang)
+	}
+	for i, w := range alt0["words"].([]any) {
+		wm, _ := w.(map[string]any)
+		if wm["language"] != lang {
+			t.Errorf("words[%d].language = %v, want %q", i, wm["language"], lang)
+		}
 	}
 }
 
