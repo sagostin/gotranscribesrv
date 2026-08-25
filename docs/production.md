@@ -212,7 +212,26 @@ another Mac mini" below.
 git pull
 make node-migrate      # from the FIRST upgraded node only, if schema changed
 make node-up
-make audio-build && make sidecar-restart   # if the audio sidecar changed
+make sidecar-deploy    # if the audio sidecar changed — builds, re-signs,
+                       # restarts, and waits for /health (prints the build SHA)
+```
+
+Two deployment gotchas, both fixed by the targets above:
+
+- **Legacy shim.** Nodes installed during the rename transition may still
+  have the `com.gotranscribesrv.swift-sidecar` agent loaded alongside the
+  primary one — both compete for :8101, and a shim baked with an older repo
+  path serves the OLD binary. Check `make sidecar-status`; if the shim is
+  loaded, run `make sidecar-remove-shim` once per node.
+- **Codesigning flake.** Replacing the release binary in place can make
+  launchd kill the first spawn (`OS_REASON_CODESIGNING`). `audio-build`
+  re-signs after every build and `sidecar-deploy` waits for health, so a
+  failed first spawn can't go unnoticed.
+
+Verify what's actually running on each node after an upgrade:
+
+```bash
+curl -s http://<mini-ip>:8101/health | jq .build   # {"sha":"…","built_at":"…"} — must match the deployed commit
 ```
 
 ## Database backups

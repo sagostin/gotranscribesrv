@@ -68,9 +68,25 @@ make sidecar-status     # verify: launchd state + :8101 health check
 Day-to-day management:
 
 ```bash
-make sidecar-restart    # restart after `git pull && make audio-build`
-make sidecar-uninstall  # remove the agents entirely
+make sidecar-deploy       # build (release) + re-sign + restart + wait for health — USE THIS for updates
+make sidecar-restart      # bare restart (only if nothing changed)
+make sidecar-remove-shim  # retire the legacy swift-sidecar agent (see below)
+make sidecar-uninstall    # remove the agents entirely
 ```
+
+> **Legacy shim (`com.gotranscribesrv.swift-sidecar`):** `sidecar-install`
+> used to install a second agent under the old label as a rename-transition
+> aid. While both are loaded they compete for :8101 — and a shim baked with
+> an older repo path keeps serving the **old binary** no matter how often
+> you rebuild. If any node still shows the shim in `make sidecar-status`,
+> run `make sidecar-remove-shim` once per node, then verify the shim reads
+> "not loaded".
+>
+> **Codesigning note:** macOS can kill a freshly replaced binary on its
+> first launch (`OS_REASON_CODESIGNING` in `make sidecar-status`) when
+> launchd still has the old inode cached. `make audio-build` now re-signs
+> the binary after every build, and `make sidecar-deploy` waits for health
+> — prefer it over `audio-build && sidecar-restart`.
 
 ### Logs and rotation
 

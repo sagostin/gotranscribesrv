@@ -78,15 +78,15 @@ private final class StreamState: @unchecked Sendable {
     /// cover [finalizedUpTo, buffer.count); partials transcribe the same
     /// range so results are stream-relative like Deepgram's.
     private var _finalizedUpTo = 0
+    /// Number of final events emitted this session — used to suppress the
+    /// content-free closing final once real finals have gone out.
+    private var _finalsEmitted = 0
     /// Sample index where the VAD last saw speech end, awaiting the
     /// endpointing window. nil when speech is active or no endpoint pending.
     private var _pendingSpeechEnd: Int?
     /// Bumped whenever the pending endpoint changes so stale endpoint
     /// watchdogs no-op.
     private var _endpointGeneration = 0
-    /// True while a transcription (partial or final) is in flight — used
-    /// to skip overlapping partials and defer endpoint finals.
-    private var _transcribing = false
 
     // MARK: VAD state
     private var _vadBacklog: [Float] = []       // drained in 4096-sample chunks
@@ -169,6 +169,19 @@ private final class StreamState: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Record a final event sent to the client.
+    func markFinalSent() {
+        lock.lock()
+        _finalsEmitted += 1
+        lock.unlock()
+    }
+
+    var finalsEmitted: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _finalsEmitted
+    }
+
     // MARK: Endpoint bookkeeping
 
     /// Record a VAD speech-end; returns the watchdog generation for it.
@@ -212,22 +225,6 @@ private final class StreamState: @unchecked Sendable {
         return _endpointGeneration == generation && _pendingSpeechEnd != nil
     }
 
-    // MARK: Transcription overlap guard
-
-    func tryBeginTranscribe() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if _transcribing { return false }
-        _transcribing = true
-        return true
-    }
-
-    func endTranscribe() {
-        lock.lock()
-        _transcribing = false
-        lock.unlock()
-    }
-
     // MARK: VAD backlog
 
     func appendVadBacklog(_ samples: [Float]) {
@@ -264,6 +261,37 @@ private final class StreamState: @unchecked Sendable {
     }
 }
 
+/// Serializes ASR transcription calls within a session. The shared CoreML
+/// engine does not tolerate concurrent transcribe() calls — they fail
+/// intermittently ("transcription failed") — and a CloseStream that races
+/// an in-flight endpoint final used to close the socket before the final
+/// was sent, losing that segment for the client.
+///
+/// Partials use tryAcquire (skippable — the next interval catches up);
+/// every final path uses acquire (must not be dropped).
+private actor TranscriptionGate {
+    private var busy = false
+
+    /// Non-blocking attempt. Returns false when a transcription is running.
+    func tryAcquire() -> Bool {
+        if busy { return false }
+        busy = true
+        return true
+    }
+
+    /// Blocking acquire — waits for the in-flight transcription.
+    func acquire() async {
+        while busy {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        busy = true
+    }
+
+    func release() {
+        busy = false
+    }
+}
+
 /// Parse the ?endpointing= query param. Returns nil when disabled.
 private func parseEndpointing(_ req: Request) -> Int? {
     guard let raw = req.query[String.self, at: "endpointing"] else {
@@ -296,6 +324,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
     req.logger.info("[STREAM] Session started — encoding=\(encoding.rawValue), sample_rate=\(inputSampleRate), itn=\(itnEnabled), diarize=\(diarizeEnabled), endpointing=\(endpointingSamples.map { "\($0 / 16)ms" } ?? "off")")
 
     let state = StreamState(encoding: encoding, inputSampleRate: inputSampleRate, itnEnabled: itnEnabled, diarizeEnabled: diarizeEnabled, endpointingSamples: endpointingSamples)
+    let gate = TranscriptionGate()
 
     // Send ready event
     try? await ws.send(#"{"type":"ready"}"#)
@@ -364,7 +393,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
 
         // Streaming VAD → speech_started / endpoint detection. Runs before
         // the partial check so an endpoint final isn't delayed behind one.
-        await processVad(samples16k, ws: ws, state: state, engines: engines, logger: req.logger)
+        await processVad(samples16k, ws: ws, state: state, engines: engines, gate: gate, logger: req.logger)
 
         // Check if we have enough new audio for a partial transcription
         let newCount = state.newSampleCount
@@ -372,7 +401,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
         if newCount >= partialIntervalSamples && segmentCount >= minTranscribeSamples {
             // Skip if a transcription is already in flight (e.g. an
             // endpoint final) — the next interval will catch up.
-            guard state.tryBeginTranscribe() else { return }
+            guard await gate.tryAcquire() else { return }
             req.logger.info("[STREAM] Triggering partial transcription (\(state.sampleCount) samples, \(String(format: "%.1f", Double(state.sampleCount) / 16000.0))s)")
             let segment = state.segmentSamples
             let segmentStart = state.finalizedUpTo
@@ -380,7 +409,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
 
             do {
                 let result = try await engines.transcribe(segment)
-                state.endTranscribe()
+                await gate.release()
                 req.logger.info("[STREAM] ASR result: \"\(result.text.prefix(200))\", length=\(result.text.count)")
                 if !result.text.isEmpty {
                     let itn = TextNormalizer.shared
@@ -412,7 +441,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                     try? await ws.send(partial)
                 }
             } catch {
-                state.endTranscribe()
+                await gate.release()
                 req.logger.warning("[STREAM] Partial transcription failed: \(error)")
             }
         }
@@ -429,7 +458,7 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
             if let action = ctrl["action"] as? String, action == "stop" {
                 req.logger.info("[STREAM] Stop action, finalizing (\(state.sampleCount) samples)")
                 state.close()
-                await finalizeStream(ws: ws, state: state, engines: engines, logger: req.logger)
+                await finalizeStream(ws: ws, state: state, engines: engines, gate: gate, logger: req.logger)
             }
             if let type = ctrl["type"] as? String {
                 switch type {
@@ -443,11 +472,11 @@ private func handleStream(req: Request, ws: WebSocket, engines: EngineManager) a
                     // speech_final=true when the VAD already saw speech end
                     // (the Finalize coincided with an endpoint).
                     let speechFinal = state.pendingSpeechEnd != nil
-                    await emitFinalEvent(ws: ws, state: state, engines: engines, logger: req.logger, fromFinalize: true, speechFinal: speechFinal)
+                    await emitFinalEvent(ws: ws, state: state, engines: engines, gate: gate, logger: req.logger, fromFinalize: true, speechFinal: speechFinal)
                 case "CloseStream":
                     req.logger.info("[STREAM] CloseStream, finalizing (\(state.sampleCount) samples)")
                     state.close()
-                    await finalizeStream(ws: ws, state: state, engines: engines, logger: req.logger)
+                    await finalizeStream(ws: ws, state: state, engines: engines, gate: gate, logger: req.logger)
                 default:
                     req.logger.info("[STREAM] Unknown control: \(type)")
                 }
@@ -467,6 +496,7 @@ private func processVad(
     ws: WebSocket,
     state: StreamState,
     engines: EngineManager,
+    gate: TranscriptionGate,
     logger: Logger
 ) async {
     state.appendVadBacklog(samples)
@@ -486,7 +516,7 @@ private func processVad(
                     // Watchdog: if the client stops sending audio right at
                     // the endpoint, no further onBinary calls arrive to
                     // notice the elapsed silence — fire it on a timer too.
-                    scheduleEndpointWatchdog(ws: ws, state: state, engines: engines, logger: logger, generation: generation)
+                    scheduleEndpointWatchdog(ws: ws, state: state, engines: engines, gate: gate, logger: logger, generation: generation)
                 }
             }
         } catch {
@@ -495,20 +525,21 @@ private func processVad(
 
         // Endpoint check after each drained chunk (256ms granularity).
         if state.endpointDue() != nil {
-            await emitEndpointFinal(ws: ws, state: state, engines: engines, logger: logger)
+            await emitEndpointFinal(ws: ws, state: state, engines: engines, gate: gate, logger: logger)
         }
     }
 }
 
-/// Retry loop that fires a pending endpoint even when no further audio
-/// frames arrive. The endpoint is due endpointing-ms after the speech end
-/// was DETECTED (wall clock) — the VAD sample counter can stall when the
-/// client stops sending, so the watchdog deliberately does not depend on
-/// it. No-ops if the endpoint was already consumed/canceled.
+/// Fires a pending endpoint even when no further audio frames arrive. The
+/// endpoint is due endpointing-ms after the speech end was DETECTED (wall
+/// clock) — the VAD sample counter can stall when the client stops
+/// sending, so the watchdog deliberately does not depend on it. No-ops if
+/// the endpoint was already consumed/canceled.
 private func scheduleEndpointWatchdog(
     ws: WebSocket,
     state: StreamState,
     engines: EngineManager,
+    gate: TranscriptionGate,
     logger: Logger,
     generation: Int
 ) {
@@ -518,30 +549,26 @@ private func scheduleEndpointWatchdog(
         for _ in 0..<10 {
             try? await Task.sleep(nanoseconds: waitNs)
             guard !state.sessionClosed, state.endpointPending(generation: generation) else { return }
-            // emitEndpointFinal returns false when another transcription is
-            // in flight — the endpoint stays pending and we retry.
-            if await emitEndpointFinal(ws: ws, state: state, engines: engines, logger: logger) {
-                return
-            }
+            await emitEndpointFinal(ws: ws, state: state, engines: engines, gate: gate, logger: logger)
+            return
         }
     }
 }
 
 /// Emit the segment final for a detected endpoint: transcribe the current
 /// segment, send final (speech_final=true) + utterance_end, start a new
-/// segment. Returns false when another transcription is in flight (the
-/// endpoint stays pending for the next VAD chunk or watchdog retry).
-@discardableResult
+/// segment. Waits on the transcription gate — endpoint finals must never
+/// be dropped or raced against a CloseStream final.
 private func emitEndpointFinal(
     ws: WebSocket,
     state: StreamState,
     engines: EngineManager,
+    gate: TranscriptionGate,
     logger: Logger
-) async -> Bool {
-    guard let speechEnd = state.pendingSpeechEnd else { return true }
-    guard state.tryBeginTranscribe() else { return false }
+) async {
+    guard let speechEnd = state.pendingSpeechEnd else { return }
+    await gate.acquire()
     state.clearPendingEndpoint()
-    defer { state.endTranscribe() }
 
     let segment = state.segmentSamples
     let segmentStart = state.finalizedUpTo
@@ -550,7 +577,8 @@ private func emitEndpointFinal(
     // False VAD trigger on a tiny blip — just reset the segment.
     guard segment.count >= minFinalSamples else {
         state.markFinalized()
-        return true
+        await gate.release()
+        return
     }
 
     logger.info("[STREAM] Endpoint detected — finalizing segment (\(segment.count) samples, \(String(format: "%.1f", Double(segment.count) / 16000.0))s)")
@@ -558,40 +586,68 @@ private func emitEndpointFinal(
     let result = await transcribeSegment(segment, state: state, engines: engines, logger: logger, label: "endpoint")
     if let result, !result.text.isEmpty {
         await sendFinal(ws: ws, state: state, result: result, segmentStart: segmentStart, segmentSampleCount: segment.count, fromFinalize: false, speechFinal: true)
+        state.markFinalSent()
+    } else {
+        // Visible forever: an endpoint that produces no text used to be
+        // indistinguishable from endpointing not working at all.
+        logger.warning("[STREAM] Endpoint segment transcribed EMPTY/failed (\(segment.count) samples @ \(String(format: "%.2f", Double(segmentStart) / 16000.0))s)")
     }
     state.markFinalized()
+    await gate.release()
     try? await ws.send(#"{"type":"utterance_end","last_word_end":"# + "\(lastWordEnd)}")
-    return true
 }
 
 /// Perform final transcription, send results, then signal done and close.
+/// Waits for any in-flight endpoint/partial transcription first — the
+/// endpoint final must reach the client BEFORE done is sent and the
+/// socket closes (previously the racing close could drop it).
 private func finalizeStream(
-    ws: WebSocket, state: StreamState, engines: EngineManager, logger: Logger
+    ws: WebSocket, state: StreamState, engines: EngineManager, gate: TranscriptionGate, logger: Logger
 ) async {
-    await emitFinalEvent(ws: ws, state: state, engines: engines, logger: logger, fromFinalize: false, speechFinal: true)
+    // Deepgram semantics: the close-forced final is speech_final only when
+    // the VAD actually saw speech end — not unconditionally.
+    let speechFinal = state.pendingSpeechEnd != nil
+    await emitFinalEvent(ws: ws, state: state, engines: engines, gate: gate, logger: logger, fromFinalize: false, speechFinal: speechFinal)
 
     try? await ws.send(#"{"type":"done"}"#)
     try? await ws.close()
 }
 
 /// Transcribe the current (unfinalized) segment and emit a single `final`
-/// event. Used by CloseStream (fromFinalize=false, then done+close),
-/// Finalize (fromFinalize=true, session stays open), and endpoint finals.
+/// event. Used by CloseStream (fromFinalize=false, then done+close) and
+/// Finalize (fromFinalize=true, session stays open).
 ///
-/// Always emits a final — even when the remaining segment is too short to
-/// transcribe (empty text) — so a client that closes after <1s of audio
-/// still gets a terminal result, matching Deepgram.
+/// Waits on the transcription gate — a CloseStream that races an in-flight
+/// endpoint final must queue behind it, not corrupt the shared engine or
+/// close the socket before the endpoint final is sent.
+///
+/// Deepgram parity on the closing final: when endpointing already
+/// finalized all speech, the remaining segment is empty — suppress the
+/// content-free closing final in that case (Deepgram sends the terminal
+/// Metadata without a redundant empty Results). Finalize always answers —
+/// the client is explicitly waiting for a flush response.
 private func emitFinalEvent(
-    ws: WebSocket, state: StreamState, engines: EngineManager, logger: Logger,
+    ws: WebSocket, state: StreamState, engines: EngineManager, gate: TranscriptionGate, logger: Logger,
     fromFinalize: Bool, speechFinal: Bool
 ) async {
     state.clearPendingEndpoint()
+    await gate.acquire()
+    defer { Task { await gate.release() } }
+
+    // Snapshot AFTER acquiring the gate: an in-flight endpoint final may
+    // have just advanced the segment boundary.
     let segment = state.segmentSamples
     let segmentStart = state.finalizedUpTo
 
     guard segment.count >= minFinalSamples else {
+        if !fromFinalize && state.finalsEmitted > 0 {
+            logger.info("[STREAM] CloseStream with \(segment.count) unfinalized samples after \(state.finalsEmitted) final(s) — suppressing empty closing final")
+            state.markFinalized()
+            return
+        }
         logger.info("[STREAM] Not enough audio (\(segment.count) samples), sending empty final")
         await sendFinal(ws: ws, state: state, result: nil, segmentStart: segmentStart, segmentSampleCount: segment.count, fromFinalize: fromFinalize, speechFinal: speechFinal)
+        state.markFinalSent()
         state.markFinalized()
         return
     }
@@ -602,20 +658,41 @@ private func emitFinalEvent(
         try? await ws.send(#"{"type":"error","message":"transcription failed"}"#)
         return
     }
+    if result.text.isEmpty && !fromFinalize && state.finalsEmitted > 0 {
+        // Same suppression for a segment that transcribes to nothing.
+        logger.info("[STREAM] Closing segment transcribed empty after \(state.finalsEmitted) final(s) — suppressing")
+        state.markFinalized()
+        return
+    }
     await sendFinal(ws: ws, state: state, result: result, segmentStart: segmentStart, segmentSampleCount: segment.count, fromFinalize: fromFinalize, speechFinal: speechFinal)
+    state.markFinalSent()
     state.markFinalized()
 }
 
-/// Transcribe a segment with ITN applied. Returns nil on failure.
+/// Transcribe a segment with ITN applied. Leading digital silence is
+/// trimmed first: segments begin where the previous final cut (mid-pause,
+/// up to ~1s of dead air after VAD hysteresis + endpointing), and Parakeet
+/// TDT can return empty text for short speech buried behind leading
+/// silence — the production "closing final came back empty" failure mode.
+/// The trim count is returned so word timings/stream offsets can be
+/// corrected. Returns nil on failure.
 private func transcribeSegment(
     _ segment: [Float],
     state: StreamState,
     engines: EngineManager,
     logger: Logger,
     label: String
-) async -> (text: String, tokenTimings: [TokenTiming]?)? {
+) async -> (text: String, tokenTimings: [TokenTiming]?, trimmedSamples: Int)? {
+    let (trimmed, trimCount) = trimLeadingSilence(segment)
+    if trimCount > 0 {
+        logger.info("[STREAM] \(label): trimmed \(trimCount) leading-silence samples (\(String(format: "%.2f", Double(trimCount) / 16000.0))s)")
+    }
+    guard !trimmed.isEmpty else {
+        logger.info("[STREAM] \(label): segment is all silence — skipping ASR")
+        return ("", nil, trimCount)
+    }
     do {
-        let result = try await engines.transcribe(segment)
+        let result = try await engines.transcribe(trimmed)
         logger.info("[STREAM] \(label.capitalized) ASR: \"\(result.text.prefix(200))\"")
 
         let finalText: String
@@ -649,27 +726,56 @@ private func transcribeSegment(
             print("─────────────────────────────────────────────────")
             logger.info("ITN: disabled for this session (?itn=false)")
         }
-        return (finalText, result.tokenTimings)
+        return (finalText, result.tokenTimings, trimCount)
     } catch {
         logger.error("[STREAM] \(label.capitalized) transcription failed: \(error)")
         return nil
     }
 }
 
+/// Drop leading silence from a segment before transcription, keeping a
+/// 200ms pre-roll for acoustic context. 20ms windows; "loud" is RMS above
+/// ~-46dBFS (telephony quiet speech is ~-15dBFS, mulaw digital silence is
+/// true zero).
+private func trimLeadingSilence(_ samples: [Float], threshold: Float = 0.005, preRoll: Int = 3200) -> ([Float], Int) {
+    let window = 320 // 20ms @ 16kHz
+    var firstLoud = 0
+    var i = 0
+    let thresh2 = threshold * threshold
+    while i + window <= samples.count {
+        var energy: Float = 0
+        for j in i..<(i + window) { energy += samples[j] * samples[j] }
+        if energy / Float(window) > thresh2 {
+            firstLoud = i
+            break
+        }
+        i += window
+    }
+    if i + window > samples.count {
+        // Never found a loud window — all silence.
+        return ([], samples.count)
+    }
+    let cut = max(0, firstLoud - preRoll)
+    return (Array(samples[cut...]), cut)
+}
+
 /// Build and send a `final` event for a transcribed segment. Word timings
 /// are built from token timings and offset to stream-relative seconds
-/// (Deepgram semantics). A nil result produces the empty final used to
-/// answer Finalize/CloseStream on too-short audio.
+/// (Deepgram semantics). `trimSeconds` is the leading silence cut before
+/// transcription — the result's start (and every word) shifts right by it.
+/// A nil result produces the empty final used to answer Finalize on
+/// too-short audio.
 private func sendFinal(
     ws: WebSocket,
     state: StreamState,
-    result: (text: String, tokenTimings: [TokenTiming]?)?,
+    result: (text: String, tokenTimings: [TokenTiming]?, trimmedSamples: Int)?,
     segmentStart: Int,
     segmentSampleCount: Int,
     fromFinalize: Bool,
     speechFinal: Bool
 ) async {
-    let startSec = Double(segmentStart) / 16000.0
+    let trimSeconds = Double(result?.trimmedSamples ?? 0) / 16000.0
+    let startSec = Double(segmentStart) / 16000.0 + trimSeconds
     let endSec = Double(segmentStart + segmentSampleCount) / 16000.0
 
     // Build words array from token timings (per-word ITN applies to the

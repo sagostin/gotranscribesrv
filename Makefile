@@ -115,12 +115,14 @@ help:
 	@echo "    caddy-reload        Zero-downtime reload after editing Caddyfile"
 	@echo ""
 	@echo "  Audio sidecar (CoreML/ANE — ASR, VAD, Diarization, TTS)"
-	@echo "    audio-build         Release build (.build/release/Server — used by launchd)"
+	@echo "    audio-build         Release build (.build/release/Server — used by launchd) + codesign + build-info"
 	@echo "    audio-test          Sidecar tests (ITN)"
 	@echo "    sidecar-install     Install audio sidecar launchd agents (auto-start, log rotation)"
+	@echo "    sidecar-deploy      Build + re-sign + restart + wait for health (USE FOR PROD UPDATES)"
 	@echo "    sidecar-restart     Restart the audio sidecar launchd agent"
+	@echo "    sidecar-remove-shim Retire the legacy swift-sidecar agent (port conflict fix)"
 	@echo "    sidecar-uninstall   Remove the audio sidecar launchd agents"
-	@echo "    sidecar-status      launchd state + :8101 health check"
+	@echo "    sidecar-status      launchd state + :8101 health check (incl. build SHA)"
 	@echo ""
 	@echo "  LLM sidecar (CoreML — chat, embeddings, image generation)"
 	@echo "    llm-vendor          Clone + patch swift-embeddings $(EMBEDDINGS_VERSION) into sidecar-llm/vendor (run FIRST)"
@@ -175,6 +177,33 @@ audio-sidecar:
 
 audio-build:
 	cd sidecar-audio && swift build -c release
+	# Re-ad-hoc-sign after every build: launchd can kill a freshly
+	# replaced binary on first spawn (OS_REASON_CODESIGNING) when it
+	# still has the old inode cached — an explicit re-sign avoids the
+	# flaky first launch after each deploy.
+	codesign --force --sign - sidecar-audio/.build/release/Server
+	# Build marker — the sidecar reads this at startup and surfaces it in
+	# /health so the deployed version is remotely verifiable per node.
+	@printf '{"sha":"%s","built_at":"%s"}\n' \
+		"$$(git -C $(CURDIR) rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+		"$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		> sidecar-audio/.build/release/build-info.json
+
+# sidecar-deploy: build + re-sign + restart + wait for health. Use this
+# (not bare audio-build/sidecar-restart) when updating production nodes.
+sidecar-deploy: audio-build
+	launchctl kickstart -k $(GUI_DOMAIN)/$(SIDECAR_LABEL)
+	@echo "  ⏳ Waiting for sidecar health on :8101..."
+	@for i in $$(seq 1 60); do \
+		if curl -sf http://localhost:8101/health >/dev/null 2>&1; then \
+			echo "  ✅ Audio sidecar healthy after $${i}s"; \
+			curl -s http://localhost:8101/health | sed 's/^/     /'; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "  ❌ Sidecar did not become healthy within 60s — check deploy/macos/logs/"; \
+	exit 1
 
 audio-test:
 	@echo ""
@@ -230,6 +259,16 @@ sidecar-uninstall:
 	rm -f $(LAUNCHAGENTS)/$(SIDECAR_LEGACY_LABEL).plist
 	rm -f $(LAUNCHAGENTS)/$(SIDECAR_ROTATE_LABEL).plist
 	@echo "  ✅ Audio sidecar LaunchAgents removed (new + legacy)"
+
+# sidecar-remove-shim: retire ONLY the legacy com.gotranscribesrv.swift-sidecar
+# label. The shim was a rename-transition aid — while installed, both agents
+# compete for :8101, and a shim baked with an older repo path keeps serving
+# the OLD binary. The primary agent and log rotation stay untouched.
+sidecar-remove-shim:
+	-launchctl bootout $(GUI_DOMAIN)/$(SIDECAR_LEGACY_LABEL)
+	rm -f $(LAUNCHAGENTS)/$(SIDECAR_LEGACY_LABEL).plist
+	@echo "  ✅ Legacy swift-sidecar shim removed (primary agent untouched)"
+	@echo "  ℹ  Verify: make sidecar-status (shim should read 'not loaded')"
 
 sidecar-status:
 	@echo "  launchd (audio-sidecar):"

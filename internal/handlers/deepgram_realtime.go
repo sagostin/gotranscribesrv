@@ -269,7 +269,10 @@ func (h *DeepgramRealtimeHandler) handle(c *websocket.Conn) {
 	totalAudioBytes, frameCount, firstAudioAt, lastResultAt := sess.stats.snapshot()
 	audioDurationMs := 0
 	if totalAudioBytes > 0 {
-		audioDurationMs = totalAudioBytes / 32 // PCM 16-bit 16kHz mono = 32 bytes/ms
+		// Duration from the client's actual encoding/sample_rate (see the
+		// v1 handler — mulaw 8kHz is 8 bytes/ms, not 32).
+		bps := audioBytesPerSecond(sess.encoding, sess.sampleRate)
+		audioDurationMs = int(float64(totalAudioBytes) / bps * 1000)
 	}
 	processTimeMs := 0
 	if !firstAudioAt.IsZero() && !lastResultAt.IsZero() {

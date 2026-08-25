@@ -1475,3 +1475,200 @@ func TestDeepgramRealtimeFinalizeFlow(t *testing.T) {
 		t.Errorf("terminal duration = %v, want 0.1 (3200 bytes @ 32kB/s PCM16)", d)
 	}
 }
+
+// ── Encoding-aware duration accounting ──────────────────────────────
+
+// TestAudioBytesPerSecond verifies the wire-bytes → seconds math used by
+// terminal Metadata and session-end usage accounting.
+func TestAudioBytesPerSecond(t *testing.T) {
+	cases := []struct {
+		encoding, rate string
+		want           float64
+	}{
+		{"linear16", "16000", 32000},
+		{"linear16", "8000", 16000},
+		{"mulaw", "8000", 8000},
+		{"alaw", "8000", 8000},
+		{"mulaw", "16000", 16000},
+		{"", "", 32000},           // defaults
+		{"mulaw", "bogus", 16000}, // bad rate → 16k
+	}
+	for _, tc := range cases {
+		if got := audioBytesPerSecond(tc.encoding, tc.rate); got != tc.want {
+			t.Errorf("audioBytesPerSecond(%q, %q) = %v, want %v", tc.encoding, tc.rate, got, tc.want)
+		}
+	}
+}
+
+// TestDeepgramMulawUsageAccounting is the regression test for the
+// 4x under-counted usage records on telephony sessions: with
+// encoding=mulaw&sample_rate=8000, 8000 bytes is 1000ms of audio, not
+// 250ms (the old hardcoded bytes/32 math).
+func TestDeepgramMulawUsageAccounting(t *testing.T) {
+	lm := captureLogManager()
+	sidecarWS := startTestApp(t, mockSidecarApp())
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen?encoding=mulaw&sample_rate=8000", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 8000)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+
+	// Drain until close: final Results, then terminal Metadata whose
+	// duration must reflect mulaw 8kHz (1.0s), then the server ends.
+	sawTerminalMeta := false
+	for {
+		var ev map[string]any
+		if err := conn.ReadJSON(&ev); err != nil {
+			break
+		}
+		if ev["type"] == "Metadata" {
+			sawTerminalMeta = true
+			if d, _ := ev["duration"].(float64); d != 1.0 {
+				t.Errorf("terminal Metadata duration = %v, want 1.0 (8000 mulaw bytes @ 8kB/s)", d)
+			}
+		}
+	}
+	if !sawTerminalMeta {
+		t.Error("terminal Metadata never received")
+	}
+
+	ended := waitForLogEvent(lm, "DEEPGRAM_SESSION_ENDED", 2*time.Second)
+	if ended == nil {
+		t.Fatal("DEEPGRAM_SESSION_ENDED never emitted")
+	}
+	if d, _ := ended.AdditionalData["audio_duration_ms"].(int); d != 1000 {
+		t.Errorf("audio_duration_ms = %v, want 1000 (mulaw 8kHz), got old bytes/32 math?", d)
+	}
+}
+
+// TestDeepgramCloseStreamMidEndpointFinal is the regression test for the
+// lost-final race: a CloseStream arriving while an endpoint final is in
+// flight must deliver BOTH finals, in order, before the terminal Metadata.
+// (The race itself lived in the sidecar; this pins the proxy pass-through
+// ordering contract the fix relies on.)
+func TestDeepgramCloseStreamMidEndpointFinal(t *testing.T) {
+	// Mock sidecar: on first audio, emit an endpoint final; on CloseStream,
+	// emit the remaining-segment final + done — mimicking the fixed
+	// sidecar's serialized behavior.
+	app := fiber.New()
+	app.Use("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/stream", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
+		_ = c.WriteJSON(fiber.Map{"type": "ready"})
+		audioSeen := false
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt == websocket.BinaryMessage {
+				if audioSeen {
+					continue
+				}
+				audioSeen = true
+				_ = c.WriteJSON(fiber.Map{
+					"type": "final", "text": "first segment", "start": 0.0, "end": 2.0,
+					"words": []any{}, "is_final": true, "speech_final": true, "from_finalize": false,
+				})
+				continue
+			}
+			var ctrl map[string]any
+			if json.Unmarshal(msg, &ctrl) != nil {
+				continue
+			}
+			if typ, _ := ctrl["type"].(string); typ == "CloseStream" {
+				_ = c.WriteJSON(fiber.Map{
+					"type": "final", "text": "second segment", "start": 2.0, "end": 3.5,
+					"words": []any{}, "is_final": true, "speech_final": false, "from_finalize": false,
+				})
+				_ = c.WriteJSON(fiber.Map{"type": "done"})
+				return
+			}
+		}
+	}))
+	sidecarWS := startTestApp(t, app)
+
+	lm := captureLogManager()
+	handlerWS := startTestApp(t, deepgramTestApp(t, sidecarWS, pii.NewRedactor(nil, false, nil, 0), lm))
+
+	conn, _, err := ws.DefaultDialer.Dial(handlerWS+"/v1/listen", nil)
+	if err != nil {
+		t.Fatalf("dial handler: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var meta map[string]any
+	if err := conn.ReadJSON(&meta); err != nil {
+		t.Fatalf("read Metadata: %v", err)
+	}
+	if err := conn.WriteMessage(ws.BinaryMessage, make([]byte, 3200)); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	// CloseStream immediately — before/while the endpoint final is being
+	// delivered.
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"type":"CloseStream"}`)); err != nil {
+		t.Fatalf("write CloseStream: %v", err)
+	}
+
+	var finals []map[string]any
+	sawTerminalMeta := false
+	for {
+		var ev map[string]any
+		if err := conn.ReadJSON(&ev); err != nil {
+			break
+		}
+		switch ev["type"] {
+		case "Results":
+			if ev["is_final"] == true {
+				finals = append(finals, ev)
+			}
+		case "Metadata":
+			sawTerminalMeta = true
+		}
+	}
+
+	if len(finals) != 2 {
+		t.Fatalf("received %d finals, want 2 (endpoint final + closing final must BOTH arrive)", len(finals))
+	}
+	ch0, _ := finals[0]["channel"].(map[string]any)
+	alts0, _ := ch0["alternatives"].([]any)
+	alt0, _ := alts0[0].(map[string]any)
+	if alt0["transcript"] != "first segment" {
+		t.Errorf("finals[0] transcript = %v, want %q (order must be preserved)", alt0["transcript"], "first segment")
+	}
+	if finals[0]["speech_final"] != true {
+		t.Errorf("endpoint final speech_final = %v, want true", finals[0]["speech_final"])
+	}
+	ch1, _ := finals[1]["channel"].(map[string]any)
+	alts1, _ := ch1["alternatives"].([]any)
+	alt1, _ := alts1[0].(map[string]any)
+	if alt1["transcript"] != "second segment" {
+		t.Errorf("finals[1] transcript = %v, want %q", alt1["transcript"], "second segment")
+	}
+	if finals[1]["speech_final"] != false {
+		t.Errorf("close-forced final speech_final = %v, want false (Deepgram parity)", finals[1]["speech_final"])
+	}
+	if !sawTerminalMeta {
+		t.Error("terminal Metadata never received after CloseStream")
+	}
+}

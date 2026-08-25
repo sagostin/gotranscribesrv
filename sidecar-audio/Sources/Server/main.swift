@@ -45,7 +45,7 @@ if itn.isNativeAvailable {
 }
 
 // Register routes
-healthRoutes(app, engines: engines)
+healthRoutes(app, engines: engines, build: BuildInfo.load())
 transcribeRoutes(app, engines: engines)
 streamRoutes(app, engines: engines)
 realtimeStreamRoutes(app, engines: engines)
