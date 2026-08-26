@@ -45,6 +45,13 @@ func (lm *LogManager) LoadTemplates() {
 		"DeepgramRealtimeForwardFailed":   "Deepgram-realtime failed to forward audio to sidecar: %v",
 		"DeepgramRealtimePartialSent":     "Deepgram-realtime partial result sent",
 		"DeepgramRealtimeFinalSent":       "Deepgram-realtime final result sent",
+
+		// ── OpenAI-compatible realtime ASR ──────────────────────
+		// Transcript fields on *_SENT events are PII-redacted before
+		// the event is built — never log raw sidecar text.
+		"OpenAIRealtimePartialSent":       "OpenAI-realtime partial result sent",
+		"OpenAIRealtimeFinalSent":         "OpenAI-realtime final result sent",
+		"OpenAIRealtimeS2STranscriptSent": "OpenAI-realtime S2S user transcript sent",
 		// Pre-recorded (REST) — POST /v1/listen
 		"DeepgramPreRecordedReceived":  "Deepgram prerecorded request received",
 		"DeepgramPreRecordedCompleted": "Deepgram prerecorded transcription completed",

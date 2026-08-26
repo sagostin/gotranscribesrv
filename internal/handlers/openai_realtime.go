@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
 )
@@ -53,14 +55,15 @@ import (
 //
 // Any `model` containing "unified", "nemotron", or "eou-" passes through.
 type OpenAIRealtimeHandler struct {
-	sc *sidecar.Client
-	lm *logging.LogManager
-	db *gorm.DB
+	sc       *sidecar.Client
+	redactor *pii.Redactor
+	lm       *logging.LogManager
+	db       *gorm.DB
 }
 
 // NewOpenAIRealtimeHandler constructs the handler.
-func NewOpenAIRealtimeHandler(sc *sidecar.Client, lm *logging.LogManager, db *gorm.DB) *OpenAIRealtimeHandler {
-	return &OpenAIRealtimeHandler{sc: sc, lm: lm, db: db}
+func NewOpenAIRealtimeHandler(sc *sidecar.Client, redactor *pii.Redactor, lm *logging.LogManager, db *gorm.DB) *OpenAIRealtimeHandler {
+	return &OpenAIRealtimeHandler{sc: sc, redactor: redactor, lm: lm, db: db}
 }
 
 // Upgrade returns the Fiber middleware that upgrades HTTP to WebSocket.
@@ -305,6 +308,17 @@ func (h *OpenAIRealtimeHandler) handleSidecarEvent(sess *realtimeSession, msg []
 		})
 	case "partial":
 		text, _ := ev["text"].(string)
+		// Redact transcript text before logging — the raw text goes to
+		// the client untouched, only the redacted form reaches Loki.
+		redactedPartial, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
+		if piiErr != nil {
+			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/v1/realtime",
+				"ip":         sess.ws.IP(),
+				"text_len":   len(text),
+				"request_id": sess.requestID,
+			}, piiErr))
+		}
 		h.sendJSON(sess.ws, fiber.Map{
 			"type":          "conversation.item.input_audio_transcription.delta",
 			"event_id":      "evt_" + strings.ReplaceAll(uuid.New().String(), "-", ""),
@@ -312,9 +326,32 @@ func (h *OpenAIRealtimeHandler) handleSidecarEvent(sess *realtimeSession, msg []
 			"content_index": 0,
 			"delta":         text,
 		})
+		// Response-sent event → Loki (redacted). Debug level due to volume.
+		partialFields := map[string]interface{}{
+			"endpoint":     "/v1/realtime",
+			"ip":           sess.ws.IP(),
+			"request_id":   sess.requestID,
+			"engine":       sess.engine,
+			"transcript":   logging.Redacted(redactedPartial),
+			"pii_redacted": len(piiItems),
+			"is_final":     false,
+		}
+		if len(piiItems) > 0 {
+			partialFields["pii_entity_types"] = piiEntityTypes(piiItems)
+		}
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_PARTIAL_SENT", "OpenAIRealtimePartialSent", slog.LevelDebug, partialFields))
 	case "final":
 		text, _ := ev["text"].(string)
 		sess.lastResultAt = time.Now()
+		redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
+		if piiErr != nil {
+			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/v1/realtime",
+				"ip":         sess.ws.IP(),
+				"text_len":   len(text),
+				"request_id": sess.requestID,
+			}, piiErr))
+		}
 		h.sendJSON(sess.ws, fiber.Map{
 			"type":          "conversation.item.input_audio_transcription.completed",
 			"event_id":      "evt_" + strings.ReplaceAll(uuid.New().String(), "-", ""),
@@ -322,6 +359,20 @@ func (h *OpenAIRealtimeHandler) handleSidecarEvent(sess *realtimeSession, msg []
 			"content_index": 0,
 			"transcript":    text,
 		})
+		// Response-sent event → Loki (redacted transcript).
+		finalFields := map[string]interface{}{
+			"endpoint":     "/v1/realtime",
+			"ip":           sess.ws.IP(),
+			"request_id":   sess.requestID,
+			"engine":       sess.engine,
+			"transcript":   logging.Redacted(redactedFinal),
+			"pii_redacted": len(piiItems),
+			"is_final":     true,
+		}
+		if len(piiItems) > 0 {
+			finalFields["pii_entity_types"] = piiEntityTypes(piiItems)
+		}
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_FINAL_SENT", "OpenAIRealtimeFinalSent", slog.LevelInfo, finalFields))
 	case "end_of_turn":
 		// OpenAI doesn't have a 1:1 mapping; surface as a low-volume
 		// generic event so clients can still observe turn boundaries.

@@ -212,7 +212,7 @@ func (h *WatsonHandler) Recognize(c *fiber.Ctx) error {
 		"diarized":      result.Diarized,
 		"num_speakers":  result.NumSpeakers,
 		"itn_applied":   result.ITNApplied,
-		"transcript":    redactedText,
+		"transcript":    logging.Redacted(redactedText),
 		"pii_redacted":  len(piiItems),
 		"request_id":    middleware.RequestIDFromCtx(c),
 	}
@@ -337,9 +337,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				return
 			}
 
-			// Text frames may be Watson control messages
+			// Text frames may be Watson control messages. Never log the
+			// raw frame — it can carry arbitrary client content.
 			if msgType == websocket.TextMessage {
-				slog.Info("[Watson] Received text from client", "text", string(msg), "request_id", requestID)
+				slog.Debug("[Watson] Received text frame from client", "bytes", len(msg), "request_id", requestID)
 				var ctrl map[string]interface{}
 				if json.Unmarshal(msg, &ctrl) == nil {
 					if action, ok := ctrl["action"].(string); ok {
@@ -409,11 +410,6 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				return
 			}
 
-			// Debug-level only — the raw message body contains transcript text
-			// (PII). At info level we surface only the parsed event type.
-			slog.Debug("[Watson] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]),
-				"request_id", requestID)
-
 			var evt sidecarStreamEvent
 			if json.Unmarshal(msg, &evt) != nil {
 				slog.Warn("[Watson] Non-JSON from sidecar, forwarding raw", "request_id", requestID)
@@ -423,6 +419,10 @@ func (h *WatsonHandler) handleStream(c *websocket.Conn) {
 				}
 				continue
 			}
+
+			// The raw message body contains transcript text (PII) — never
+			// log it. Surface only the parsed event type.
+			slog.Debug("[Watson] Sidecar event", "type", evt.Type, "request_id", requestID)
 
 			switch evt.Type {
 			case "partial":

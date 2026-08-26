@@ -366,7 +366,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 			}
 
 			if msgType == websocket.TextMessage {
-				slog.Info("[DG] Received text from client", "text", string(msg), "request_id", requestID)
+				// Never log the raw frame — client text frames can carry
+				// arbitrary content. Control messages are logged
+				// individually by handleControl.
+				slog.Debug("[DG] Received text frame from client", "bytes", len(msg), "request_id", requestID)
 			}
 
 			// Control messages: text frames per spec, plus binary frames
@@ -429,11 +432,10 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				return
 			}
 
-			// Debug-level only — the raw message body contains
-			// transcript text (PII). At info level we surface only
-			// the parsed event type, not the raw JSON.
-			slog.Debug("[DG] Received from sidecar", "msg", string(msg[:min(len(msg), 500)]), "request_id", requestID)
-
+			// The raw message body contains transcript text (PII) — never
+			// log it. The parsed event type is surfaced below instead;
+			// redacted transcript text is logged per-event in the
+			// partial/final branches.
 			var evt sidecarStreamEvent
 			if json.Unmarshal(msg, &evt) != nil {
 				slog.Warn("[DG] Non-JSON from sidecar, forwarding raw", "request_id", requestID)
@@ -445,6 +447,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 				continue
 			}
 
+			slog.Debug("[DG] Sidecar event", "type", evt.Type, "request_id", requestID)
 			switch evt.Type {
 			case "partial":
 				// Redact transcript text before logging — partials
@@ -475,7 +478,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					"endpoint":     "/v1/listen",
 					"ip":           c.IP(),
 					"request_id":   requestID,
-					"transcript":   redactedPartial,
+					"transcript":   logging.Redacted(redactedPartial),
 					"pii_redacted": len(piiItems),
 					"word_count":   len(evt.Words),
 					"duration":     dgEvt.Duration,
@@ -513,7 +516,7 @@ func (h *DeepgramHandler) handle(c *websocket.Conn) {
 					"endpoint":      "/v1/listen",
 					"ip":            c.IP(),
 					"request_id":    requestID,
-					"transcript":    redactedFinal,
+					"transcript":    logging.Redacted(redactedFinal),
 					"pii_redacted":  len(piiItems),
 					"word_count":    len(evt.Words),
 					"duration":      dgEvt.Duration,

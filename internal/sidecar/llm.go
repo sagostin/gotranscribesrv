@@ -164,9 +164,9 @@ func (c *Client) StreamChat(ctx context.Context, req ChatCompletionRequest, requ
 		return nil, fmt.Errorf("llm sidecar request failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 		resp.Body.Close()
-		return nil, fmt.Errorf("llm sidecar returned %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("llm sidecar returned %d: %s", resp.StatusCode, truncateForLog(string(errBody)))
 	}
 
 	ch := make(chan ChatStreamChunk, 64)

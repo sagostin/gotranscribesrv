@@ -242,3 +242,76 @@ func TestFormatTemplateUnknownFallsBack(t *testing.T) {
 		t.Errorf("expected fallback format, got %q", got)
 	}
 }
+
+// TestSendLogMasksPlainStringSensitiveFields verifies the central
+// redaction guard: a plain string under a sensitive key (transcript,
+// text, delta, prompt, content) is masked with UnsafeMaskSentinel at
+// SendLog time — fail-closed, so a call site that forgets to redact
+// can never leak raw content to stdout or Loki.
+func TestSendLogMasksPlainStringSensitiveFields(t *testing.T) {
+	lm := NewLogManager(nil, false)
+	defer lm.CloseLogManager()
+
+	for _, key := range []string{"transcript", "text", "delta", "prompt", "content", "Transcript"} {
+		log := lm.BuildLog("X", "GenericError", slog.LevelInfo, map[string]interface{}{
+			key: "Call John at 212-555-1234",
+		})
+		lm.SendLog(log)
+		if got := log.AdditionalData[key]; got != UnsafeMaskSentinel {
+			t.Errorf("key %q: got %v, want masked sentinel %q", key, got, UnsafeMaskSentinel)
+		}
+	}
+}
+
+// TestSendLogUnwrapsRedactedFields verifies that Redacted values pass
+// through the guard as plain strings (already redacted by the caller),
+// and that JSON output is identical to a plain string.
+func TestSendLogUnwrapsRedactedFields(t *testing.T) {
+	lm := NewLogManager(nil, false)
+	defer lm.CloseLogManager()
+
+	log := lm.BuildLog("X", "ASRCompleted", slog.LevelInfo, map[string]interface{}{
+		"transcript": Redacted("Call <PERSON> at <PHONE_NUMBER>"),
+	})
+	lm.SendLog(log)
+
+	got, ok := log.AdditionalData["transcript"].(string)
+	if !ok {
+		t.Fatalf("transcript not unwrapped to string: %T", log.AdditionalData["transcript"])
+	}
+	if got != "Call <PERSON> at <PHONE_NUMBER>" {
+		t.Errorf("redacted value altered: got %q", got)
+	}
+
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(log.String()), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ad := out["additional_data"].(map[string]interface{})
+	if ad["transcript"] != "Call <PERSON> at <PHONE_NUMBER>" {
+		t.Errorf("JSON output mismatch: %v", ad)
+	}
+}
+
+// TestSendLogLeavesNonSensitiveFieldsAlone verifies the guard does not
+// touch non-sensitive keys, non-string values, or nil AdditionalData.
+func TestSendLogLeavesNonSensitiveFieldsAlone(t *testing.T) {
+	lm := NewLogManager(nil, false)
+	defer lm.CloseLogManager()
+
+	log := lm.BuildLog("X", "GenericError", slog.LevelInfo, map[string]interface{}{
+		"filename":   "meeting.m4a",
+		"word_count": 42,
+		"engine":     "eou-320",
+	})
+	lm.SendLog(log)
+	if log.AdditionalData["filename"] != "meeting.m4a" {
+		t.Errorf("filename altered: %v", log.AdditionalData["filename"])
+	}
+	if log.AdditionalData["word_count"] != 42 {
+		t.Errorf("word_count altered: %v", log.AdditionalData["word_count"])
+	}
+
+	// nil AdditionalData must not panic.
+	lm.SendLog(lm.BuildLog("X", "GenericError", slog.LevelInfo, nil))
+}

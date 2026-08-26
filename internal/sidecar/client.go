@@ -16,6 +16,21 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 )
 
+// maxErrorBodyBytes caps how much of a sidecar error body is embedded
+// in returned error strings. Those errors are logged (stdout + Loki
+// *_FAILED events), so an unbounded body could flood logs or — worse —
+// echo request content into them.
+const maxErrorBodyBytes = 200
+
+// truncateForLog bounds a sidecar response body for inclusion in an
+// error string.
+func truncateForLog(body string) string {
+	if len(body) > maxErrorBodyBytes {
+		return body[:maxErrorBodyBytes] + "…(truncated)"
+	}
+	return body
+}
+
 // Client communicates with the audio inference sidecar.
 // Audio sidecar → ASR, VAD, diarization, TTS (CoreML/ANE, port 8101)
 // LLM sidecar   → chat, completions, embeddings, images (CoreML/ANE, port 8080)
@@ -212,8 +227,8 @@ func (c *Client) Transcribe(ctx context.Context, req TranscribeRequest) (*Transc
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("audio sidecar returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, fmt.Errorf("audio sidecar returned %d: %s", resp.StatusCode, truncateForLog(string(body)))
 	}
 
 	var result TranscribeResponse
@@ -259,8 +274,8 @@ func (c *Client) VAD(ctx context.Context, audio []byte, filename string) (*VadRe
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("audio sidecar VAD returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, fmt.Errorf("audio sidecar VAD returned %d: %s", resp.StatusCode, truncateForLog(string(body)))
 	}
 
 	var result VadResponse
@@ -293,13 +308,16 @@ func (e *SidecarError) Error() string {
 // newSidecarError builds a SidecarError from a non-200 response body,
 // extracting Vapor's "reason" field when present.
 func newSidecarError(statusCode int, body []byte) *SidecarError {
-	reason := strings.TrimSpace(string(body))
+	// Truncate only the raw fallback — parse the full body first so the
+	// Vapor "reason" extraction isn't broken by a truncated JSON payload.
+	raw := strings.TrimSpace(string(body))
+	reason := truncateForLog(raw)
 	var vaporErr struct {
 		Error  bool   `json:"error"`
 		Reason string `json:"reason"`
 	}
 	if json.Unmarshal(body, &vaporErr) == nil && vaporErr.Reason != "" {
-		reason = vaporErr.Reason
+		reason = truncateForLog(vaporErr.Reason)
 	}
 	return &SidecarError{StatusCode: statusCode, Reason: reason}
 }
@@ -334,7 +352,7 @@ func (c *Client) SynthesizeWithBackend(ctx context.Context, req SynthesizeReques
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 		return nil, "", "", newSidecarError(resp.StatusCode, errBody)
 	}
 
@@ -379,7 +397,7 @@ func (c *Client) SynthesizeStream(ctx context.Context, text, voice, requestID st
 		return nil, fmt.Errorf("sidecar streaming TTS request failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 		resp.Body.Close()
 		return nil, newSidecarError(resp.StatusCode, errBody)
 	}
@@ -421,8 +439,8 @@ func (c *Client) CloneVoice(ctx context.Context, audio []byte, filename string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, 0, fmt.Errorf("sidecar clone-voice returned %d: %s", resp.StatusCode, string(errBody))
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, 0, fmt.Errorf("sidecar clone-voice returned %d: %s", resp.StatusCode, truncateForLog(string(errBody)))
 	}
 
 	embedding, err := io.ReadAll(resp.Body)
@@ -488,8 +506,8 @@ func (c *Client) ListVoices() (*VoicesResponse, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, fmt.Errorf("sidecar returned %d: %s", resp.StatusCode, truncateForLog(string(body)))
 	}
 
 	var result VoicesResponse

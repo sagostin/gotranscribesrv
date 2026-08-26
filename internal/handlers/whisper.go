@@ -293,7 +293,7 @@ func (h *WhisperHandler) Transcriptions(c *fiber.Ctx) error {
 		"word_count":      len(result.Words),
 		"segment_count":   len(result.Segments),
 		"itn_applied":     result.ITNApplied,
-		"transcript":      redactedText,
+		"transcript":      logging.Redacted(redactedText),
 		"pii_redacted":    len(piiItems),
 		"request_id":      middleware.RequestIDFromCtx(c),
 	}

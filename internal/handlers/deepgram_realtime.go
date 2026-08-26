@@ -391,7 +391,7 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 			"ip":           sess.ws.IP(),
 			"request_id":   sess.requestID,
 			"engine":       sess.modelMeta.ModelInfo["name"],
-			"transcript":   redactedPartial,
+			"transcript":   logging.Redacted(redactedPartial),
 			"pii_redacted": len(piiItems),
 			"is_final":     false,
 		}
@@ -443,7 +443,7 @@ func (h *DeepgramRealtimeHandler) handleSidecarEvent(sess *dgRealtimeSession, ms
 			"ip":            sess.ws.IP(),
 			"request_id":    sess.requestID,
 			"engine":        sess.modelMeta.ModelInfo["name"],
-			"transcript":    redactedFinal,
+			"transcript":    logging.Redacted(redactedFinal),
 			"pii_redacted":  len(piiItems),
 			"is_final":      true,
 			"speech_final":  isSpeechFinal,

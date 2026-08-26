@@ -91,8 +91,8 @@ func (p *PresidioClient) Analyze(ctx context.Context, text string, entities []st
 	metrics.RecordSidecarLatency("presidio", "analyze", int(time.Since(start).Milliseconds()), err)
 
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("presidio returned %d: %s", resp.StatusCode, string(errBody))
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, fmt.Errorf("presidio returned %d: %s", resp.StatusCode, truncateForLog(string(errBody)))
 	}
 
 	var entitiesOut []PresidioEntity

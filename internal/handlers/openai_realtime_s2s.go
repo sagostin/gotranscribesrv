@@ -21,6 +21,7 @@ import (
 	"github.com/shaunagostinho/gotranscribesrv/internal/logging"
 	"github.com/shaunagostinho/gotranscribesrv/internal/metrics"
 	"github.com/shaunagostinho/gotranscribesrv/internal/middleware"
+	"github.com/shaunagostinho/gotranscribesrv/internal/pii"
 	"github.com/shaunagostinho/gotranscribesrv/internal/sidecar"
 	"gorm.io/gorm"
 )
@@ -48,15 +49,16 @@ import (
 // tool_calls are relayed to the client, which executes and returns a
 // function_call_output item, then response.create resumes the loop.
 type OpenAIRealtimeS2SHandler struct {
-	sc  *sidecar.Client
-	lm  *logging.LogManager
-	db  *gorm.DB
-	cfg *config.Config
+	sc       *sidecar.Client
+	redactor *pii.Redactor
+	lm       *logging.LogManager
+	db       *gorm.DB
+	cfg      *config.Config
 }
 
 // NewOpenAIRealtimeS2SHandler constructs the handler.
-func NewOpenAIRealtimeS2SHandler(sc *sidecar.Client, lm *logging.LogManager, db *gorm.DB, cfg *config.Config) *OpenAIRealtimeS2SHandler {
-	return &OpenAIRealtimeS2SHandler{sc: sc, lm: lm, db: db, cfg: cfg}
+func NewOpenAIRealtimeS2SHandler(sc *sidecar.Client, redactor *pii.Redactor, lm *logging.LogManager, db *gorm.DB, cfg *config.Config) *OpenAIRealtimeS2SHandler {
+	return &OpenAIRealtimeS2SHandler{sc: sc, redactor: redactor, lm: lm, db: db, cfg: cfg}
 }
 
 // IsS2SModel reports whether an OpenAI Realtime model name selects a
@@ -646,6 +648,31 @@ func (h *OpenAIRealtimeS2SHandler) handleSidecarEvent(sess *s2sSession, msg []by
 			"content_index": 0,
 			"transcript":    text,
 		})
+		// Response-sent event → Loki. Transcript is PII-redacted; the raw
+		// text above goes to the client untouched.
+		redactedFinal, piiItems, piiErr := h.redactor.RedactText(context.Background(), text)
+		if piiErr != nil {
+			h.lm.SendLog(h.lm.BuildLog("PII_REDACTOR_ERROR", "PIIRedactorError", slog.LevelWarn, map[string]interface{}{
+				"endpoint":   "/v1/realtime",
+				"ip":         sess.ws.IP(),
+				"text_len":   len(text),
+				"request_id": sess.requestID,
+			}, piiErr))
+		}
+		transcriptFields := map[string]interface{}{
+			"endpoint":     "/v1/realtime",
+			"ip":           sess.ws.IP(),
+			"request_id":   sess.requestID,
+			"engine":       sess.engine,
+			"transcript":   logging.Redacted(redactedFinal),
+			"pii_redacted": len(piiItems),
+			"is_final":     true,
+			"speech_final": speechFinal,
+		}
+		if len(piiItems) > 0 {
+			transcriptFields["pii_entity_types"] = piiEntityTypes(piiItems)
+		}
+		h.lm.SendLog(h.lm.BuildLog("OPENAI_REALTIME_S2S_TRANSCRIPT_SENT", "OpenAIRealtimeS2STranscriptSent", slog.LevelInfo, transcriptFields))
 		// Turn end (EOU or VAD speech_final) → LLM response, unless the
 		// client disabled turn detection or a response is already running.
 		if speechFinal && sess.turnDetection != "none" && strings.TrimSpace(text) != "" {

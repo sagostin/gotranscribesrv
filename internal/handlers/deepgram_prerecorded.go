@@ -241,7 +241,7 @@ func (h *DeepgramPreRecordedHandler) Listen(c *fiber.Ctx) error {
 		"diarized":     result.Diarized,
 		"num_speakers": result.NumSpeakers,
 		"word_count":   len(result.Words),
-		"transcript":   redactedText,
+		"transcript":   logging.Redacted(redactedText),
 		"pii_redacted": len(piiItems),
 	}
 	if len(piiItems) > 0 {

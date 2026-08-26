@@ -61,6 +61,24 @@ If the channel is full, a single `slog.Warn("log channel full, dropping log", ..
 | Aggregated 4xx/5xx | `REQUEST_FAILED` | endpoint, status, error_code, method, path, ip, user_agent, process_ms, user_id, api_key_id |
 | Failed auth | `AUTH_FAILED` | endpoint, method, auth_method (`jwt`/`api_key`/`basic`/`jwt_query`), reason (`expired`/`bad_signature`/`blacklisted`/`unknown_or_revoked`/etc.), ip, user_agent, request_id — **never logs the raw token/key** |
 | PII analyzer fault | `PII_REDACTOR_ERROR` | endpoint, text_len, request_id — emitted when Presidio is unreachable; the associated `*_COMPLETED` event has `transcript: "<REDACTED-ERROR>"` |
+| OpenAI realtime transcription (WS `/v1/realtime`) | `OPENAI_REALTIME_PARTIAL_SENT` / `OPENAI_REALTIME_FINAL_SENT` | request_id, engine, **transcript (PII-redacted)**, pii_redacted, pii_entity_types, is_final |
+| OpenAI realtime S2S user transcript | `OPENAI_REALTIME_S2S_TRANSCRIPT_SENT` | request_id, engine, **transcript (PII-redacted)**, pii_redacted, pii_entity_types, speech_final |
+
+### Central redaction guard
+
+`LogManager.SendLog` enforces the redaction boundary on **every** event, for both stdout and Loki. The sensitive field keys — `transcript`, `text`, `delta`, `prompt`, `content` (case-insensitive) — are guarded:
+
+- Values wrapped in `logging.Redacted(...)` (i.e. already passed through the PII redactor) are shipped as-is.
+- A **plain string** under a sensitive key is replaced with the literal `<REDACTED-UNSAFE>` sentinel before emission — fail-closed, so a call site that forgets to redact can never leak raw content into logs.
+- All other keys and non-string values pass through untouched.
+
+Operators can surface every event caught by the guard with:
+
+```logql
+{job="gotranscribesrv"} |~ "<REDACTED-UNSAFE>"
+```
+
+Direct `slog.*` calls bypass the LogManager by design; handlers must never pass raw transcript text to `slog` either (the raw sidecar frames and client text frames are logged as byte counts / parsed event types only).
 
 ### Labels vs fields
 

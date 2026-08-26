@@ -183,7 +183,7 @@ func (h *ASRHandler) TranscribeFile(c *fiber.Ctx) error {
 		"itn_applied":    result.ITNApplied,
 		"word_count":     len(result.Words),
 		"segment_count":  len(result.Segments),
-		"transcript":     redactedText,
+		"transcript":     logging.Redacted(redactedText),
 		"pii_redacted":   len(piiItems),
 		"request_id":     middleware.RequestIDFromCtx(c),
 	}

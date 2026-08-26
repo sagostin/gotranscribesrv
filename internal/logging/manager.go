@@ -35,6 +35,54 @@ type LogManager struct {
 	closed       atomic.Bool
 }
 
+// Redacted marks a string field as having already passed through the
+// PII redactor. SendLog's sanitizeFields pass converts it to a plain
+// string (so JSON output and downstream consumers see no difference);
+// a plain string under a sensitive key is masked instead — see
+// sanitizeFields for the full contract.
+type Redacted string
+
+// UnsafeMaskSentinel replaces plain-string values found under sensitive
+// field keys at SendLog time. Operators searching Loki for this literal
+// can surface every event where raw (possibly unredacted) content was
+// caught by the central guard.
+const UnsafeMaskSentinel = "<REDACTED-UNSAFE>"
+
+// sensitiveKeys are the AdditionalData keys (matched case-insensitively)
+// whose string values must be wrapped in Redacted before they may reach
+// stdout or Loki. Any plain string under one of these keys is masked
+// with UnsafeMaskSentinel by sanitizeFields.
+var sensitiveKeys = map[string]struct{}{
+	"transcript": {},
+	"text":       {},
+	"delta":      {},
+	"prompt":     {},
+	"content":    {},
+}
+
+// sanitizeFields enforces the redaction boundary on an event's
+// AdditionalData, in place:
+//
+//   - Redacted values are unwrapped to plain strings (they were already
+//     redacted by the caller; JSON output is unchanged).
+//   - Plain strings under a sensitive key are masked with
+//     UnsafeMaskSentinel — fail-closed, so a future call site that
+//     forgets to redact can never leak raw content into logs.
+//   - All other values pass through untouched.
+func sanitizeFields(fields map[string]interface{}) {
+	for key, value := range fields {
+		switch v := value.(type) {
+		case Redacted:
+			fields[key] = string(v)
+		case string:
+			lk := strings.ToLower(key)
+			if _, sensitive := sensitiveKeys[lk]; sensitive {
+				fields[key] = UnsafeMaskSentinel
+			}
+		}
+	}
+}
+
 // LoggingFormat is the wire-format of a single event. It serializes to
 // JSON for Loki and feeds slog.WithFields for local stdout.
 type LoggingFormat struct {
@@ -144,6 +192,11 @@ func (lm *LogManager) formatTemplate(templateName string, args ...interface{}) s
 // guarantees the request path is never stalled by Loki latency or
 // downtime.
 //
+// Before anything is emitted, AdditionalData is passed through
+// sanitizeFields: Redacted values are unwrapped, and plain strings
+// under sensitive keys (transcript/text/delta/prompt/content) are
+// masked with UnsafeMaskSentinel.
+//
 // After CloseLogManager the channel is closed; in-flight handlers
 // (e.g. hijacked WebSocket sessions that outlive the HTTP server
 // shutdown) may still call SendLog. Those logs are dropped, never
@@ -151,6 +204,11 @@ func (lm *LogManager) formatTemplate(templateName string, args ...interface{}) s
 func (lm *LogManager) SendLog(log *LoggingFormat) {
 	if lm.closed.Load() {
 		return
+	}
+	// Central redaction guard: enforce the sensitive-key boundary on
+	// both the stdout and Loki paths before anything is emitted.
+	if log.AdditionalData != nil {
+		sanitizeFields(log.AdditionalData)
 	}
 	if lm.printToLocal {
 		log.Print()
